@@ -108,7 +108,11 @@ HIGHLIGHT_JS = ("(function(s){try{var p=document.getElementById('__yshot_hl');if
     "z-index:2147483647;pointer-events:none;border-radius:3px;';"
     "h.style.top=r.top-3+'px';h.style.left=r.left-3+'px';"
     "h.style.width=r.width+6+'px';h.style.height=r.height+6+'px';"
-    "document.body.appendChild(h);}catch(x){}})(arguments[0]);")
+    "document.body.appendChild(h);"
+    "window.__yshot_scroll_rm=function(){var x=document.getElementById('__yshot_hl');if(x)x.remove();"
+    "window.removeEventListener('scroll',window.__yshot_scroll_rm,true);};"
+    "window.addEventListener('scroll',window.__yshot_scroll_rm,true);"
+    "}catch(x){}})(arguments[0]);")
 
 def build_auth_url(url, user, password):
     if not user: return url
@@ -128,8 +132,9 @@ def copy_image_to_clipboard(filepath):
         u.SetClipboardData(8, h); u.CloseClipboard(); return True
     except: return False
 
-STEP_TYPES = ["入力", "クリック", "待機", "スクショ", "見出し", "コメント"]
+STEP_TYPES = ["入力", "クリック", "選択", "待機", "スクショ", "見出し", "コメント"]
 STEP_ICONS = {"入力": ft.Icons.EDIT, "クリック": ft.Icons.MOUSE,
+              "選択": ft.Icons.ARROW_DROP_DOWN_CIRCLE,
               "待機": ft.Icons.HOURGLASS_BOTTOM, "スクショ": ft.Icons.CAMERA_ALT,
               "見出し": ft.Icons.TITLE, "コメント": ft.Icons.COMMENT}
 
@@ -146,6 +151,12 @@ def step_short(step):
     if t == "クリック":
         sel = step.get("selector","")
         return sel[:30]+"..." if len(sel) > 30 else sel
+    if t == "選択":
+        sel = step.get("selector","")
+        if len(sel) > 20: sel = sel[:17]+"..."
+        v = step.get("value","")
+        if len(v) > 15: v = v[:12]+"..."
+        return f"{sel} \u2190 [{v}]"
     if t == "待機": return f"{step.get('seconds','1.0')}秒"
     if t == "スクショ":
         m = step.get("mode","fullpage")
@@ -171,7 +182,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb):
         ba = config.get("basic_auth_user","").strip()
         base = build_auth_url(config["url"], ba, config.get("basic_auth_pass",""))
         if ba: log_cb("[INFO] Basic認証を設定")
-        outdir = config.get("output_dir", os.path.join(get_app_dir(), "screenshots")); os.makedirs(outdir, exist_ok=True)
+        outdir_base = config.get("output_dir", os.path.join(get_app_dir(), "screenshots"))
+        outdir = os.path.join(outdir_base, datetime.now().strftime("%Y%m%d%H%M%S"))
+        os.makedirs(outdir, exist_ok=True)
         clip = config.get("clipboard_copy") == "1"
         gss = 0
 
@@ -208,6 +221,17 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb):
                             WebDriverWait(driver,10).until(EC.element_to_be_clickable((By.CSS_SELECTOR,sel))).click()
                             log_cb(f"  S{si} クリック: {sel}")
                         except Exception as x: log_cb(f"  S{si} [WARN] クリック失敗: {x}")
+                    elif st == "選択":
+                        sel = step.get("selector","")
+                        sv = step.get("value","").replace("{パターン}",value).replace("{pattern}",value)
+                        try:
+                            from selenium.webdriver.support.ui import Select as SeleniumSelect
+                            el = WebDriverWait(driver,10).until(EC.presence_of_element_located((By.CSS_SELECTOR,sel)))
+                            dd = SeleniumSelect(el)
+                            try: dd.select_by_value(sv)
+                            except: dd.select_by_visible_text(sv)
+                            log_cb(f"  S{si} 選択: {sel} -> {sv}")
+                        except Exception as x: log_cb(f"  S{si} [WARN] 選択失敗: {x}")
                     elif st == "待機":
                         s = float(step.get("seconds","1.0")); time.sleep(s); log_cb(f"  S{si} 待機: {s}秒")
                     elif st == "スクショ":
@@ -244,17 +268,11 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb):
 # ===================================================================
 
 def get_app_dir():
-    """User data directory (config, tests, patterns, selectors).
-    When running as exe: directory where the exe lives.
-    When running as script: directory where y_shot.py lives."""
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
 def get_bundle_dir():
-    """Bundled resource directory (templates).
-    When running as exe: PyInstaller temp extraction dir.
-    When running as script: same as app dir."""
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
         return sys._MEIPASS
     return os.path.dirname(os.path.abspath(__file__))
@@ -279,8 +297,7 @@ def save_csv(path, patterns):
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_HEADER); w.writeheader(); w.writerows(patterns)
 def load_config():
-    import configparser; c = configparser.ConfigParser()
-    c.read(_data_path(CONFIG_FILE), encoding="utf-8")
+    import configparser; c = configparser.ConfigParser(); c.read(_data_path(CONFIG_FILE), encoding="utf-8")
     return dict(c["settings"]) if "settings" in c else {}
 def save_config(data):
     import configparser; c = configparser.ConfigParser()
@@ -289,26 +306,22 @@ def save_config(data):
 def load_tests():
     p = _data_path(TESTS_FILE)
     if not os.path.isfile(p): return []
-    with open(p, "r", encoding="utf-8") as f: return json.load(f)
+    with open(_data_path(TESTS_FILE), "r", encoding="utf-8") as f: return json.load(f)
 def save_tests(tests):
-    with open(_data_path(TESTS_FILE), "w", encoding="utf-8") as f:
-        json.dump(tests, f, ensure_ascii=False, indent=2)
+    with open(_data_path(TESTS_FILE), "w", encoding="utf-8") as f: json.dump(tests, f, ensure_ascii=False, indent=2)
 def load_pattern_sets():
     p = _data_path(PATTERNS_FILE)
     if not os.path.isfile(p): return {}
-    with open(p, "r", encoding="utf-8") as f: return json.load(f)
+    with open(_data_path(PATTERNS_FILE), "r", encoding="utf-8") as f: return json.load(f)
 def save_pattern_sets(ps):
-    with open(_data_path(PATTERNS_FILE), "w", encoding="utf-8") as f:
-        json.dump(ps, f, ensure_ascii=False, indent=2)
+    with open(_data_path(PATTERNS_FILE), "w", encoding="utf-8") as f: json.dump(ps, f, ensure_ascii=False, indent=2)
 def load_selector_bank():
     p = _data_path(SELECTOR_BANK_FILE)
     if not os.path.isfile(p): return {}
-    with open(p, "r", encoding="utf-8") as f: return json.load(f)
+    with open(_data_path(SELECTOR_BANK_FILE), "r", encoding="utf-8") as f: return json.load(f)
 def save_selector_bank(bank):
-    with open(_data_path(SELECTOR_BANK_FILE), "w", encoding="utf-8") as f:
-        json.dump(bank, f, ensure_ascii=False, indent=2)
+    with open(_data_path(SELECTOR_BANK_FILE), "w", encoding="utf-8") as f: json.dump(bank, f, ensure_ascii=False, indent=2)
 def get_templates_dir():
-    """Check bundle dir first (exe), then app dir (script)."""
     for d in [os.path.join(get_bundle_dir(), "templates"),
               os.path.join(get_app_dir(), "templates")]:
         if os.path.isdir(d): return d
@@ -320,7 +333,7 @@ def get_templates_dir():
 
 def main(page: ft.Page):
     page.title = f"{APP_NAME} - Web Screenshot Tool"
-    page.window.width = 1300; page.window.height = 900
+    page.window.width = 1500; page.window.height = 900
     page.theme_mode = ft.ThemeMode.LIGHT
     page.theme = ft.Theme(color_scheme_seed=ft.Colors.BLUE)
 
@@ -391,7 +404,13 @@ def main(page: ft.Page):
                                 color=ft.Colors.BLUE_800 if selected else ft.Colors.BLACK),
                         ft.Text(subtitle, size=10, color=ft.Colors.GREY_500),
                     ], spacing=2, expand=True),
+                    ft.IconButton(ft.Icons.PLAY_ARROW, icon_size=16, tooltip="このテストだけ実行",
+                                  icon_color=ft.Colors.GREEN_600,
+                                  on_click=lambda e, idx=i: run_single(idx)),
+                    ft.IconButton(ft.Icons.COPY, icon_size=16, tooltip="コピー",
+                                  on_click=lambda e, idx=i: copy_test(idx)),
                     ft.IconButton(ft.Icons.DELETE, icon_size=16, icon_color=ft.Colors.RED_400,
+                                  tooltip="削除",
                                   on_click=lambda e, idx=i: del_test(idx)),
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 bgcolor=ft.Colors.BLUE_50 if selected else None,
@@ -410,6 +429,15 @@ def main(page: ft.Page):
         state["tests"].append({"name": f"テスト{len(state['tests'])+1}", "pattern": None, "steps": []})
         state["selected_test"] = len(state["tests"]) - 1
         refresh_test_list(); refresh_steps()
+
+    def copy_test(idx):
+        if 0 <= idx < len(state["tests"]):
+            import copy
+            tc = copy.deepcopy(state["tests"][idx])
+            tc["name"] = tc["name"] + " (コピー)"
+            state["tests"].insert(idx + 1, tc)
+            state["selected_test"] = idx + 1
+            refresh_test_list(); refresh_steps()
 
     def del_test(idx):
         if 0 <= idx < len(state["tests"]):
@@ -523,8 +551,23 @@ def main(page: ft.Page):
         sel_field = ft.Dropdown(label="セレクタ", width=450, value=init.get("selector",""),
             options=[ft.dropdown.Option(s) for s in all_sels], editable=True) if all_sels else \
             ft.TextField(label="セレクタ", width=450, value=init.get("selector",""))
-        val_field = ft.TextField(label="値 ({パターン} で代入)", width=450, value=init.get("value","{パターン}"),
-            multiline=True, min_lines=2, max_lines=4)
+        # 値: パターンセットから選ぶ or 手入力
+        init_val = init.get("value","")
+        pat_names = pat_set_names()
+        val_mode_opts = [ft.dropdown.Option("手入力")] + [ft.dropdown.Option(f"パターン: {n}") for n in pat_names]
+        # 初期値判定: {パターン}なら対応するパターンセットを選択
+        init_val_mode = "手入力"
+        if init_val == "{パターン}" and tc.get("pattern"):
+            init_val_mode = f"パターン: {tc['pattern']}"
+        elif init_val == "{パターン}" and pat_names:
+            init_val_mode = f"パターン: {pat_names[0]}"
+        elif init_val == "{パターン}":
+            init_val_mode = "手入力"
+        val_mode = ft.Dropdown(label="値の指定方法", width=450, value=init_val_mode, options=val_mode_opts)
+        val_field = ft.TextField(label="値 (固定値を直接入力)", width=450,
+            value="" if init_val == "{パターン}" else init_val,
+            multiline=True, min_lines=2, max_lines=4,
+            visible=(init_val_mode == "手入力"))
         sec_field = ft.TextField(label="秒数", width=120, value=init.get("seconds","1.0"))
         mode_dd = ft.Dropdown(label="スクショ範囲", width=180, value=init.get("mode","fullpage"),
             options=[ft.dropdown.Option(m) for m in ["fullpage","element","margin"]])
@@ -532,19 +575,27 @@ def main(page: ft.Page):
         text_f = ft.TextField(label="テキスト", width=450, value=init.get("text",""), multiline=True, min_lines=1, max_lines=3)
         def upd(e=None):
             t = type_dd.value
-            sel_field.visible = t in ("入力","クリック") or (t=="スクショ" and mode_dd.value in ("element","margin"))
-            val_field.visible = (t=="入力"); sec_field.visible = (t=="待機"); mode_dd.visible = (t=="スクショ")
+            sel_field.visible = t in ("入力","クリック","選択") or (t=="スクショ" and mode_dd.value in ("element","margin"))
+            val_mode.visible = t in ("入力","選択")
+            val_field.visible = t in ("入力","選択") and val_mode.value == "手入力"
+            sec_field.visible = (t=="待機"); mode_dd.visible = (t=="スクショ")
             margin_f.visible = (t=="スクショ" and mode_dd.value=="margin"); text_f.visible = t in ("見出し","コメント")
+            if t == "選択": val_mode.label = "選択肢の指定方法"
+            else: val_mode.label = "値の指定方法"
             page.update()
-        type_dd.on_select = upd; mode_dd.on_select = upd
+        type_dd.on_select = upd; mode_dd.on_select = upd; val_mode.on_select = upd
         def on_ok(e):
             t = type_dd.value; step = {"type": t}
             if t in ("見出し","コメント"): step["text"] = text_f.value
-            elif t in ("入力","クリック"):
+            elif t in ("入力","クリック","選択"):
                 s = sel_field.value if hasattr(sel_field,'value') else ""
                 if not s: snack("セレクタを入力", ft.Colors.RED_600); return
                 step["selector"] = s
-                if t == "入力": step["value"] = val_field.value
+                if t in ("入力","選択"):
+                    if val_mode.value == "手入力":
+                        step["value"] = val_field.value
+                    else:
+                        step["value"] = "{パターン}"
             elif t == "待機":
                 try: step["seconds"] = str(float(sec_field.value))
                 except: snack("秒数を正しく", ft.Colors.RED_600); return
@@ -560,8 +611,8 @@ def main(page: ft.Page):
             else: tc["steps"].append(step)
             refresh_steps(); refresh_test_list(); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("ステップ編集" if idx is not None else "ステップ追加"),
-            content=ft.Column([type_dd, text_f, sel_field, val_field, sec_field, mode_dd, margin_f],
-                tight=True, spacing=10, scroll=ft.ScrollMode.AUTO, width=500, height=400),
+            content=ft.Column([type_dd, text_f, sel_field, val_mode, val_field, sec_field, mode_dd, margin_f],
+                tight=True, spacing=10, scroll=ft.ScrollMode.AUTO, width=500, height=420),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg); upd()
 
@@ -614,9 +665,13 @@ def main(page: ft.Page):
         else: snack("未保存URL", ft.Colors.ORANGE_600)
     def on_el_click(idx):
         state["selected_el"] = idx
+        for ri, row in enumerate(el_table.rows):
+            row.color = ft.Colors.BLUE_50 if ri == idx else None
         if idx < len(state["browser_elements"]) and state["browser_driver"]:
-            try: state["browser_driver"].execute_script(HIGHLIGHT_JS, state["browser_elements"][idx]["selector"])
+            sel = state["browser_elements"][idx]["selector"]
+            try: state["browser_driver"].execute_script(HIGHLIGHT_JS, sel)
             except: pass
+        page.update()
     def quick_add(stype):
         tc = cur_test()
         if not tc: snack("テストケースを選択", ft.Colors.ORANGE_600); return
@@ -809,16 +864,24 @@ def main(page: ft.Page):
             actions=[ft.TextButton("閉じる", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
-    def run_click(e):
+    def _do_run(test_cases_to_run):
         c = state["config"]
         if not c.get("url"): snack("URL未設定", ft.Colors.RED_600); return
-        if not state["tests"]: snack("テストケース0件", ft.Colors.RED_600); return
-        close_browser(); run_btn.disabled = True; progress.visible = True
-        nav_bar.selected_index = 0; switch_tab(0); page.update(); save_all()
+        if not test_cases_to_run: snack("テストケース0件", ft.Colors.RED_600); return
+        close_browser(); run_btn.disabled = True; run_single_btn.disabled = True
+        progress.visible = True; nav_bar.selected_index = 0; switch_tab(0); page.update(); save_all()
         def on_done():
-            run_btn.disabled = False; progress.visible = False; page.update()
-        page.run_thread(run_all_tests, dict(c), list(state["tests"]),
+            run_btn.disabled = False; run_single_btn.disabled = False
+            progress.visible = False; page.update()
+        page.run_thread(run_all_tests, dict(c), list(test_cases_to_run),
                         dict(state["pattern_sets"]), lambda m: log(m), on_done)
+
+    def run_click(e):
+        _do_run(state["tests"])
+
+    def run_single(idx):
+        if 0 <= idx < len(state["tests"]):
+            _do_run([state["tests"][idx]])
 
     def switch_tab(idx):
         tc_content.visible = (idx == 0); ps_content.visible = (idx == 1); page.update()
@@ -848,6 +911,8 @@ def main(page: ft.Page):
     pat_header = ft.Text("", weight=ft.FontWeight.BOLD, size=15)
 
     progress = ft.ProgressBar(visible=False)
+    run_single_btn = ft.Button("選択テスト実行", icon=ft.Icons.PLAY_ARROW, bgcolor=ft.Colors.GREEN_600,
+                               color=ft.Colors.WHITE, on_click=lambda e: run_single(state["selected_test"]), height=42)
     run_btn = ft.Button("全テスト実行", icon=ft.Icons.PLAY_ARROW, bgcolor=ft.Colors.BLUE_600,
                         color=ft.Colors.WHITE, on_click=run_click, height=42)
 
@@ -859,9 +924,7 @@ def main(page: ft.Page):
                     ft.IconButton(ft.Icons.ADD, tooltip="追加", icon_size=18, on_click=add_test)],
                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             test_list,
-        ], spacing=4), width=220, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
-
-        # Center: selected test steps
+        ], spacing=4), width=260, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
         ft.Column([
             ft.Container(ft.Column([
                 ft.Row([tc_header, ft.IconButton(ft.Icons.EDIT, icon_size=16, tooltip="テスト設定", on_click=edit_test_name)],
@@ -889,11 +952,11 @@ def main(page: ft.Page):
                    spacing=4, wrap=True),
             el_status,
             ft.Container(ft.Column([el_table], scroll=ft.ScrollMode.AUTO),
-                height=240, border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4),
+                expand=True, border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4),
             ft.Row([ft.Button("入力", icon=ft.Icons.EDIT, on_click=lambda e: quick_add("入力")),
                     ft.Button("クリック", icon=ft.Icons.MOUSE, on_click=lambda e: quick_add("クリック")),
                     ft.Button("フォーム値", icon=ft.Icons.SAVE, on_click=capture_form)], spacing=4),
-        ], spacing=4), width=340, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
+        ], spacing=4), width=500, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
     ], spacing=8, expand=True, vertical_alignment=ft.CrossAxisAlignment.START)
 
     # ── Layout: Tab 2 (Pattern Sets) ──
@@ -930,11 +993,18 @@ def main(page: ft.Page):
                  ft.IconButton(ft.Icons.INFO_OUTLINE, tooltip="情報", on_click=show_info)])
 
     page.add(ft.Column([ft.Stack([tc_content, ps_content], expand=True),
-        progress, ft.Row([run_btn], alignment=ft.MainAxisAlignment.END)], expand=True, spacing=4))
+        progress, ft.Row([run_single_btn, run_btn], alignment=ft.MainAxisAlignment.END, spacing=8)], expand=True, spacing=4))
     page.navigation_bar = nav_bar
 
     refresh_test_list(); refresh_steps(); refresh_pat_set_list(); refresh_pats()
-    page.on_close = lambda e: (save_all(), close_browser())
+    def on_window_event(e):
+        if e.data == "close":
+            save_all()
+            close_browser()
+            page.window.destroy()
+            os._exit(0)
+
+    page.window.on_event = on_window_event
 
 if __name__ == "__main__":
     ft.run(main)

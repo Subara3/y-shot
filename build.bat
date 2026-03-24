@@ -1,8 +1,7 @@
 @echo off
 REM y-shot exe build
-REM templates/ フォルダをexeに同梱します
-flet pack y_shot.py --name y-shot --add-data "templates;templates"
+REM 初回のみ: pip install pyinstaller
+py -m PyInstaller --onefile --name y-shot --add-data "templates;templates" --collect-all flet --collect-all flet_desktop --collect-all selenium y_shot.py
 echo.
 echo ビルド完了: dist\y-shot.exe
-echo templates/ フォルダはexeに同梱されています
 pause

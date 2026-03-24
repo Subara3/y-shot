@@ -1,0 +1,7 @@
+[settings]
+url = 
+output_dir = ./screenshots
+basic_auth_user = 
+basic_auth_pass = 
+browser_url = 
+browser_wait = 3.0

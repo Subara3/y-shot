@@ -280,8 +280,9 @@ def _generate_excel_report(outdir, log_cb):
     except Exception as x:
         log_cb(f"[WARN] Excel生成失敗: {x}")
 
-def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=None):
-    """Run all enabled test cases sequentially. stop_event: threading.Event to abort."""
+def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=None, progress_cb=None):
+    """Run all enabled test cases sequentially. stop_event: threading.Event to abort.
+    progress_cb(current, total): optional progress callback."""
     try:
         from selenium import webdriver
         from selenium.webdriver.common.by import By
@@ -304,6 +305,12 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         os.makedirs(outdir, exist_ok=True)
         clip = config.get("clipboard_copy") == "1"
         gss = 0
+        # Calculate total patterns for progress
+        total_pats = 0
+        for tc in test_cases:
+            pn = tc.get("pattern")
+            total_pats += len(pattern_sets.get(pn, [])) if pn else 1
+        done_pats = 0
 
         for tc_idx, tc in enumerate(test_cases, 1):
             if stop_event and stop_event.is_set():
@@ -388,6 +395,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             log_cb(f"  S{si} スクショ: {fn}")
                             if clip: copy_image_to_clipboard(fp)
                         except Exception as x: log_cb(f"  S{si} [WARN] スクショ失敗: {x}")
+                done_pats += 1
+                if progress_cb and total_pats > 0:
+                    progress_cb(done_pats, total_pats)
 
         if stop_event and stop_event.is_set():
             log_cb(f"\n[中断完了] -> {outdir}")
@@ -489,6 +499,20 @@ def main(page: ft.Page):
     cfg = state["config"]
 
     # ── Helpers ──
+    _init_done = [False]
+    _save_timer = [None]
+    def schedule_save():
+        """Debounced auto-save (2 seconds after last change)."""
+        if not _init_done[0]: return
+        if _save_timer[0]:
+            _save_timer[0].cancel()
+        def do_save():
+            try: save_all()
+            except Exception: pass
+        _save_timer[0] = threading.Timer(2.0, do_save)
+        _save_timer[0].daemon = True
+        _save_timer[0].start()
+
     def log(msg):
         log_list.controls.append(ft.Text(msg, size=11, selectable=True, font_family="Consolas"))
         if len(log_list.controls) > 400: log_list.controls.pop(0)
@@ -530,6 +554,13 @@ def main(page: ft.Page):
 
     def refresh_test_list(update=True):
         test_list.controls.clear()
+        if not state["tests"]:
+            test_list.controls.append(ft.Container(
+                ft.Column([
+                    ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE, size=32, color=ft.Colors.GREY_400),
+                    ft.Text("＋ボタンでテストケースを追加", size=12, color=ft.Colors.GREY_500, text_align=ft.TextAlign.CENTER),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
+                padding=ft.Padding(20, 40, 20, 20), key="empty"))
         for i, tc in enumerate(state["tests"]):
             selected = (i == state["selected_test"])
             pat = tc.get("pattern","")
@@ -560,6 +591,12 @@ def main(page: ft.Page):
                 on_click=lambda e, idx=i: select_test(idx),
                 key=f"tc_{i}",
             ))
+        # Update run button state based on URL config
+        has_url = bool(state["config"].get("url","").strip())
+        has_tests = len(state["tests"]) > 0
+        run_btn.disabled = not (has_url and has_tests)
+        run_single_btn.disabled = not (has_url and has_tests)
+        schedule_save()
         if update: page.update()
 
     def on_test_reorder(e):
@@ -635,6 +672,15 @@ def main(page: ft.Page):
         pat = tc.get("pattern")
         tc_pattern_label.value = f"パターン: {pat} ({len(state['pattern_sets'].get(pat,[]))}件)" if pat else "パターン: なし (1回実行)"
 
+        if not tc.get("steps"):
+            step_reorder.controls.append(ft.Container(
+                ft.Column([
+                    ft.Icon(ft.Icons.TOUCH_APP, size=28, color=ft.Colors.GREY_400),
+                    ft.Text("要素ブラウザからクイック追加\nまたは＋ボタンでステップ追加", size=11,
+                            color=ft.Colors.GREY_500, text_align=ft.TextAlign.CENTER),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=6),
+                padding=ft.Padding(20, 30, 20, 20), key="empty_steps"))
+
         collapsed = state["collapsed"]
         hidden = False
         for i, s in enumerate(tc.get("steps",[])):
@@ -672,6 +718,7 @@ def main(page: ft.Page):
                     ft.IconButton(ft.Icons.DELETE, icon_size=14, on_click=lambda e, idx=i: del_step(idx)),
                 ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                     padding=ft.Padding(8,2,8,2), key=key, height=30))
+        schedule_save()
         if update: page.update()
 
     def on_reorder(e):
@@ -872,6 +919,13 @@ def main(page: ft.Page):
 
     def refresh_pat_set_list(update=True):
         pat_set_list.controls.clear()
+        if not state["pattern_sets"]:
+            pat_set_list.controls.append(ft.Container(
+                ft.Column([
+                    ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE, size=28, color=ft.Colors.GREY_400),
+                    ft.Text("＋ボタンでパターンセットを追加", size=11, color=ft.Colors.GREY_500, text_align=ft.TextAlign.CENTER),
+                ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=6),
+                padding=ft.Padding(16, 30, 16, 16)))
         for name in sorted(state["pattern_sets"].keys()):
             pats = state["pattern_sets"][name]
             selected = (state["selected_pat_set"] == name)
@@ -892,6 +946,7 @@ def main(page: ft.Page):
                 border=ft.Border.all(2, ft.Colors.BLUE_300) if selected else ft.Border.all(1, ft.Colors.GREY_200),
                 on_click=lambda e, n=name: select_pat_set(n),
             ))
+        schedule_save()
         if update: page.update()
 
     def select_pat_set(name):
@@ -963,6 +1018,7 @@ def main(page: ft.Page):
                               on_click=lambda e, idx=i: del_pat(idx)),
             ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
                 padding=ft.Padding(10, 6, 6, 6), border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4))
+        schedule_save()
         if update: page.update()
 
     def add_pat(e):
@@ -1070,7 +1126,8 @@ def main(page: ft.Page):
                 "basic_auth_pass":apf.value,"output_dir":of.value,
                 "clipboard_copy":"1" if cc.value else "0",
                 "headless":"1" if hl.value else "0"})
-            save_config(state["config"]); snack("設定保存"); close_dlg(dlg)
+            save_config(state["config"]); snack("設定保存")
+            refresh_test_list(False); page.update(); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("設定"),
             content=ft.Column([uf, ft.Row([auf, apf], spacing=10), of, cc, hl], tight=True, spacing=12, width=500),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
@@ -1093,17 +1150,25 @@ def main(page: ft.Page):
         state["stop_event"] = stop_ev
         run_btn.disabled = True; run_single_btn.disabled = True
         stop_btn.visible = True; stop_btn.disabled = False
-        progress.visible = True; nav_bar.selected_index = 0; switch_tab(0); page.update(); save_all()
+        open_folder_btn.visible = False
+        progress.visible = True; progress.value = 0
+        progress_label.visible = True; progress_label.value = ""
+        nav_bar.selected_index = 0; switch_tab(0); page.update(); save_all()
+        def on_progress(current, total):
+            progress.value = current / total if total > 0 else None
+            progress_label.value = f"{current}/{total} パターン"
+            page.update()
         def on_done(outdir=None):
             run_btn.disabled = False; run_single_btn.disabled = False
             stop_btn.visible = False; progress.visible = False
+            progress_label.visible = False
             state["stop_event"] = None
             if outdir and os.path.isdir(outdir):
                 open_folder_btn.data = outdir
                 open_folder_btn.visible = True
             page.update()
         page.run_thread(run_all_tests, dict(c), list(test_cases_to_run),
-                        dict(state["pattern_sets"]), lambda m: log(m), on_done, stop_ev)
+                        dict(state["pattern_sets"]), lambda m: log(m), on_done, stop_ev, on_progress)
 
     def run_click(e):
         _do_run(state["tests"])
@@ -1126,7 +1191,7 @@ def main(page: ft.Page):
 
     # ── Build controls ──
     browser_url = ft.TextField(label="URL", expand=True, dense=True, value=cfg.get("browser_url",""))
-    browser_url_dd = ft.Dropdown(label="履歴", width=200, dense=True,
+    browser_url_dd = ft.Dropdown(label="履歴から", width=200, dense=True,
         options=[ft.dropdown.Option(u) for u in state["selector_bank"].keys()], on_select=on_url_dd_sel)
     browser_wait = ft.TextField(label="秒", width=55, dense=True, value=cfg.get("browser_wait","3.0"))
     load_btn = ft.Button("読込", icon=ft.Icons.REFRESH, on_click=load_page_click)
@@ -1140,6 +1205,14 @@ def main(page: ft.Page):
     test_list = ft.ReorderableListView(controls=[], on_reorder=on_test_reorder, spacing=4, expand=True)
     step_reorder = ft.ReorderableListView(controls=[], on_reorder=on_reorder, spacing=1, expand=True)
     log_list = ft.ListView(spacing=1, auto_scroll=True, height=130)
+    _log_expanded = [False]
+    def toggle_log(e):
+        _log_expanded[0] = not _log_expanded[0]
+        log_list.height = 350 if _log_expanded[0] else 130
+        log_toggle_btn.icon = ft.Icons.EXPAND_LESS if _log_expanded[0] else ft.Icons.EXPAND_MORE
+        log_toggle_btn.tooltip = "ログを縮小" if _log_expanded[0] else "ログを拡大"
+        page.update()
+    log_toggle_btn = ft.IconButton(ft.Icons.EXPAND_MORE, icon_size=16, tooltip="ログを拡大", on_click=toggle_log)
     tc_header = ft.Text("", weight=ft.FontWeight.BOLD, size=15)
     tc_pattern_label = ft.Text("", size=11, color=ft.Colors.GREY_600)
 
@@ -1147,7 +1220,8 @@ def main(page: ft.Page):
     pat_items = ft.ListView(spacing=3, expand=True)
     pat_header = ft.Text("", weight=ft.FontWeight.BOLD, size=15)
 
-    progress = ft.ProgressBar(visible=False)
+    progress = ft.ProgressBar(visible=False, value=0)
+    progress_label = ft.Text("", size=11, color=ft.Colors.GREY_600, visible=False)
     run_single_btn = ft.Button("選択テスト実行", icon=ft.Icons.PLAY_ARROW, bgcolor=ft.Colors.GREEN_600,
                                color=ft.Colors.WHITE, on_click=lambda e: run_single(state["selected_test"]), height=42)
     run_btn = ft.Button("全テスト実行", icon=ft.Icons.PLAY_ARROW, bgcolor=ft.Colors.BLUE_600,
@@ -1184,22 +1258,27 @@ def main(page: ft.Page):
                 ], spacing=0),
                 step_reorder,
             ], spacing=4), padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8, expand=True),
-            ft.Container(ft.Column([ft.Text("ログ", size=12, weight=ft.FontWeight.BOLD), log_list]),
+            ft.Container(ft.Column([
+                ft.Row([ft.Text("ログ", size=12, weight=ft.FontWeight.BOLD), log_toggle_btn],
+                       alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                log_list]),
                 padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
         ], expand=3, spacing=6),
         ft.Container(ft.Column([
             ft.Text("要素ブラウザ", weight=ft.FontWeight.BOLD, size=13),
             ft.Row([browser_url, browser_wait], spacing=4),
-            ft.Row([browser_url_dd, ft.OutlinedButton("バンク", on_click=load_bank)], spacing=4),
-            ft.Row([load_btn, ft.OutlinedButton("閉じる", on_click=close_br), ft.TextButton("設定URL", on_click=sync_url)],
+            ft.Row([browser_url_dd, ft.OutlinedButton("保存済みを読込", on_click=load_bank)], spacing=4),
+            ft.Row([load_btn, ft.OutlinedButton("閉じる", on_click=close_br),
+                    ft.TextButton("設定URLを使う", icon=ft.Icons.SYNC, on_click=sync_url)],
                    spacing=4, wrap=True),
             el_status,
             ft.Container(ft.Column([el_table], scroll=ft.ScrollMode.AUTO),
                 expand=True, border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4),
-            ft.Row([ft.Button("入力", icon=ft.Icons.EDIT, on_click=lambda e: quick_add("入力")),
-                    ft.Button("クリック", icon=ft.Icons.MOUSE, on_click=lambda e: quick_add("クリック")),
-                    ft.Button("選択", icon=ft.Icons.ARROW_DROP_DOWN_CIRCLE, on_click=lambda e: quick_add("選択")),
-                    ft.Button("フォーム値", icon=ft.Icons.SAVE, on_click=capture_form)], spacing=4),
+            ft.Text("ステップ追加:", size=10, color=ft.Colors.GREY_500),
+            ft.Row([ft.Button("入力追加", icon=ft.Icons.EDIT, tooltip="入力ステップを追加", on_click=lambda e: quick_add("入力")),
+                    ft.Button("クリック追加", icon=ft.Icons.MOUSE, tooltip="クリックステップを追加", on_click=lambda e: quick_add("クリック")),
+                    ft.Button("選択追加", icon=ft.Icons.ARROW_DROP_DOWN_CIRCLE, tooltip="選択ステップを追加", on_click=lambda e: quick_add("選択")),
+                    ft.Button("フォーム値取込", icon=ft.Icons.SAVE, tooltip="現在の入力値をステップに", on_click=capture_form)], spacing=4),
         ], spacing=4), width=500, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
     ], spacing=8, expand=True, vertical_alignment=ft.CrossAxisAlignment.START)
 
@@ -1235,13 +1314,16 @@ def main(page: ft.Page):
                  ft.IconButton(ft.Icons.INFO_OUTLINE, tooltip="情報", on_click=show_info)])
 
     page.add(ft.Column([ft.Stack([tc_content, ps_content], expand=True),
-        progress, ft.Row([open_folder_btn, stop_btn, run_single_btn, run_btn], alignment=ft.MainAxisAlignment.END, spacing=8)], expand=True, spacing=4))
+        ft.Row([progress, progress_label], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        ft.Row([open_folder_btn, stop_btn, run_single_btn, run_btn], alignment=ft.MainAxisAlignment.END, spacing=8)], expand=True, spacing=4))
     page.navigation_bar = nav_bar
 
     refresh_test_list(False); refresh_steps(False); refresh_pat_set_list(False); refresh_pats(False)
     page.update()
+    _init_done[0] = True
     def on_window_event(e):
         if e.data == "close":
+            if _save_timer[0]: _save_timer[0].cancel()
             save_all()
             close_browser()
             page.window.destroy()

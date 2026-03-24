@@ -90,7 +90,7 @@ def capture_form_values(driver):
             sel = _build_selector(driver, el, "select", el.get_attribute("id") or "", el.get_attribute("name") or "")
             if sel in seen: continue; seen.add(sel)
             val = el.get_attribute("value") or ""
-            if val: steps.append({"type": "入力", "selector": sel, "value": val})
+            if val: steps.append({"type": "選択", "selector": sel, "value": val})
         except: continue
     for css_q in ["input[type='radio']:checked", "input[type='checkbox']:checked"]:
         for el in driver.find_elements(By.CSS_SELECTOR, css_q):
@@ -596,6 +596,10 @@ def main(page: ft.Page):
                         step["value"] = val_field.value
                     else:
                         step["value"] = "{パターン}"
+                        # テストケースのpatternも自動連動
+                        pat_name = val_mode.value.replace("パターン: ", "", 1)
+                        if pat_name in state["pattern_sets"]:
+                            tc["pattern"] = pat_name
             elif t == "待機":
                 try: step["seconds"] = str(float(sec_field.value))
                 except: snack("秒数を正しく", ft.Colors.RED_600); return
@@ -677,13 +681,18 @@ def main(page: ft.Page):
         if not tc: snack("テストケースを選択", ft.Colors.ORANGE_600); return
         idx = state["selected_el"]
         if idx < 0 or idx >= len(state["browser_elements"]): snack("要素をクリック", ft.Colors.ORANGE_600); return
-        sel = state["browser_elements"][idx]["selector"]
-        step = {"type": stype, "selector": sel}
-        if stype == "入力": step["value"] = "{パターン}"
-        tc["steps"].append(step); refresh_steps(); refresh_test_list(); snack(f"{stype}: {sel}")
+        el_info = state["browser_elements"][idx]
+        sel = el_info["selector"]
+        # select要素は自動的に「選択」ステップにする
+        actual_type = stype
+        if stype == "入力" and el_info.get("tag") == "select":
+            actual_type = "選択"
+        step = {"type": actual_type, "selector": sel}
+        if actual_type in ("入力", "選択"): step["value"] = "{パターン}"
+        tc["steps"].append(step); refresh_steps(); refresh_test_list(); snack(f"{actual_type}: {sel}")
     def capture_form(e):
         tc = cur_test()
-        if not tc: return
+        if not tc: snack("テストケースを選択", ft.Colors.ORANGE_600); return
         if not state["browser_driver"]: snack("ページ読込必要", ft.Colors.ORANGE_600); return
         try:
             fs = capture_form_values(state["browser_driver"])
@@ -955,6 +964,7 @@ def main(page: ft.Page):
                 expand=True, border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4),
             ft.Row([ft.Button("入力", icon=ft.Icons.EDIT, on_click=lambda e: quick_add("入力")),
                     ft.Button("クリック", icon=ft.Icons.MOUSE, on_click=lambda e: quick_add("クリック")),
+                    ft.Button("選択", icon=ft.Icons.ARROW_DROP_DOWN_CIRCLE, on_click=lambda e: quick_add("選択")),
                     ft.Button("フォーム値", icon=ft.Icons.SAVE, on_click=capture_form)], spacing=4),
         ], spacing=4), width=500, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
     ], spacing=8, expand=True, vertical_alignment=ft.CrossAxisAlignment.START)

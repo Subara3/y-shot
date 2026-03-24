@@ -23,9 +23,10 @@ build/
 dist/
 *.spec
 
-# バイナリ / アーカイブ
+# バイナリ / アーカイブ / 出力
 *.exe
 *.zip
+*.xlsx
 
 # OS
 .DS_Store

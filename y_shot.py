@@ -23,7 +23,7 @@ def collect_elements_python(driver):
     css = ("input, textarea, select, button, a, [role='button'], [type='submit'], "
            "[type='image'], img[onclick], [onclick], li[id], span[id], div[onclick]")
     try: elements = driver.find_elements(By.CSS_SELECTOR, css)
-    except: return results
+    except Exception: return results
     for el in elements:
         try:
             if not el.is_displayed():
@@ -36,7 +36,7 @@ def collect_elements_python(driver):
             hint = (el.get_attribute("placeholder") or el.get_attribute("alt") or
                     (el.text or "").strip()[:50] or (el.get_attribute("value") or "")[:30])
             results.append({"selector": sel, "tag": tag, "type": etype, "name": ename, "id": eid, "hint": hint})
-        except: continue
+        except Exception: continue
     return results
 
 def _css_escape_attr(val):
@@ -62,14 +62,14 @@ def _build_selector(driver, el, tag, eid, ename):
         s = f'{tag}[name="{safe_name}"]'
         try:
             if len(driver.find_elements(By.CSS_SELECTOR, s)) == 1: return s
-        except: pass
+        except Exception: pass
     etype = el.get_attribute("type") or ""
     if etype and ename:
         safe_name = _css_escape_attr(ename)
         s = f'{tag}[type="{etype}"][name="{safe_name}"]'
         try:
             if len(driver.find_elements(By.CSS_SELECTOR, s)) == 1: return s
-        except: pass
+        except Exception: pass
     classes = (el.get_attribute("class") or "").strip()
     if classes:
         # Only use class names that are safe for CSS selectors (no colons, dots, etc.)
@@ -78,7 +78,7 @@ def _build_selector(driver, el, tag, eid, ename):
             cs = tag + "".join(f".{c}" for c in safe_classes[:2])
             try:
                 if len(driver.find_elements(By.CSS_SELECTOR, cs)) == 1: return cs
-            except: pass
+            except Exception: pass
     try:
         idx = driver.execute_script(
             "var e=arguments[0],p=e.parentElement;if(!p)return 0;"
@@ -115,7 +115,7 @@ def capture_form_values(driver):
             sel = _build_selector(driver, el, tag, el.get_attribute("id") or "", el.get_attribute("name") or "")
             if sel in seen: continue; seen.add(sel)
             steps.append({"type": "入力", "selector": sel, "value": val})
-        except: continue
+        except Exception: continue
     for el in driver.find_elements(By.CSS_SELECTOR, "select"):
         try:
             if not el.is_displayed(): continue
@@ -123,14 +123,14 @@ def capture_form_values(driver):
             if sel in seen: continue; seen.add(sel)
             val = el.get_attribute("value") or ""
             if val: steps.append({"type": "選択", "selector": sel, "value": val})
-        except: continue
+        except Exception: continue
     for css_q in ["input[type='radio']:checked", "input[type='checkbox']:checked"]:
         for el in driver.find_elements(By.CSS_SELECTOR, css_q):
             try:
                 sel = _build_selector(driver, el, "input", el.get_attribute("id") or "", el.get_attribute("name") or "")
                 if sel in seen: continue; seen.add(sel)
                 steps.append({"type": "クリック", "selector": sel})
-            except: continue
+            except Exception: continue
     return steps
 
 # Highlight JS: scroll to element, highlight, remove on USER scroll (not programmatic)
@@ -169,7 +169,7 @@ def copy_image_to_clipboard(filepath):
         h = k.GlobalAlloc(0x0042, len(bmp)); p = k.GlobalLock(h)
         ctypes.memmove(p, bmp, len(bmp)); k.GlobalUnlock(h)
         u.SetClipboardData(8, h); u.CloseClipboard(); return True
-    except: return False
+    except Exception: return False
 
 STEP_TYPES = ["入力", "クリック", "選択", "待機", "スクショ", "見出し", "コメント"]
 STEP_ICONS = {"入力": ft.Icons.EDIT, "クリック": ft.Icons.MOUSE,
@@ -273,7 +273,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             el = WebDriverWait(driver,10).until(EC.presence_of_element_located((By.CSS_SELECTOR,sel)))
                             dd = SeleniumSelect(el)
                             try: dd.select_by_value(sv)
-                            except: dd.select_by_visible_text(sv)
+                            except Exception: dd.select_by_visible_text(sv)
                             log_cb(f"  S{si} 選択: {sel} -> {sv}")
                         except Exception as x: log_cb(f"  S{si} [WARN] 選択失敗: {x}")
                     elif st == "待機":
@@ -418,7 +418,7 @@ def main(page: ft.Page):
     def close_browser():
         if state["browser_driver"]:
             try: state["browser_driver"].quit()
-            except: pass
+            except Exception: pass
             state["browser_driver"] = None
     def get_all_selectors():
         sels = set()
@@ -648,7 +648,7 @@ def main(page: ft.Page):
                             tc["pattern"] = pat_name
             elif t == "待機":
                 try: step["seconds"] = str(float(sec_field.value))
-                except: snack("秒数を正しく", ft.Colors.RED_600); return
+                except Exception: snack("秒数を正しく", ft.Colors.RED_600); return
             elif t == "スクショ":
                 step["mode"] = mode_dd.value
                 s = sel_field.value if hasattr(sel_field,'value') else ""
@@ -656,7 +656,7 @@ def main(page: ft.Page):
                 if s: step["selector"] = s
                 if mode_dd.value == "margin":
                     try: step["margin_px"] = str(int(margin_f.value))
-                    except: snack("整数で", ft.Colors.RED_600); return
+                    except Exception: snack("整数で", ft.Colors.RED_600); return
             if idx is not None: tc["steps"][idx] = step
             else: tc["steps"].append(step)
             refresh_steps(); refresh_test_list(); close_dlg(dlg)
@@ -681,7 +681,7 @@ def main(page: ft.Page):
             lu = build_auth_url(url, ba, state["config"].get("basic_auth_pass","")) if ba else url
             state["browser_driver"].get(lu)
             try: w = float(browser_wait.value)
-            except: w = 3.0
+            except Exception: w = 3.0
             time.sleep(w); log(f"[DEBUG] {state['browser_driver'].title}")
             elems = collect_elements_python(state["browser_driver"])
             state["browser_elements"] = list(elems)
@@ -720,7 +720,7 @@ def main(page: ft.Page):
         if idx < len(state["browser_elements"]) and state["browser_driver"]:
             sel = state["browser_elements"][idx]["selector"]
             try: state["browser_driver"].execute_script(HIGHLIGHT_JS, sel)
-            except: pass
+            except Exception: pass
         page.update()
     def quick_add(stype):
         tc = cur_test()

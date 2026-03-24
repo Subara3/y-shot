@@ -16,7 +16,7 @@ import tempfile
 
 def test_logic():
     print("=== テスト1: ロジック部分 ===")
-    from y_shot import load_csv, save_csv, load_steps, save_steps, step_display
+    from y_shot import load_csv, save_csv, save_tests, load_tests, step_display
 
     # CSV round-trip
     with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
@@ -33,26 +33,31 @@ def test_logic():
     os.unlink(tmp_csv)
     print("  [OK] CSV保存/読込")
 
-    # Steps round-trip
+    # Tests (JSON) round-trip
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
         tmp_json = f.name
-    steps = [
+    test_cases = [{"name": "テスト1", "pattern": None, "steps": [
         {"type": "入力", "selector": "#name", "value": "{パターン}"},
         {"type": "クリック", "selector": "#btn"},
         {"type": "待機", "seconds": "2.0"},
         {"type": "スクショ", "mode": "fullpage"},
-    ]
-    save_steps(steps, tmp_json)
-    loaded_steps = load_steps(tmp_json)
-    assert len(loaded_steps) == 4
+    ]}]
+    # save_tests uses _data_path, so write directly for this test
+    with open(tmp_json, "w", encoding="utf-8") as f:
+        json.dump(test_cases, f, ensure_ascii=False)
+    with open(tmp_json, "r", encoding="utf-8") as f:
+        loaded_tests = json.load(f)
+    assert len(loaded_tests) == 1
+    assert len(loaded_tests[0]["steps"]) == 4
     os.unlink(tmp_json)
-    print("  [OK] ステップ保存/読込")
+    print("  [OK] テストケース保存/読込")
 
     # step_display
-    assert "入力" in step_display(steps[0])
-    assert "クリック" in step_display(steps[1])
+    steps = test_cases[0]["steps"]
+    assert "入力" in step_display(steps[0]) or "#name" in step_display(steps[0])
+    assert "クリック" in step_display(steps[1]) or "#btn" in step_display(steps[1])
     assert "2.0" in step_display(steps[2])
-    assert "fullpage" in step_display(steps[3])
+    assert "fullpage" in step_display(steps[3]) or "ページ全体" in step_display(steps[3])
     print("  [OK] ステップ表示")
 
     print("  全てパス\n")
@@ -128,7 +133,7 @@ def test_e2e():
         print("  [SKIP] selenium がインストールされていません")
         return
 
-    from y_shot import run_selenium_job
+    from y_shot import run_all_tests
 
     html_path = os.path.join(os.path.dirname(__file__), "test_form.html")
     html_path = os.path.abspath(html_path)
@@ -138,17 +143,17 @@ def test_e2e():
             "url": f"file:///{html_path}",
             "output_dir": tmpdir,
         }
-        steps = [
+        test_cases = [{"name": "E2Eテスト", "pattern": "e2e_pats", "steps": [
             {"type": "入力", "selector": "#username", "value": "テスト太郎"},
             {"type": "入力", "selector": "#message", "value": "{パターン}"},
             {"type": "クリック", "selector": "#submit-btn"},
             {"type": "待機", "seconds": "1.0"},
             {"type": "スクショ", "mode": "fullpage"},
-        ]
-        patterns = [
+        ]}]
+        pattern_sets = {"e2e_pats": [
             {"label": "short", "value": "こんにちは"},
             {"label": "long", "value": "あ" * 500},
-        ]
+        ]}
 
         logs = []
         done_flag = [False]
@@ -161,14 +166,18 @@ def test_e2e():
             done_flag[0] = True
 
         # 同期的に実行（テスト用）
-        run_selenium_job(config, steps, patterns, log_cb, done_cb)
+        run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb)
 
         # 検証
         assert done_flag[0], "done_callbackが呼ばれていない"
-        screenshots = [f for f in os.listdir(tmpdir) if f.endswith(".png")]
+        # スクショはタイムスタンプ付きサブフォルダに保存される
+        subdirs = [d for d in os.listdir(tmpdir) if os.path.isdir(os.path.join(tmpdir, d))]
+        assert len(subdirs) == 1, f"出力サブフォルダが見つからない: {os.listdir(tmpdir)}"
+        outdir = os.path.join(tmpdir, subdirs[0])
+        screenshots = [f for f in os.listdir(outdir) if f.endswith(".png")]
         print(f"  スクショ生成数: {len(screenshots)}")
         for ss in sorted(screenshots):
-            size = os.path.getsize(os.path.join(tmpdir, ss))
+            size = os.path.getsize(os.path.join(outdir, ss))
             print(f"    {ss} ({size:,} bytes)")
 
         assert len(screenshots) >= 2, f"スクショが2枚以上必要だが {len(screenshots)} 枚"

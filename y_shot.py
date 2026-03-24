@@ -233,6 +233,53 @@ def _generate_report(outdir, log_cb):
     except Exception as x:
         log_cb(f"[WARN] レポート生成失敗: {x}")
 
+def _generate_excel_report(outdir, log_cb):
+    """Generate an Excel report with screenshots arranged vertically."""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.drawing.image import Image as XlImage
+        from openpyxl.utils.units import pixels_to_EMU
+        from PIL import Image as PILImage
+    except ImportError:
+        log_cb("[WARN] Excel出力には openpyxl と Pillow が必要です")
+        return
+    try:
+        pngs = sorted([f for f in os.listdir(outdir) if f.lower().endswith(".png")])
+        if not pngs: return
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "エビデンス"
+        # Column A for labels, B+ for images — use wide column B
+        ws.column_dimensions["A"].width = 60
+        ws.column_dimensions["B"].width = 5
+        MAX_IMG_WIDTH = 800  # pixels — fits well in Excel
+        current_row = 1
+        for fn in pngs:
+            fp = os.path.join(outdir, fn)
+            # Label row
+            cell = ws.cell(row=current_row, column=1, value=fn)
+            cell.font = cell.font.copy(bold=True, size=11)
+            ws.row_dimensions[current_row].height = 20
+            current_row += 1
+            # Image
+            pil_img = PILImage.open(fp)
+            orig_w, orig_h = pil_img.size
+            scale = min(1.0, MAX_IMG_WIDTH / orig_w) if orig_w > 0 else 1.0
+            disp_w = int(orig_w * scale)
+            disp_h = int(orig_h * scale)
+            xl_img = XlImage(fp)
+            xl_img.width = disp_w
+            xl_img.height = disp_h
+            ws.add_image(xl_img, f"A{current_row}")
+            # Reserve rows for the image (approx 15px per row in Excel)
+            rows_needed = max(1, disp_h // 15 + 2)
+            current_row += rows_needed
+        xp = os.path.join(outdir, "evidence.xlsx")
+        wb.save(xp)
+        log_cb(f"[Excel] {xp}")
+    except Exception as x:
+        log_cb(f"[WARN] Excel生成失敗: {x}")
+
 def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=None):
     """Run all enabled test cases sequentially. stop_event: threading.Event to abort."""
     try:
@@ -347,6 +394,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         else:
             log_cb(f"\n[全完了] {len(test_cases)} テスト -> {outdir}")
         _generate_report(outdir, log_cb)
+        _generate_excel_report(outdir, log_cb)
     except Exception as x:
         log_cb(f"[ERROR] {x}"); outdir = None
     finally:

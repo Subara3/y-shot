@@ -23,6 +23,10 @@ build/
 dist/
 *.spec
 
+# バイナリ / アーカイブ
+*.exe
+*.zip
+
 # OS
 .DS_Store
 Thumbs.db

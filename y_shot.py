@@ -39,31 +39,46 @@ def collect_elements_python(driver):
         except: continue
     return results
 
+def _css_escape_attr(val):
+    """Escape a value for use inside CSS attribute selector quotes: [attr="val"]"""
+    return val.replace('\\', '\\\\').replace('"', '\\"')
+
+def _is_safe_class(cls):
+    """Check if a class name is safe to use as .classname in a CSS selector."""
+    if not cls: return False
+    # Must start with letter, hyphen, or underscore; no dots, colons, spaces, brackets
+    if cls[0].isdigit(): return False
+    return all(c.isalnum() or c in '-_' for c in cls)
+
 def _build_selector(driver, el, tag, eid, ename):
     from selenium.webdriver.common.by import By
     if eid:
-        # CSS selectors can't start with a digit or contain certain chars unescaped
-        # Use [id="..."] for safety if ID has problematic characters
+        # Use [id="..."] for IDs with problematic characters (digit-start, dots, colons, etc.)
         if eid[0].isdigit() or not all(c.isalnum() or c in '-_' for c in eid):
-            return f'[id="{eid}"]'
+            return f'[id="{_css_escape_attr(eid)}"]'
         return f"#{eid}"
     if ename:
-        s = f'{tag}[name="{ename}"]'
+        safe_name = _css_escape_attr(ename)
+        s = f'{tag}[name="{safe_name}"]'
         try:
             if len(driver.find_elements(By.CSS_SELECTOR, s)) == 1: return s
         except: pass
     etype = el.get_attribute("type") or ""
     if etype and ename:
-        s = f'{tag}[type="{etype}"][name="{ename}"]'
+        safe_name = _css_escape_attr(ename)
+        s = f'{tag}[type="{etype}"][name="{safe_name}"]'
         try:
             if len(driver.find_elements(By.CSS_SELECTOR, s)) == 1: return s
         except: pass
     classes = (el.get_attribute("class") or "").strip()
     if classes:
-        cs = tag + "".join(f".{c}" for c in classes.split()[:2])
-        try:
-            if len(driver.find_elements(By.CSS_SELECTOR, cs)) == 1: return cs
-        except: pass
+        # Only use class names that are safe for CSS selectors (no colons, dots, etc.)
+        safe_classes = [c for c in classes.split()[:3] if _is_safe_class(c)]
+        if safe_classes:
+            cs = tag + "".join(f".{c}" for c in safe_classes[:2])
+            try:
+                if len(driver.find_elements(By.CSS_SELECTOR, cs)) == 1: return cs
+            except: pass
     try:
         idx = driver.execute_script(
             "var e=arguments[0],p=e.parentElement;if(!p)return 0;"
@@ -73,7 +88,7 @@ def _build_selector(driver, el, tag, eid, ename):
             pid = driver.execute_script("var p=arguments[0].parentElement;return p?(p.id||''):'';", el)
             if pid:
                 if pid[0].isdigit() or not all(c.isalnum() or c in '-_' for c in pid):
-                    return f'[id="{pid}"] > {tag}:nth-of-type({idx})'
+                    return f'[id="{_css_escape_attr(pid)}"] > {tag}:nth-of-type({idx})'
                 return f"#{pid} > {tag}:nth-of-type({idx})"
     except: pass
     return tag

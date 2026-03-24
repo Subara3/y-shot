@@ -1,13 +1,17 @@
 # 認証情報を含む設定ファイル
 y_shot_config.ini
 
-# 自動生成データ (テスト実行時に作られるユーザーデータ)
+# 自動生成データ (URL・個人情報・テスト固有情報を含む)
 y_shot_tests.json
 y_shot_patterns.json
 y_shot_selectors.json
+y_shot_steps.json
 
 # スクリーンショット出力
 screenshots/
+
+# メモ
+memo.txt
 
 # Python
 __pycache__/

@@ -41,7 +41,12 @@ def collect_elements_python(driver):
 
 def _build_selector(driver, el, tag, eid, ename):
     from selenium.webdriver.common.by import By
-    if eid: return f"#{eid}"
+    if eid:
+        # CSS selectors can't start with a digit or contain certain chars unescaped
+        # Use [id="..."] for safety if ID has problematic characters
+        if eid[0].isdigit() or not all(c.isalnum() or c in '-_' for c in eid):
+            return f'[id="{eid}"]'
+        return f"#{eid}"
     if ename:
         s = f'{tag}[name="{ename}"]'
         try:
@@ -66,7 +71,10 @@ def _build_selector(driver, el, tag, eid, ename):
             "for(var j=0;j<s.length;j++)if(s[j]===e)return j+1;return 0;", el)
         if idx and idx > 0:
             pid = driver.execute_script("var p=arguments[0].parentElement;return p?(p.id||''):'';", el)
-            if pid: return f"#{pid} > {tag}:nth-of-type({idx})"
+            if pid:
+                if pid[0].isdigit() or not all(c.isalnum() or c in '-_' for c in pid):
+                    return f'[id="{pid}"] > {tag}:nth-of-type({idx})'
+                return f"#{pid} > {tag}:nth-of-type({idx})"
     except: pass
     return tag
 

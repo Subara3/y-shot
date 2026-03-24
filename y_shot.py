@@ -1,7 +1,7 @@
 """
-y-shot: Web Screenshot Automation Tool  v1.3 (Flet)
+y-shot: Web Screenshot Automation Tool  v1.4 (Flet)
   - Multiple test cases, each with own steps + pattern set reference
-  - Multiple named pattern sets as shared components
+  - v1.4: highlight fix, abort, tel capture, input check fix
 """
 
 import csv, os, sys, json, threading, time
@@ -10,7 +10,7 @@ from urllib.parse import urlparse, urlunparse
 import flet as ft
 
 APP_NAME = "y-shot"
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 APP_AUTHOR = "Yuri Norimatsu"
 
 # ===================================================================
@@ -71,9 +71,18 @@ def _build_selector(driver, el, tag, eid, ename):
     return tag
 
 def capture_form_values(driver):
+    """Capture current form values - supports text, tel, email, number, url, search, textarea, select, radio, checkbox."""
     from selenium.webdriver.common.by import By
     steps, seen = [], set()
-    for el in driver.find_elements(By.CSS_SELECTOR, "input[type='text'],input:not([type]),textarea"):
+    # Text-like inputs (including tel, email, number, etc.)
+    # All standard HTML input types that hold user-entered values
+    text_css = ("input[type='text'],input[type='tel'],input[type='email'],"
+                "input[type='number'],input[type='url'],input[type='search'],"
+                "input[type='password'],input[type='date'],input[type='time'],"
+                "input[type='datetime-local'],input[type='month'],input[type='week'],"
+                "input[type='color'],input[type='range'],"
+                "input:not([type]),textarea")
+    for el in driver.find_elements(By.CSS_SELECTOR, text_css):
         try:
             if not el.is_displayed(): continue
             if (el.get_attribute("type") or "text") == "hidden": continue
@@ -101,17 +110,24 @@ def capture_form_values(driver):
             except: continue
     return steps
 
-HIGHLIGHT_JS = ("(function(s){try{var p=document.getElementById('__yshot_hl');if(p)p.remove();"
-    "var e=document.querySelector(s);if(!e)return;e.scrollIntoView({block:'center',behavior:'instant'});"
+# Highlight JS: scroll to element, highlight, remove on USER scroll (not programmatic)
+HIGHLIGHT_JS = ("(function(s){try{"
+    "var p=document.getElementById('__yshot_hl');if(p)p.remove();"
+    "if(window.__yshot_scroll_rm){window.removeEventListener('scroll',window.__yshot_scroll_rm,true);}"
+    "var e=document.querySelector(s);if(!e)return;"
+    "e.scrollIntoView({block:'center',behavior:'instant'});"
     "var r=e.getBoundingClientRect(),h=document.createElement('div');h.id='__yshot_hl';"
     "h.style.cssText='position:fixed;border:3px solid #FF4444;background:rgba(255,68,68,0.15);"
     "z-index:2147483647;pointer-events:none;border-radius:3px;';"
     "h.style.top=r.top-3+'px';h.style.left=r.left-3+'px';"
     "h.style.width=r.width+6+'px';h.style.height=r.height+6+'px';"
     "document.body.appendChild(h);"
-    "window.__yshot_scroll_rm=function(){var x=document.getElementById('__yshot_hl');if(x)x.remove();"
+    "setTimeout(function(){"
+    "window.__yshot_scroll_rm=function(){"
+    "var x=document.getElementById('__yshot_hl');if(x)x.remove();"
     "window.removeEventListener('scroll',window.__yshot_scroll_rm,true);};"
     "window.addEventListener('scroll',window.__yshot_scroll_rm,true);"
+    "},600);"
     "}catch(x){}})(arguments[0]);")
 
 def build_auth_url(url, user, password):
@@ -167,8 +183,8 @@ def step_short(step):
 
 step_display = step_short
 
-def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb):
-    """Run all enabled test cases sequentially."""
+def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=None):
+    """Run all enabled test cases sequentially. stop_event: threading.Event to abort."""
     try:
         from selenium import webdriver
         from selenium.webdriver.common.by import By
@@ -189,6 +205,8 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb):
         gss = 0
 
         for tc_idx, tc in enumerate(test_cases, 1):
+            if stop_event and stop_event.is_set():
+                log_cb("[中断] ユーザーにより中断されました"); break
             tc_name = tc.get("name", f"テスト{tc_idx}")
             steps = tc.get("steps", [])
             pat_name = tc.get("pattern")
@@ -200,10 +218,13 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb):
             log_cb(f"{'='*50}")
 
             for pi, pat in enumerate(pats, 1):
+                if stop_event and stop_event.is_set():
+                    log_cb("[中断] ユーザーにより中断されました"); break
                 label, value = pat.get("label",f"p{pi:03d}"), pat.get("value","")
                 log_cb(f"--- [{pi}/{len(pats)}] {label} ({len(value)}文字) ---")
                 driver.get(base); time.sleep(0.5); sc = 0
                 for si, step in enumerate(steps, 1):
+                    if stop_event and stop_event.is_set(): break
                     st = step["type"]
                     if st in ("見出し","コメント"):
                         if st == "見出し": log_cb(f"  ## {step.get('text','')}")
@@ -257,7 +278,11 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb):
                             log_cb(f"  S{si} スクショ: {fn}")
                             if clip: copy_image_to_clipboard(fp)
                         except Exception as x: log_cb(f"  S{si} [WARN] スクショ失敗: {x}")
-        log_cb(f"\n[全完了] {len(test_cases)} テスト -> {outdir}")
+
+        if stop_event and stop_event.is_set():
+            log_cb(f"\n[中断完了] -> {outdir}")
+        else:
+            log_cb(f"\n[全完了] {len(test_cases)} テスト -> {outdir}")
     except Exception as x: log_cb(f"[ERROR] {x}")
     finally:
         if driver: driver.quit()
@@ -338,13 +363,14 @@ def main(page: ft.Page):
     page.theme = ft.Theme(color_scheme_seed=ft.Colors.BLUE)
 
     state = {
-        "tests": load_tests(),            # [{name, pattern, steps}, ...]
-        "pattern_sets": load_pattern_sets(),  # {name: [{label, value}, ...]}
+        "tests": load_tests(),
+        "pattern_sets": load_pattern_sets(),
         "config": load_config(),
         "selector_bank": load_selector_bank(),
         "browser_driver": None, "browser_elements": [],
         "selected_test": 0, "selected_pat_set": None, "selected_el": -1,
         "collapsed": set(),
+        "stop_event": None,  # threading.Event for abort
     }
     cfg = state["config"]
 
@@ -551,11 +577,9 @@ def main(page: ft.Page):
         sel_field = ft.Dropdown(label="セレクタ", width=450, value=init.get("selector",""),
             options=[ft.dropdown.Option(s) for s in all_sels], editable=True) if all_sels else \
             ft.TextField(label="セレクタ", width=450, value=init.get("selector",""))
-        # 値: パターンセットから選ぶ or 手入力
         init_val = init.get("value","")
         pat_names = pat_set_names()
         val_mode_opts = [ft.dropdown.Option("手入力")] + [ft.dropdown.Option(f"パターン: {n}") for n in pat_names]
-        # 初期値判定: {パターン}なら対応するパターンセットを選択
         init_val_mode = "手入力"
         if init_val == "{パターン}" and tc.get("pattern"):
             init_val_mode = f"パターン: {tc['pattern']}"
@@ -596,7 +620,6 @@ def main(page: ft.Page):
                         step["value"] = val_field.value
                     else:
                         step["value"] = "{パターン}"
-                        # テストケースのpatternも自動連動
                         pat_name = val_mode.value.replace("パターン: ", "", 1)
                         if pat_name in state["pattern_sets"]:
                             tc["pattern"] = pat_name
@@ -683,7 +706,6 @@ def main(page: ft.Page):
         if idx < 0 or idx >= len(state["browser_elements"]): snack("要素をクリック", ft.Colors.ORANGE_600); return
         el_info = state["browser_elements"][idx]
         sel = el_info["selector"]
-        # select要素は自動的に「選択」ステップにする
         actual_type = stype
         if stype == "入力" and el_info.get("tag") == "select":
             actual_type = "選択"
@@ -822,28 +844,31 @@ def main(page: ft.Page):
         open_dlg(dlg)
 
     def gen_input_check(e):
+        """Generate max_length boundary value patterns."""
         name = state["selected_pat_set"]
         if not name: snack("パターンセットを選択", ft.Colors.ORANGE_600); return
-        mf = ft.TextField(label="最大文字数 (空欄可)", width=140)
+        cf = ft.TextField(label="繰り返す文字", width=80, value="あ")
+        mf = ft.TextField(label="max_length", width=140, hint_text="例: 50")
         def on_ok(e):
-            ps = [{"label":"未入力","value":""},{"label":"全角スペースのみ","value":"\u3000"},
-                  {"label":"半角スペースのみ","value":" "},{"label":"全角スペース含む","value":"テスト\u3000入力"},
-                  {"label":"半角スペース含む","value":"テスト 入力"},{"label":"全角英字","value":"ＡＢＣＤＥ"},
-                  {"label":"半角英字","value":"ABCDE"},{"label":"全角記号","value":"\u00A9"},
-                  {"label":"半角記号","value":"!@#$%"},{"label":"絵文字含む","value":"テスト\U0001f990入力"},
-                  {"label":"4バイト文字","value":"\U00020BB7野屋"},{"label":"全角数値","value":"１２３４５"},
-                  {"label":"半角数値","value":"12345"}]
+            ch = cf.value or "あ"
             ml = mf.value.strip()
-            if ml and ml.isdigit():
-                n = int(ml)
-                if n > 1: ps.append({"label":f"最大-1({n-1}文字)","value":"あ"*(n-1)})
-                ps.append({"label":f"最大({n}文字)","value":"あ"*n})
-                ps.append({"label":f"最大+1({n+1}文字)","value":"あ"*(n+1)})
-            state["pattern_sets"][name].extend(ps); refresh_pats(); refresh_pat_set_list()
+            if not ml or not ml.isdigit() or int(ml) < 1:
+                snack("max_lengthを正の整数で入力", ft.Colors.RED_600); return
+            n = int(ml)
+            ps = []
+            if n > 1:
+                ps.append({"label": f"max-1({n-1}文字)", "value": ch * (n - 1)})
+            ps.append({"label": f"max({n}文字)", "value": ch * n})
+            ps.append({"label": f"max+1({n+1}文字)", "value": ch * (n + 1)})
+            state["pattern_sets"][name].extend(ps)
+            refresh_pats(); refresh_pat_set_list()
             snack(f"{len(ps)} 件追加"); close_dlg(dlg)
-        dlg = ft.AlertDialog(title=ft.Text("入力チェック用"),
-            content=ft.Column([mf, ft.Text("未入力/スペース/全角半角/記号/絵文字/4バイト + 境界値",
-                size=11, color=ft.Colors.GREY_600)], tight=True, spacing=10, width=350),
+        dlg = ft.AlertDialog(title=ft.Text("max_length用 境界値生成"),
+            content=ft.Column([
+                cf, mf,
+                ft.Text("指定文字を max-1, max, max+1 文字ずつ生成します",
+                         size=11, color=ft.Colors.GREY_600),
+            ], tight=True, spacing=10, width=350),
             actions=[ft.TextButton("追加", on_click=on_ok), ft.TextButton("閉じる", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
@@ -877,13 +902,18 @@ def main(page: ft.Page):
         c = state["config"]
         if not c.get("url"): snack("URL未設定", ft.Colors.RED_600); return
         if not test_cases_to_run: snack("テストケース0件", ft.Colors.RED_600); return
-        close_browser(); run_btn.disabled = True; run_single_btn.disabled = True
+        close_browser()
+        stop_ev = threading.Event()
+        state["stop_event"] = stop_ev
+        run_btn.disabled = True; run_single_btn.disabled = True
+        stop_btn.visible = True; stop_btn.disabled = False
         progress.visible = True; nav_bar.selected_index = 0; switch_tab(0); page.update(); save_all()
         def on_done():
             run_btn.disabled = False; run_single_btn.disabled = False
-            progress.visible = False; page.update()
+            stop_btn.visible = False; progress.visible = False
+            state["stop_event"] = None; page.update()
         page.run_thread(run_all_tests, dict(c), list(test_cases_to_run),
-                        dict(state["pattern_sets"]), lambda m: log(m), on_done)
+                        dict(state["pattern_sets"]), lambda m: log(m), on_done, stop_ev)
 
     def run_click(e):
         _do_run(state["tests"])
@@ -891,6 +921,14 @@ def main(page: ft.Page):
     def run_single(idx):
         if 0 <= idx < len(state["tests"]):
             _do_run([state["tests"][idx]])
+
+    def stop_click(e):
+        ev = state.get("stop_event")
+        if ev:
+            ev.set()
+            stop_btn.disabled = True
+            log("[中断] 中断リクエスト送信...")
+            page.update()
 
     def switch_tab(idx):
         tc_content.visible = (idx == 0); ps_content.visible = (idx == 1); page.update()
@@ -924,10 +962,11 @@ def main(page: ft.Page):
                                color=ft.Colors.WHITE, on_click=lambda e: run_single(state["selected_test"]), height=42)
     run_btn = ft.Button("全テスト実行", icon=ft.Icons.PLAY_ARROW, bgcolor=ft.Colors.BLUE_600,
                         color=ft.Colors.WHITE, on_click=run_click, height=42)
+    stop_btn = ft.Button("中断", icon=ft.Icons.STOP, bgcolor=ft.Colors.RED_600,
+                         color=ft.Colors.WHITE, on_click=stop_click, height=42, visible=False)
 
     # ── Layout: Tab 1 (Tests) ──
     tc_content = ft.Row([
-        # Left: test case list
         ft.Container(ft.Column([
             ft.Row([ft.Text("テストケース", weight=ft.FontWeight.BOLD, size=14),
                     ft.IconButton(ft.Icons.ADD, tooltip="追加", icon_size=18, on_click=add_test)],
@@ -951,8 +990,6 @@ def main(page: ft.Page):
             ft.Container(ft.Column([ft.Text("ログ", size=12, weight=ft.FontWeight.BOLD), log_list]),
                 padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
         ], expand=3, spacing=6),
-
-        # Right: element browser
         ft.Container(ft.Column([
             ft.Text("要素ブラウザ", weight=ft.FontWeight.BOLD, size=13),
             ft.Row([browser_url, browser_wait], spacing=4),
@@ -971,20 +1008,17 @@ def main(page: ft.Page):
 
     # ── Layout: Tab 2 (Pattern Sets) ──
     ps_content = ft.Row([
-        # Left: pattern set list
         ft.Container(ft.Column([
             ft.Row([ft.Text("パターンセット", weight=ft.FontWeight.BOLD, size=14),
                     ft.IconButton(ft.Icons.ADD, tooltip="追加", icon_size=18, on_click=add_pat_set)],
                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             pat_set_list,
         ], spacing=4), width=220, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
-
-        # Right: selected set patterns
         ft.Column([
             ft.Row([pat_header,
                     ft.Row([ft.Button("追加", icon=ft.Icons.ADD, on_click=add_pat),
                             ft.Button("テンプレート", icon=ft.Icons.FOLDER_OPEN, on_click=load_template),
-                            ft.Button("入力チェック", icon=ft.Icons.CHECKLIST, on_click=gen_input_check)],
+                            ft.Button("max_length用", icon=ft.Icons.STRAIGHTEN, on_click=gen_input_check)],
                            spacing=4)],
                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             ft.Container(pat_items, expand=True, padding=ft.Padding(4,4,4,4),
@@ -1003,7 +1037,7 @@ def main(page: ft.Page):
                  ft.IconButton(ft.Icons.INFO_OUTLINE, tooltip="情報", on_click=show_info)])
 
     page.add(ft.Column([ft.Stack([tc_content, ps_content], expand=True),
-        progress, ft.Row([run_single_btn, run_btn], alignment=ft.MainAxisAlignment.END, spacing=8)], expand=True, spacing=4))
+        progress, ft.Row([stop_btn, run_single_btn, run_btn], alignment=ft.MainAxisAlignment.END, spacing=8)], expand=True, spacing=4))
     page.navigation_bar = nav_bar
 
     refresh_test_list(); refresh_steps(); refresh_pat_set_list(); refresh_pats()

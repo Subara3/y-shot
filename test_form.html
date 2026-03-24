@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>y-shot テストフォーム</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; }
+        h1 { color: #333; }
+        label { display: block; margin-top: 12px; font-weight: bold; }
+        input[type="text"], textarea, select { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }
+        textarea { height: 80px; }
+        .btn { margin-top: 16px; padding: 10px 24px; background: #0078FF; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+        .btn:hover { background: #0060CC; }
+        .result { margin-top: 20px; padding: 16px; background: #f0f8ff; border: 1px solid #cce; border-radius: 4px; }
+        .error { margin-top: 20px; padding: 16px; background: #fff0f0; border: 1px solid #e88; border-radius: 4px; color: #c00; }
+        .back-link { display: inline-block; margin-top: 12px; color: #0078FF; }
+    </style>
+</head>
+<body>
+    <h1>y-shot テストフォーム</h1>
+    <p>テスト用のシンプルなフォームです。</p>
+
+    <div id="form-area">
+        <form id="test-form" onsubmit="return handleSubmit(event)">
+            <label for="username">名前:</label>
+            <input type="text" id="username" name="username" placeholder="お名前を入力">
+
+            <label for="email">メールアドレス:</label>
+            <input type="text" id="email" name="email" placeholder="example@mail.com">
+
+            <label for="category">カテゴリ:</label>
+            <select id="category" name="category">
+                <option value="general">一般</option>
+                <option value="support">サポート</option>
+                <option value="feedback">フィードバック</option>
+            </select>
+
+            <label for="message">メッセージ:</label>
+            <textarea id="message" name="message" placeholder="内容を入力してください"></textarea>
+
+            <button type="submit" class="btn" id="submit-btn">送信</button>
+        </form>
+    </div>
+
+    <div id="result-area" style="display:none;">
+        <div class="result" id="result-box">
+            <h2>送信完了</h2>
+            <p>以下の内容で受け付けました:</p>
+            <p><strong>名前:</strong> <span id="res-name"></span></p>
+            <p><strong>メール:</strong> <span id="res-email"></span></p>
+            <p><strong>カテゴリ:</strong> <span id="res-category"></span></p>
+            <p><strong>メッセージ:</strong> <span id="res-message"></span></p>
+            <p><strong>文字数:</strong> <span id="res-length"></span></p>
+        </div>
+        <a href="#" class="back-link" id="back-btn" onclick="goBack(); return false;">← フォームに戻る</a>
+    </div>
+
+    <div id="error-area" style="display:none;">
+        <div class="error" id="error-box">
+            <h2>エラー</h2>
+            <p id="error-msg"></p>
+        </div>
+        <a href="#" class="back-link" id="error-back-btn" onclick="goBack(); return false;">← フォームに戻る</a>
+    </div>
+
+    <script>
+        function handleSubmit(e) {
+            e.preventDefault();
+            var name = document.getElementById('username').value;
+            var email = document.getElementById('email').value;
+            var category = document.getElementById('category').value;
+            var message = document.getElementById('message').value;
+
+            // Validation
+            if (!name || name.length === 0) {
+                showError('名前を入力してください。');
+                return false;
+            }
+            if (name.length > 50) {
+                showError('名前は50文字以内で入力してください。(入力: ' + name.length + '文字)');
+                return false;
+            }
+            if (message.length > 1000) {
+                showError('メッセージは1000文字以内で入力してください。(入力: ' + message.length + '文字)');
+                return false;
+            }
+
+            // Success
+            document.getElementById('form-area').style.display = 'none';
+            document.getElementById('error-area').style.display = 'none';
+            document.getElementById('result-area').style.display = 'block';
+            document.getElementById('res-name').textContent = name;
+            document.getElementById('res-email').textContent = email;
+            document.getElementById('res-category').textContent = category;
+            document.getElementById('res-message').textContent = message.substring(0, 100) + (message.length > 100 ? '...' : '');
+            document.getElementById('res-length').textContent = message.length + '文字';
+            // Change URL hash to simulate navigation
+            location.hash = '#result';
+            return false;
+        }
+
+        function showError(msg) {
+            document.getElementById('form-area').style.display = 'none';
+            document.getElementById('result-area').style.display = 'none';
+            document.getElementById('error-area').style.display = 'block';
+            document.getElementById('error-msg').textContent = msg;
+            location.hash = '#error';
+        }
+
+        function goBack() {
+            document.getElementById('form-area').style.display = 'block';
+            document.getElementById('result-area').style.display = 'none';
+            document.getElementById('error-area').style.display = 'none';
+            document.getElementById('test-form').reset();
+            location.hash = '';
+        }
+    </script>
+</body>
+</html>

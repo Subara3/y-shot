@@ -1,0 +1,10 @@
+[
+  {"type": "入力", "selector": "#username", "value": "テスト太郎"},
+  {"type": "入力", "selector": "#email", "value": "test@example.com"},
+  {"type": "入力", "selector": "#message", "value": "{パターン}"},
+  {"type": "クリック", "selector": "#submit-btn"},
+  {"type": "待機", "seconds": "1.0"},
+  {"type": "スクショ", "mode": "fullpage"},
+  {"type": "クリック", "selector": "#back-btn"},
+  {"type": "待機", "seconds": "0.5"}
+]

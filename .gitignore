@@ -1,0 +1,19 @@
+# 認証情報を含む設定ファイル
+y_shot_config.ini
+
+# スクリーンショット出力
+screenshots/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# OS
+.DS_Store
+Thumbs.db

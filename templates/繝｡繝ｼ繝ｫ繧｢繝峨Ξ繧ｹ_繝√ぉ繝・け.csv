@@ -1,0 +1,13 @@
+label,value
+正常_基本,test@example.com
+正常_サブドメイン,user@mail.example.co.jp
+正常_プラス記号,user+tag@example.com
+正常_ドット入り,first.last@example.com
+異常_アットなし,testexample.com
+異常_ドメインなし,test@
+異常_ユーザーなし,@example.com
+異常_スペース含む,test @example.com
+異常_全角アット,test＠example.com
+異常_日本語,テスト@example.com
+異常_ドット連続,test@example..com
+異常_空文字,

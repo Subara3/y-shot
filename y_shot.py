@@ -171,7 +171,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb):
         ba = config.get("basic_auth_user","").strip()
         base = build_auth_url(config["url"], ba, config.get("basic_auth_pass",""))
         if ba: log_cb("[INFO] Basic認証を設定")
-        outdir = config.get("output_dir","./screenshots"); os.makedirs(outdir, exist_ok=True)
+        outdir = config.get("output_dir", os.path.join(get_app_dir(), "screenshots")); os.makedirs(outdir, exist_ok=True)
         clip = config.get("clipboard_copy") == "1"
         gss = 0
 
@@ -240,6 +240,29 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb):
         done_cb()
 
 # ===================================================================
+# Path helpers (exe / script compatible)
+# ===================================================================
+
+def get_app_dir():
+    """User data directory (config, tests, patterns, selectors).
+    When running as exe: directory where the exe lives.
+    When running as script: directory where y_shot.py lives."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+def get_bundle_dir():
+    """Bundled resource directory (templates).
+    When running as exe: PyInstaller temp extraction dir.
+    When running as script: same as app dir."""
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        return sys._MEIPASS
+    return os.path.dirname(os.path.abspath(__file__))
+
+def _data_path(filename):
+    return os.path.join(get_app_dir(), filename)
+
+# ===================================================================
 # Persistence
 # ===================================================================
 CSV_HEADER = ["label", "value"]
@@ -256,30 +279,38 @@ def save_csv(path, patterns):
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_HEADER); w.writeheader(); w.writerows(patterns)
 def load_config():
-    import configparser; c = configparser.ConfigParser(); c.read(CONFIG_FILE, encoding="utf-8")
+    import configparser; c = configparser.ConfigParser()
+    c.read(_data_path(CONFIG_FILE), encoding="utf-8")
     return dict(c["settings"]) if "settings" in c else {}
 def save_config(data):
     import configparser; c = configparser.ConfigParser()
     c["settings"] = {k: str(v) for k,v in data.items()}
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f: c.write(f)
+    with open(_data_path(CONFIG_FILE), "w", encoding="utf-8") as f: c.write(f)
 def load_tests():
-    if not os.path.isfile(TESTS_FILE): return []
-    with open(TESTS_FILE, "r", encoding="utf-8") as f: return json.load(f)
+    p = _data_path(TESTS_FILE)
+    if not os.path.isfile(p): return []
+    with open(p, "r", encoding="utf-8") as f: return json.load(f)
 def save_tests(tests):
-    with open(TESTS_FILE, "w", encoding="utf-8") as f: json.dump(tests, f, ensure_ascii=False, indent=2)
+    with open(_data_path(TESTS_FILE), "w", encoding="utf-8") as f:
+        json.dump(tests, f, ensure_ascii=False, indent=2)
 def load_pattern_sets():
-    if not os.path.isfile(PATTERNS_FILE): return {}
-    with open(PATTERNS_FILE, "r", encoding="utf-8") as f: return json.load(f)
+    p = _data_path(PATTERNS_FILE)
+    if not os.path.isfile(p): return {}
+    with open(p, "r", encoding="utf-8") as f: return json.load(f)
 def save_pattern_sets(ps):
-    with open(PATTERNS_FILE, "w", encoding="utf-8") as f: json.dump(ps, f, ensure_ascii=False, indent=2)
+    with open(_data_path(PATTERNS_FILE), "w", encoding="utf-8") as f:
+        json.dump(ps, f, ensure_ascii=False, indent=2)
 def load_selector_bank():
-    if not os.path.isfile(SELECTOR_BANK_FILE): return {}
-    with open(SELECTOR_BANK_FILE, "r", encoding="utf-8") as f: return json.load(f)
+    p = _data_path(SELECTOR_BANK_FILE)
+    if not os.path.isfile(p): return {}
+    with open(p, "r", encoding="utf-8") as f: return json.load(f)
 def save_selector_bank(bank):
-    with open(SELECTOR_BANK_FILE, "w", encoding="utf-8") as f: json.dump(bank, f, ensure_ascii=False, indent=2)
+    with open(_data_path(SELECTOR_BANK_FILE), "w", encoding="utf-8") as f:
+        json.dump(bank, f, ensure_ascii=False, indent=2)
 def get_templates_dir():
-    for d in [os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates"),
-              os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "templates")]:
+    """Check bundle dir first (exe), then app dir (script)."""
+    for d in [os.path.join(get_bundle_dir(), "templates"),
+              os.path.join(get_app_dir(), "templates")]:
         if os.path.isdir(d): return d
     return None
 
@@ -758,7 +789,7 @@ def main(page: ft.Page):
         uf = ft.TextField(label="対象URL", value=c.get("url",""), width=450)
         auf = ft.TextField(label="Basic認証ID", value=c.get("basic_auth_user",""), width=210)
         apf = ft.TextField(label="パスワード", value=c.get("basic_auth_pass",""), password=True, width=210)
-        of = ft.TextField(label="出力フォルダ", value=c.get("output_dir","./screenshots"), width=450)
+        of = ft.TextField(label="出力フォルダ", value=c.get("output_dir", os.path.join(get_app_dir(), "screenshots")), width=450)
         cc = ft.Checkbox(label="クリップボードコピー", value=c.get("clipboard_copy")=="1")
         def on_ok(e):
             state["config"].update({"url":uf.value,"basic_auth_user":auf.value,

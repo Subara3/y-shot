@@ -1,6 +1,11 @@
 # 認証情報を含む設定ファイル
 y_shot_config.ini
 
+# 自動生成データ (テスト実行時に作られるユーザーデータ)
+y_shot_tests.json
+y_shot_patterns.json
+y_shot_selectors.json
+
 # スクリーンショット出力
 screenshots/
 
@@ -9,7 +14,7 @@ __pycache__/
 *.pyc
 *.pyo
 
-# PyInstaller
+# Flet / PyInstaller
 build/
 dist/
 *.spec

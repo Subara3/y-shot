@@ -1191,7 +1191,7 @@ def main(page: ft.Page):
 
     # ── Build controls ──
     browser_url = ft.TextField(label="URL", expand=True, dense=True, value=cfg.get("browser_url",""))
-    browser_url_dd = ft.Dropdown(label="履歴から", width=200, dense=True,
+    browser_url_dd = ft.Dropdown(label="履歴", width=200, dense=True,
         options=[ft.dropdown.Option(u) for u in state["selector_bank"].keys()], on_select=on_url_dd_sel)
     browser_wait = ft.TextField(label="秒", width=55, dense=True, value=cfg.get("browser_wait","3.0"))
     load_btn = ft.Button("読込", icon=ft.Icons.REFRESH, on_click=load_page_click)

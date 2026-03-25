@@ -230,6 +230,50 @@ JS_SET_VALUE = (
     "})(arguments[0],arguments[1]);"
 )
 
+def kill_driver(drv, timeout=5):
+    """Kill a Selenium WebDriver and its entire process tree reliably.
+    Works on Windows (taskkill /T) and POSIX (process group kill)."""
+    if drv is None:
+        return
+    # Get chromedriver PID before quit() invalidates it
+    pid = None
+    try:
+        svc = getattr(drv, 'service', None)
+        proc = getattr(svc, 'process', None) if svc else None
+        if proc:
+            pid = proc.pid
+    except Exception:
+        pass
+    # Phase 1: Polite quit
+    try:
+        drv.quit()
+    except Exception:
+        pass
+    # Phase 2: Wait briefly for clean exit
+    if pid:
+        import subprocess as _sp
+        try:
+            if proc:
+                proc.wait(timeout=2)
+                return  # Exited cleanly
+        except Exception:
+            pass
+        # Phase 3: Force kill process tree
+        try:
+            if sys.platform == 'win32':
+                _sp.run(['taskkill', '/F', '/T', '/PID', str(pid)],
+                        capture_output=True, timeout=5)
+            else:
+                import signal as _sig
+                os.killpg(os.getpgid(pid), _sig.SIGKILL)
+        except Exception:
+            # Last resort: kill just the process
+            try:
+                if proc:
+                    proc.kill()
+            except Exception:
+                pass
+
 def build_auth_url(url, user, password):
     if not user: return url
     p = urlparse(url); nl = f"{user}:{password}@{p.hostname}"
@@ -472,21 +516,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         log_cb(f"[ERROR] {x}"); outdir = None
     finally:
         if driver:
-            proc = None
-            try:
-                if hasattr(driver, 'service') and hasattr(driver.service, 'process'):
-                    proc = driver.service.process
-            except Exception: pass
-            try: driver.quit()
-            except Exception: pass
-            # プロセス終了を待つ
-            if proc:
-                try: proc.wait(timeout=5)
-                except Exception:
-                    try: proc.terminate(); proc.wait(timeout=3)
-                    except Exception:
-                        try: proc.kill()
-                        except Exception: pass
+            kill_driver(driver)
             if driver_ref is not None:
                 try: driver_ref.remove(driver)
                 except ValueError: pass
@@ -642,8 +672,7 @@ def main(page: ft.Page):
         save_pattern_sets(state["pattern_sets"]); save_selector_bank(state["selector_bank"])
     def close_browser():
         if state["browser_driver"]:
-            try: state["browser_driver"].quit()
-            except Exception: pass
+            kill_driver(state["browser_driver"])
             state["browser_driver"] = None
     def get_all_selectors():
         sels = set()
@@ -690,12 +719,12 @@ def main(page: ft.Page):
                         icon=ft.Icons.MORE_VERT, icon_size=18, icon_color=ft.Colors.GREY_500,
                         tooltip="操作",
                         items=[
-                            ft.PopupMenuItem(icon=ft.Icons.PLAY_ARROW, text="実行",
+                            ft.PopupMenuItem(icon=ft.Icons.PLAY_ARROW, content="実行",
                                              on_click=lambda e, idx=i: run_single(idx)),
-                            ft.PopupMenuItem(icon=ft.Icons.COPY, text="コピー",
+                            ft.PopupMenuItem(icon=ft.Icons.COPY, content="コピー",
                                              on_click=lambda e, idx=i: copy_test(idx)),
                             ft.PopupMenuItem(),  # divider
-                            ft.PopupMenuItem(icon=ft.Icons.DELETE, text="削除",
+                            ft.PopupMenuItem(icon=ft.Icons.DELETE, content="削除",
                                              on_click=lambda e, idx=i: del_test(idx)),
                         ],
                     ),
@@ -715,16 +744,25 @@ def main(page: ft.Page):
         if update: page.update()
 
     def on_test_reorder(e):
-        tests = state["tests"]
-        old, new = e.old_index, e.new_index
-        if 0 <= old < len(tests) and 0 <= new <= len(tests):
-            item = tests.pop(old)
-            if new > old: new -= 1
-            tests.insert(new, item)
-            if state["selected_test"] == old: state["selected_test"] = new
-            elif old < state["selected_test"] <= new: state["selected_test"] -= 1
-            elif new <= state["selected_test"] < old: state["selected_test"] += 1
-            refresh_test_list(False); refresh_steps()
+        try:
+            tests = state["tests"]
+            old, new = e.old_index, e.new_index
+            if old is None or new is None: return
+            if 0 <= old < len(tests) and 0 <= new <= len(tests):
+                item = tests.pop(old)
+                if new > old: new -= 1
+                tests.insert(new, item)
+                if state["selected_test"] == old: state["selected_test"] = new
+                elif old < state["selected_test"] <= new: state["selected_test"] -= 1
+                elif new <= state["selected_test"] < old: state["selected_test"] += 1
+                schedule_save()
+                # Deferred rebuild: let the widget finish its animation first
+                def _deferred():
+                    time.sleep(0.3)
+                    refresh_test_list(False); refresh_steps()
+                page.run_thread(_deferred)
+        except Exception as x:
+            log(f"[ERROR] on_test_reorder: {x}")
 
     def select_test(idx):
         state["selected_test"] = idx
@@ -858,11 +896,16 @@ def main(page: ft.Page):
         if not tc: return
         steps = tc["steps"]; vis = _get_vis(steps)
         old, new = e.old_index, e.new_index
+        if old is None or new is None: return
         if old < len(vis) and new <= len(vis):
             ao = vis[old]; an = vis[new] if new < len(vis) else len(steps)
             item = steps.pop(ao)
             if an > ao: an -= 1
-            steps.insert(an, item); refresh_steps()
+            steps.insert(an, item)
+            schedule_save()
+            def _deferred():
+                time.sleep(0.3); refresh_steps()
+            page.run_thread(_deferred)
 
     def _get_vis(steps):
         vis, hidden = [], False
@@ -982,7 +1025,9 @@ def main(page: ft.Page):
             # Only discard driver if it's truly broken (e.g. crash, not a page error)
             if state["browser_driver"]:
                 try: state["browser_driver"].title  # quick health check
-                except Exception: state["browser_driver"] = None
+                except Exception:
+                    kill_driver(state["browser_driver"])
+                    state["browser_driver"] = None
             log(f"[ERROR] {x}")
         finally: load_btn.disabled = False; page.update()
     def update_el_table(elems, url):
@@ -1161,12 +1206,16 @@ def main(page: ft.Page):
     def on_pat_set_reorder(e):
         names = list(state["pattern_sets"].keys())
         old, new = e.old_index, e.new_index
+        if old is None or new is None: return
         if 0 <= old < len(names) and 0 <= new <= len(names):
             item = names.pop(old)
             if new > old: new -= 1
             names.insert(new, item)
             state["pattern_sets"] = {n: state["pattern_sets"][n] for n in names}
-            refresh_pat_set_list(False); refresh_pats()
+            schedule_save()
+            def _deferred():
+                time.sleep(0.3); refresh_pat_set_list(False); refresh_pats()
+            page.run_thread(_deferred)
 
     def select_pat_set(name):
         state["selected_pat_set"] = name; refresh_pat_set_list(False); refresh_pats()
@@ -1224,11 +1273,15 @@ def main(page: ft.Page):
         if not name or name not in state["pattern_sets"]: return
         pats = state["pattern_sets"][name]
         old, new = e.old_index, e.new_index
+        if old is None or new is None: return
         if 0 <= old < len(pats) and 0 <= new <= len(pats):
             item = pats.pop(old)
             if new > old: new -= 1
             pats.insert(new, item)
-            refresh_pats()
+            schedule_save()
+            def _deferred():
+                time.sleep(0.3); refresh_pats()
+            page.run_thread(_deferred)
 
     def refresh_pats(update=True):
         pat_items.controls.clear()
@@ -1561,41 +1614,13 @@ def main(page: ft.Page):
     refresh_test_list(False); refresh_steps(False); refresh_pat_set_list(False); refresh_pats(False)
     page.update()
     _init_done[0] = True
-    def _graceful_quit_driver(drv, timeout=5):
-        """Quit a Selenium driver gracefully, waiting for process exit.
-        Phase 1: quit() + wait for process exit
-        Phase 2: SIGTERM + wait
-        Phase 3: force kill (last resort)"""
-        proc = None
-        try:
-            if hasattr(drv, 'service') and hasattr(drv.service, 'process'):
-                proc = drv.service.process
-        except Exception: pass
-        # Phase 1: 通常のquit
-        try: drv.quit()
-        except Exception: pass
-        if proc:
-            try:
-                proc.wait(timeout=timeout)
-                return  # 正常終了
-            except Exception: pass
-            # Phase 2: SIGTERM で丁寧に終了要求
-            try:
-                proc.terminate()
-                proc.wait(timeout=3)
-                return
-            except Exception: pass
-            # Phase 3: 最終手段 - force kill
-            try: proc.kill()
-            except Exception: pass
-
     def _cleanup_all_drivers():
-        """Quit all Selenium drivers (test + element browser) gracefully."""
+        """Quit all Selenium drivers (test + element browser) via kill_driver."""
         for drv in list(state.get("test_drivers", [])):
-            _graceful_quit_driver(drv)
+            kill_driver(drv)
         state["test_drivers"] = []
         if state["browser_driver"]:
-            _graceful_quit_driver(state["browser_driver"])
+            kill_driver(state["browser_driver"])
             state["browser_driver"] = None
 
     def on_window_event(e):

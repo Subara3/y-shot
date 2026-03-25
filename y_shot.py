@@ -471,8 +471,21 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         log_cb(f"[ERROR] {x}"); outdir = None
     finally:
         if driver:
+            proc = None
+            try:
+                if hasattr(driver, 'service') and hasattr(driver.service, 'process'):
+                    proc = driver.service.process
+            except Exception: pass
             try: driver.quit()
             except Exception: pass
+            # プロセス終了を待つ
+            if proc:
+                try: proc.wait(timeout=5)
+                except Exception:
+                    try: proc.terminate(); proc.wait(timeout=3)
+                    except Exception:
+                        try: proc.kill()
+                        except Exception: pass
             if driver_ref is not None:
                 try: driver_ref.remove(driver)
                 except ValueError: pass
@@ -1504,28 +1517,70 @@ def main(page: ft.Page):
     refresh_test_list(False); refresh_steps(False); refresh_pat_set_list(False); refresh_pats(False)
     page.update()
     _init_done[0] = True
-    def _cleanup_all_drivers():
-        """Quit all Selenium drivers (test + element browser)."""
-        for drv in list(state.get("test_drivers", [])):
-            try: drv.quit()
+    def _graceful_quit_driver(drv, timeout=5):
+        """Quit a Selenium driver gracefully, waiting for process exit.
+        Phase 1: quit() + wait for process exit
+        Phase 2: SIGTERM + wait
+        Phase 3: force kill (last resort)"""
+        proc = None
+        try:
+            if hasattr(drv, 'service') and hasattr(drv.service, 'process'):
+                proc = drv.service.process
+        except Exception: pass
+        # Phase 1: 通常のquit
+        try: drv.quit()
+        except Exception: pass
+        if proc:
+            try:
+                proc.wait(timeout=timeout)
+                return  # 正常終了
             except Exception: pass
+            # Phase 2: SIGTERM で丁寧に終了要求
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+                return
+            except Exception: pass
+            # Phase 3: 最終手段 - force kill
+            try: proc.kill()
+            except Exception: pass
+
+    def _cleanup_all_drivers():
+        """Quit all Selenium drivers (test + element browser) gracefully."""
+        for drv in list(state.get("test_drivers", [])):
+            _graceful_quit_driver(drv)
         state["test_drivers"] = []
-        close_browser()
+        if state["browser_driver"]:
+            _graceful_quit_driver(state["browser_driver"])
+            state["browser_driver"] = None
 
     def on_window_event(e):
         if e.data == "close":
             if _save_timer[0]: _save_timer[0].cancel()
             save_all()
-            # テスト実行中なら中断シグナルを送る
+            # テスト実行中なら中断シグナルを送り、スレッド終了を待つ
             ev = state.get("stop_event")
-            if ev: ev.set()
-            # 全ドライバーを終了（テスト用 + 要素ブラウザ用）
+            if ev:
+                ev.set()
+                # テストスレッドのfinally内でdriver.quitが走るのを最大10秒待つ
+                for _ in range(100):
+                    if not state.get("test_drivers"):
+                        break
+                    time.sleep(0.1)
+            # 残っていれば丁寧に終了
             _cleanup_all_drivers()
             page.window.destroy()
             os._exit(0)
 
-    import atexit
-    atexit.register(_cleanup_all_drivers)
+    # os._exit()ではatexitは呼ばれないため、シグナルハンドラで補完
+    import signal
+    def _signal_cleanup(signum, frame):
+        _cleanup_all_drivers()
+        os._exit(1)
+    try:
+        signal.signal(signal.SIGTERM, _signal_cleanup)
+        signal.signal(signal.SIGINT, _signal_cleanup)
+    except (OSError, ValueError): pass  # メインスレッド以外からは設定できない
 
     page.window.on_event = on_window_event
 

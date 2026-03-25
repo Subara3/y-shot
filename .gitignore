@@ -6,6 +6,7 @@ y_shot_tests.json
 y_shot_patterns.json
 y_shot_selectors.json
 y_shot_steps.json
+y_shot_pages.json
 
 # スクリーンショット出力
 screenshots/

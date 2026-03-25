@@ -289,8 +289,8 @@ def test_import():
         # 主要関数が存在するか
         for fn_name in ['main', 'kill_driver', 'run_all_tests', 'collect_elements_python',
                          'step_display', 'load_csv', 'save_csv', 'load_tests', 'save_tests',
-                         'load_pattern_sets', 'save_pattern_sets', 'build_auth_url',
-                         'capture_form_values', '_safe_filename', '_has_non_bmp']:
+                         'load_pattern_sets', 'save_pattern_sets', 'load_pages', 'save_pages',
+                         'build_auth_url', 'capture_form_values', '_safe_filename', '_has_non_bmp']:
             assert hasattr(mod, fn_name), f"{fn_name} が見つからない"
         print("  [OK] モジュール読込 + 全関数存在確認")
     except Exception as e:

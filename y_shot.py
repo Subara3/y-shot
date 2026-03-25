@@ -352,8 +352,9 @@ def _generate_report(outdir, log_cb):
     except Exception as x:
         log_cb(f"[WARN] レポート生成失敗: {x}")
 
-def _generate_excel_report(outdir, log_cb):
-    """Generate an Excel report with screenshots arranged vertically."""
+def _generate_excel_report(outdir, log_cb, pages=None, test_cases=None):
+    """Generate an Excel report with screenshots arranged vertically.
+    If pages and test_cases are provided, creates one sheet per page."""
     try:
         from openpyxl import Workbook
         from openpyxl.drawing.image import Image as XlImage
@@ -366,43 +367,70 @@ def _generate_excel_report(outdir, log_cb):
         pngs = sorted([f for f in os.listdir(outdir) if f.lower().endswith(".png")])
         if not pngs: return
         wb = Workbook()
-        ws = wb.active
-        ws.title = "エビデンス"
-        # Column A for labels, B+ for images — use wide column B
-        ws.column_dimensions["A"].width = 60
-        ws.column_dimensions["B"].width = 5
         MAX_IMG_WIDTH = 800  # pixels — fits well in Excel
-        current_row = 1
-        for fn in pngs:
-            fp = os.path.join(outdir, fn)
-            # Label row
-            cell = ws.cell(row=current_row, column=1, value=fn)
-            cell.font = cell.font.copy(bold=True, size=11)
-            ws.row_dimensions[current_row].height = 20
-            current_row += 1
-            # Image
-            pil_img = PILImage.open(fp)
-            orig_w, orig_h = pil_img.size
-            scale = min(1.0, MAX_IMG_WIDTH / orig_w) if orig_w > 0 else 1.0
-            disp_w = int(orig_w * scale)
-            disp_h = int(orig_h * scale)
-            xl_img = XlImage(fp)
-            xl_img.width = disp_w
-            xl_img.height = disp_h
-            ws.add_image(xl_img, f"A{current_row}")
-            # Reserve rows for the image (approx 15px per row in Excel)
-            rows_needed = max(1, disp_h // 15 + 2)
-            current_row += rows_needed
+
+        def _write_sheet(ws, sheet_pngs):
+            ws.column_dimensions["A"].width = 60
+            ws.column_dimensions["B"].width = 5
+            current_row = 1
+            for fn in sheet_pngs:
+                fp = os.path.join(outdir, fn)
+                cell = ws.cell(row=current_row, column=1, value=fn)
+                cell.font = cell.font.copy(bold=True, size=11)
+                ws.row_dimensions[current_row].height = 20
+                current_row += 1
+                pil_img = PILImage.open(fp)
+                orig_w, orig_h = pil_img.size
+                scale = min(1.0, MAX_IMG_WIDTH / orig_w) if orig_w > 0 else 1.0
+                disp_w = int(orig_w * scale)
+                disp_h = int(orig_h * scale)
+                xl_img = XlImage(fp)
+                xl_img.width = disp_w
+                xl_img.height = disp_h
+                ws.add_image(xl_img, f"A{current_row}")
+                rows_needed = max(1, disp_h // 15 + 2)
+                current_row += rows_needed
+
+        if pages and test_cases:
+            # One sheet per page
+            first_sheet = True
+            for pg in pages:
+                sheet_name = f"{pg['number']}_{pg['name']}"[:31]  # Excel 31 char limit
+                # Find PNGs belonging to tests in this page
+                page_tc_names = set()
+                for tc in test_cases:
+                    if tc.get("page_id") == pg["_id"]:
+                        page_tc_names.add(_safe_filename(tc.get("name", ""), 20))
+                page_pngs = [fn for fn in pngs if any(tn in fn for tn in page_tc_names)] if page_tc_names else []
+                if not page_pngs: continue
+                if first_sheet:
+                    ws = wb.active
+                    ws.title = sheet_name
+                    first_sheet = False
+                else:
+                    ws = wb.create_sheet(title=sheet_name)
+                _write_sheet(ws, page_pngs)
+            # If no pages matched, write all to default sheet
+            if first_sheet:
+                ws = wb.active
+                ws.title = "エビデンス"
+                _write_sheet(ws, pngs)
+        else:
+            ws = wb.active
+            ws.title = "エビデンス"
+            _write_sheet(ws, pngs)
+
         xp = os.path.join(outdir, "evidence.xlsx")
         wb.save(xp)
         log_cb(f"[Excel] {xp}")
     except Exception as x:
         log_cb(f"[WARN] Excel生成失敗: {x}")
 
-def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=None, progress_cb=None, driver_ref=None):
+def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=None, progress_cb=None, driver_ref=None, pages=None):
     """Run all enabled test cases sequentially. stop_event: threading.Event to abort.
     progress_cb(current, total): optional progress callback.
-    driver_ref: list to register/unregister driver for external cleanup."""
+    driver_ref: list to register/unregister driver for external cleanup.
+    pages: list of page objects for Excel report grouping."""
     try:
         from selenium import webdriver
         from selenium.webdriver.common.by import By
@@ -526,7 +554,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         else:
             log_cb(f"\n[全完了] {len(test_cases)} テスト -> {outdir}")
         _generate_report(outdir, log_cb)
-        _generate_excel_report(outdir, log_cb)
+        _generate_excel_report(outdir, log_cb, pages=pages, test_cases=test_cases)
     except Exception as x:
         log_cb(f"[ERROR] {x}"); outdir = None
     finally:
@@ -563,6 +591,7 @@ CONFIG_FILE = "y_shot_config.ini"
 TESTS_FILE = "y_shot_tests.json"
 PATTERNS_FILE = "y_shot_patterns.json"
 SELECTOR_BANK_FILE = "y_shot_selectors.json"
+PAGES_FILE = "y_shot_pages.json"
 
 def load_csv(path):
     if not os.path.isfile(path): return []
@@ -596,6 +625,12 @@ def load_selector_bank():
     with open(_data_path(SELECTOR_BANK_FILE), "r", encoding="utf-8") as f: return json.load(f)
 def save_selector_bank(bank):
     with open(_data_path(SELECTOR_BANK_FILE), "w", encoding="utf-8") as f: json.dump(bank, f, ensure_ascii=False, indent=2)
+def load_pages():
+    p = _data_path(PAGES_FILE)
+    if not os.path.isfile(p): return []
+    with open(p, "r", encoding="utf-8") as f: return json.load(f)
+def save_pages(pages):
+    with open(_data_path(PAGES_FILE), "w", encoding="utf-8") as f: json.dump(pages, f, ensure_ascii=False, indent=2)
 def get_templates_dir():
     """Return the user-accessible templates dir (next to exe/script).
     On first run after exe install, copy bundled templates there."""
@@ -629,12 +664,15 @@ def main(page: ft.Page):
         "pattern_sets": load_pattern_sets(),
         "config": load_config(),
         "selector_bank": load_selector_bank(),
+        "pages": load_pages(),
         "browser_driver": None, "browser_elements": [],
         "selected_test": 0, "selected_pat_set": None, "selected_el": -1,
+        "selected_page": None,  # page _id
         "collapsed": set(),
         "stop_event": None,  # threading.Event for abort
         "test_drivers": [],  # active test drivers (for cleanup on exit)
         "_tc_id_counter": 0,  # unique ID counter for test cases
+        "_page_id_counter": 0,  # unique ID counter for pages
     }
     # Assign unique IDs to loaded test cases
     _max_id = 0
@@ -650,6 +688,61 @@ def main(page: ft.Page):
     def _new_tc_id():
         state["_tc_id_counter"] += 1
         return f"tc_{state['_tc_id_counter']}"
+
+    # Restore page ID counter from existing pages
+    _max_page_id = 0
+    for pg in state["pages"]:
+        try: _max_page_id = max(_max_page_id, int(pg["_id"].split("_", 1)[1]))
+        except (ValueError, IndexError): pass
+    state["_page_id_counter"] = _max_page_id
+
+    def _new_page_id():
+        state["_page_id_counter"] += 1
+        return f"p_{state['_page_id_counter']}"
+
+    def cur_page():
+        """Get currently selected page."""
+        pid = state["selected_page"]
+        for p in state["pages"]:
+            if p["_id"] == pid: return p
+        return None
+
+    def tests_for_page(page_id):
+        """Get tests belonging to a page, ordered."""
+        return [t for t in state["tests"] if t.get("page_id") == page_id]
+
+    def auto_number_tests():
+        """Re-number tests based on page order and position."""
+        for pg in state["pages"]:
+            pnum = pg["number"]
+            page_tests = tests_for_page(pg["_id"])
+            for i, tc in enumerate(page_tests, 1):
+                tc["number"] = f"{pnum}-{i}"
+
+    # Migration: if pages list is empty but tests exist, create default page
+    if not state["pages"] and state["tests"]:
+        default_page = {"_id": _new_page_id(), "name": "ページ1", "number": "1"}
+        state["pages"].append(default_page)
+        for i, tc in enumerate(state["tests"], 1):
+            tc["page_id"] = default_page["_id"]
+            tc["number"] = f"1-{i}"
+        state["selected_page"] = default_page["_id"]
+    elif not state["pages"]:
+        # No tests and no pages: create a default empty page
+        default_page = {"_id": _new_page_id(), "name": "ページ1", "number": "1"}
+        state["pages"].append(default_page)
+        state["selected_page"] = default_page["_id"]
+    else:
+        # Ensure tests without page_id get assigned to first page
+        first_pid = state["pages"][0]["_id"]
+        for tc in state["tests"]:
+            if "page_id" not in tc:
+                tc["page_id"] = first_pid
+            if "number" not in tc:
+                tc["number"] = ""
+        auto_number_tests()
+        state["selected_page"] = state["pages"][0]["_id"]
+
     cfg = state["config"]
 
     # ── Helpers ──
@@ -704,6 +797,7 @@ def main(page: ft.Page):
         c["browser_wait"] = browser_wait.value or "3.0"
         save_config(c); save_tests(state["tests"])
         save_pattern_sets(state["pattern_sets"]); save_selector_bank(state["selector_bank"])
+        save_pages(state["pages"])
     def close_browser():
         if state["browser_driver"]:
             kill_driver(state["browser_driver"])
@@ -734,61 +828,209 @@ def main(page: ft.Page):
 
     def _update_test_highlights():
         """Update selection highlighting without rebuilding controls (Flet #5093 workaround)."""
-        for i, ctrl in enumerate(test_list.controls):
-            sel = (i == state["selected_test"])
-            ctrl.bgcolor = ft.Colors.BLUE_50 if sel else None
-            ctrl.border = ft.Border.all(2, ft.Colors.BLUE_300) if sel else ft.Border.all(1, ft.Colors.GREY_200)
+        # With 2-column layout, test_list contains ft.Row objects, each with card containers
+        for row_ctrl in test_list.controls:
+            if isinstance(row_ctrl, ft.Row):
+                for card in row_ctrl.controls:
+                    tc_id = card.key
+                    idx = _find_test_idx(tc_id) if tc_id else -1
+                    sel = (idx == state["selected_test"])
+                    card.bgcolor = ft.Colors.BLUE_50 if sel else None
+                    card.border = ft.Border.all(2, ft.Colors.BLUE_300) if sel else ft.Border.all(1, ft.Colors.GREY_200)
+
+    def refresh_page_list(update=True):
+        """Show all pages in compact list with test count."""
+        page_list.controls.clear()
+        for pg in state["pages"]:
+            selected = (pg["_id"] == state["selected_page"])
+            n_tests = len(tests_for_page(pg["_id"]))
+            page_list.controls.append(ft.Container(
+                ft.Row([
+                    ft.Text(f"{pg['number']}", size=12, weight=ft.FontWeight.BOLD,
+                            color=ft.Colors.BLUE_800 if selected else ft.Colors.GREY_700, width=24),
+                    ft.Text(pg["name"], size=12, expand=True,
+                            weight=ft.FontWeight.BOLD if selected else ft.FontWeight.NORMAL,
+                            color=ft.Colors.BLUE_800 if selected else ft.Colors.BLACK),
+                    ft.Text(f"{n_tests}", size=10, color=ft.Colors.GREY_500),
+                    ft.PopupMenuButton(
+                        icon=ft.Icons.MORE_VERT, icon_size=14, icon_color=ft.Colors.GREY_400,
+                        tooltip="操作",
+                        items=[
+                            ft.PopupMenuItem(icon=ft.Icons.PLAY_ARROW, content="ページ実行",
+                                             on_click=lambda e, pid=pg["_id"]: run_page(pid)),
+                            ft.PopupMenuItem(icon=ft.Icons.EDIT, content="編集",
+                                             on_click=lambda e, pid=pg["_id"]: edit_page(pid)),
+                            ft.PopupMenuItem(),  # divider
+                            ft.PopupMenuItem(icon=ft.Icons.DELETE, content="削除",
+                                             on_click=lambda e, pid=pg["_id"]: del_page(pid)),
+                        ],
+                    ),
+                ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
+                bgcolor=ft.Colors.BLUE_50 if selected else None,
+                padding=ft.Padding(6, 4, 4, 4), border_radius=4,
+                border=ft.Border.all(2, ft.Colors.BLUE_300) if selected else ft.Border.all(1, ft.Colors.GREY_200),
+                on_click=lambda e, pid=pg["_id"]: select_page(pid),
+                key=f"page_{pg['_id']}",
+            ))
+        if update: page.update()
+
+    def select_page(pid):
+        state["selected_page"] = pid
+        state["selected_test"] = -1
+        refresh_page_list(False)
+        refresh_test_list(False)
+        refresh_steps(False)
+        page.update()
+
+    def add_page(e):
+        # Auto-suggest next number
+        existing_nums = [pg["number"] for pg in state["pages"]]
+        next_num = str(len(state["pages"]) + 1)
+        nf = ft.TextField(label="ページ名", width=300, value=f"ページ{next_num}")
+        numf = ft.TextField(label="番号", width=100, value=next_num)
+        def on_ok(e):
+            try:
+                name = nf.value.strip()
+                num = numf.value.strip()
+                if not name: snack("名前入力", ft.Colors.RED_600); return
+                if not num: snack("番号入力", ft.Colors.RED_600); return
+                new_pg = {"_id": _new_page_id(), "name": name, "number": num}
+                state["pages"].append(new_pg)
+                state["selected_page"] = new_pg["_id"]
+                refresh_page_list(False); refresh_test_list(False); refresh_steps(False)
+                page.update(); close_dlg(dlg)
+            except Exception as x: _log_error("add_page", x); close_dlg(dlg)
+        dlg = ft.AlertDialog(title=ft.Text("ページ追加"),
+            content=ft.Column([nf, numf], tight=True, spacing=10, width=350),
+            actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg)
+
+    def edit_page(pid):
+        pg = None
+        for p in state["pages"]:
+            if p["_id"] == pid: pg = p; break
+        if not pg: return
+        nf = ft.TextField(label="ページ名", width=300, value=pg["name"])
+        numf = ft.TextField(label="番号", width=100, value=pg["number"])
+        def on_ok(e):
+            try:
+                name = nf.value.strip()
+                num = numf.value.strip()
+                if not name: snack("名前入力", ft.Colors.RED_600); return
+                if not num: snack("番号入力", ft.Colors.RED_600); return
+                pg["name"] = name
+                pg["number"] = num
+                auto_number_tests()
+                refresh_page_list(False); refresh_test_list(False); refresh_steps(False)
+                page.update(); close_dlg(dlg)
+            except Exception as x: _log_error("edit_page", x); close_dlg(dlg)
+        dlg = ft.AlertDialog(title=ft.Text("ページ編集"),
+            content=ft.Column([nf, numf], tight=True, spacing=10, width=350),
+            actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg)
+
+    def del_page(pid):
+        if len(state["pages"]) <= 1:
+            snack("最後のページは削除できません", ft.Colors.RED_600); return
+        pg = None
+        for p in state["pages"]:
+            if p["_id"] == pid: pg = p; break
+        if not pg: return
+        n_tests = len(tests_for_page(pid))
+        def on_yes(e):
+            try:
+                # Remove tests belonging to this page
+                state["tests"] = [t for t in state["tests"] if t.get("page_id") != pid]
+                state["pages"] = [p for p in state["pages"] if p["_id"] != pid]
+                if state["selected_page"] == pid:
+                    state["selected_page"] = state["pages"][0]["_id"] if state["pages"] else None
+                state["selected_test"] = -1
+                auto_number_tests()
+                refresh_page_list(False); refresh_test_list(False); refresh_steps(False)
+                page.update(); close_dlg(dlg)
+            except Exception as x: _log_error("del_page", x); close_dlg(dlg)
+        msg = f"「{pg['name']}」を削除しますか？"
+        if n_tests > 0:
+            msg += f"\n（{n_tests}件のテストケースも削除されます）"
+        dlg = ft.AlertDialog(title=ft.Text("ページ削除確認"),
+            content=ft.Text(msg),
+            actions=[ft.TextButton("削除", on_click=on_yes, style=ft.ButtonStyle(color=ft.Colors.RED_600)),
+                     ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg)
+
+    def run_page(pid=None):
+        """Run all tests in the given page (or selected page if pid is None)."""
+        if pid is None:
+            pid = state["selected_page"]
+        page_tests = tests_for_page(pid)
+        _do_run(page_tests)
 
     def refresh_test_list(update=True):
         test_list.controls.clear()
-        if not state["tests"]:
+        # Only show tests for the currently selected page
+        cur_pid = state["selected_page"]
+        page_tests = tests_for_page(cur_pid) if cur_pid else []
+        if not page_tests:
             test_list.controls.append(ft.Container(
                 ft.Column([
                     ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE, size=32, color=ft.Colors.GREY_400),
                     ft.Text("＋ボタンでテストケースを追加", size=12, color=ft.Colors.GREY_500, text_align=ft.TextAlign.CENTER),
                 ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
                 padding=ft.Padding(20, 40, 20, 20), key="empty"))
-        for i, tc in enumerate(state["tests"]):
-            selected = (i == state["selected_test"])
+        # Build 2-column grid using Row with wrap
+        cards = []
+        for tc in page_tests:
+            global_idx = _find_test_idx(tc.get("_id", ""))
+            selected = (global_idx == state["selected_test"])
             pat = tc.get("pattern","")
             n_steps = len([s for s in tc.get("steps",[]) if s["type"] not in ("見出し","コメント")])
             n_pats = len(state["pattern_sets"].get(pat,[])) if pat else 0
             subtitle = f"{n_steps}ステップ"
-            if pat: subtitle += f" | {pat}({n_pats}件)"
-            tc_id = tc.get("_id", f"tc_fallback_{i}")
-            # All callbacks use _id, not index (safe after reorder)
-            test_list.controls.append(ft.Container(
-                ft.Row([
-                    ft.Column([
-                        ft.Text(tc.get("name",""), weight=ft.FontWeight.BOLD, size=13,
-                                color=ft.Colors.BLUE_800 if selected else ft.Colors.BLACK),
-                        ft.Text(subtitle, size=10, color=ft.Colors.GREY_500),
-                    ], spacing=2, expand=True),
-                    ft.PopupMenuButton(
-                        icon=ft.Icons.MORE_VERT, icon_size=18, icon_color=ft.Colors.GREY_500,
-                        tooltip="操作",
-                        items=[
-                            ft.PopupMenuItem(icon=ft.Icons.PLAY_ARROW, content="実行",
-                                             on_click=lambda e, tid=tc_id: run_single(_find_test_idx(tid))),
-                            ft.PopupMenuItem(icon=ft.Icons.COPY, content="コピー",
-                                             on_click=lambda e, tid=tc_id: copy_test(_find_test_idx(tid))),
-                            ft.PopupMenuItem(),  # divider
-                            ft.PopupMenuItem(icon=ft.Icons.DELETE, content="削除",
-                                             on_click=lambda e, tid=tc_id: del_test(_find_test_idx(tid))),
-                        ],
-                    ),
-                ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            if pat: subtitle += f" | {n_pats}件"
+            tc_id = tc.get("_id", f"tc_fallback_{global_idx}")
+            tc_number = tc.get("number", "")
+            card = ft.Container(
+                ft.Column([
+                    ft.Row([
+                        ft.Text(tc_number, size=10, color=ft.Colors.BLUE_600, weight=ft.FontWeight.BOLD),
+                        ft.PopupMenuButton(
+                            icon=ft.Icons.MORE_VERT, icon_size=14, icon_color=ft.Colors.GREY_400,
+                            tooltip="操作",
+                            items=[
+                                ft.PopupMenuItem(icon=ft.Icons.PLAY_ARROW, content="実行",
+                                                 on_click=lambda e, tid=tc_id: run_single(_find_test_idx(tid))),
+                                ft.PopupMenuItem(icon=ft.Icons.COPY, content="コピー",
+                                                 on_click=lambda e, tid=tc_id: copy_test(_find_test_idx(tid))),
+                                ft.PopupMenuItem(),  # divider
+                                ft.PopupMenuItem(icon=ft.Icons.DELETE, content="削除",
+                                                 on_click=lambda e, tid=tc_id: del_test(_find_test_idx(tid))),
+                            ],
+                        ),
+                    ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                    ft.Text(tc.get("name",""), weight=ft.FontWeight.BOLD, size=12,
+                            color=ft.Colors.BLUE_800 if selected else ft.Colors.BLACK,
+                            max_lines=2, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(subtitle, size=10, color=ft.Colors.GREY_500),
+                ], spacing=2),
                 bgcolor=ft.Colors.BLUE_50 if selected else None,
-                padding=ft.Padding(10, 6, 36, 6), border_radius=6,
+                padding=ft.Padding(8, 6, 8, 6), border_radius=6,
                 border=ft.Border.all(2, ft.Colors.BLUE_300) if selected else ft.Border.all(1, ft.Colors.GREY_200),
                 on_click=lambda e, tid=tc_id: select_test(_find_test_idx(tid)),
-                key=tc_id,
-            ))
+                key=tc_id, width=145,
+            )
+            cards.append(card)
+        if cards:
+            test_list.controls.clear()
+            # Arrange in 2-column rows
+            for row_start in range(0, len(cards), 2):
+                row_cards = cards[row_start:row_start+2]
+                test_list.controls.append(ft.Row(row_cards, spacing=4, wrap=True))
         # Update run button state based on URL config
         has_url = bool(state["config"].get("url","").strip())
         has_tests = len(state["tests"]) > 0
         run_btn.disabled = not (has_url and has_tests)
         run_single_btn.disabled = not (has_url and has_tests)
+        run_page_btn.disabled = not (has_url and page_tests)
         schedule_save()
         if update: page.update()
 
@@ -810,16 +1052,25 @@ def main(page: ft.Page):
             old, new = e.old_index, e.new_index
             if old is None or new is None: return
             if _is_dup_reorder("test", old, new): return
-            tests = state["tests"]
-            if not (0 <= old < len(tests) and 0 <= new <= len(tests)): return
+            # With 2-column layout, reorder is on rows (each row = ft.Row of cards)
+            # For simplicity, rebuild on reorder
+            cur_pid = state["selected_page"]
+            page_tests = tests_for_page(cur_pid) if cur_pid else []
+            if not (0 <= old < len(page_tests) and 0 <= new <= len(page_tests)): return
             adj_new = new - 1 if new > old else new
             if old == adj_new: return
-            tests.insert(adj_new, tests.pop(old))
-            test_list.controls.insert(adj_new, test_list.controls.pop(old))
-            if state["selected_test"] == old: state["selected_test"] = adj_new
-            elif old < state["selected_test"] <= adj_new: state["selected_test"] -= 1
-            elif adj_new <= state["selected_test"] < old: state["selected_test"] += 1
-            _update_test_highlights()
+            # Get global indices
+            old_tc = page_tests[old]
+            old_gi = state["tests"].index(old_tc)
+            new_tc = page_tests[adj_new] if adj_new < len(page_tests) else None
+            state["tests"].remove(old_tc)
+            if new_tc:
+                new_gi = state["tests"].index(new_tc)
+                state["tests"].insert(new_gi, old_tc)
+            else:
+                state["tests"].append(old_tc)
+            auto_number_tests()
+            refresh_test_list(False); refresh_page_list(False)
             schedule_save()
             page.update()
         except Exception as x: _log_error("on_test_reorder", x)
@@ -833,9 +1084,16 @@ def main(page: ft.Page):
         page.update()
 
     def add_test(e):
-        state["tests"].append({"name": f"テスト{len(state['tests'])+1}", "pattern": None, "steps": [], "_id": _new_tc_id()})
+        cur_pid = state["selected_page"]
+        if not cur_pid:
+            snack("ページを選択してください", ft.Colors.ORANGE_600); return
+        page_tests = tests_for_page(cur_pid)
+        new_tc = {"name": f"テスト{len(page_tests)+1}", "pattern": None, "steps": [],
+                  "_id": _new_tc_id(), "page_id": cur_pid, "number": ""}
+        state["tests"].append(new_tc)
+        auto_number_tests()
         state["selected_test"] = len(state["tests"]) - 1
-        refresh_test_list(False); refresh_steps()
+        refresh_page_list(False); refresh_test_list(False); refresh_steps()
 
     def copy_test(idx):
         if 0 <= idx < len(state["tests"]):
@@ -843,9 +1101,11 @@ def main(page: ft.Page):
             tc = copy.deepcopy(state["tests"][idx])
             tc["name"] = tc["name"] + " (コピー)"
             tc["_id"] = _new_tc_id()
+            # Keep same page_id
             state["tests"].insert(idx + 1, tc)
+            auto_number_tests()
             state["selected_test"] = idx + 1
-            refresh_test_list(False); refresh_steps()
+            refresh_page_list(False); refresh_test_list(False); refresh_steps()
 
     def del_test(idx):
         if not (0 <= idx < len(state["tests"])): return
@@ -866,9 +1126,10 @@ def main(page: ft.Page):
                     del state["pattern_sets"][pat]
                     if state["selected_pat_set"] == pat: state["selected_pat_set"] = None
                 state["tests"].pop(idx)
+                auto_number_tests()
                 if state["selected_test"] >= len(state["tests"]):
                     state["selected_test"] = max(0, len(state["tests"])-1)
-                refresh_test_list(False); refresh_steps()
+                refresh_page_list(False); refresh_test_list(False); refresh_steps()
                 refresh_pat_set_list(False); refresh_pats()
                 close_dlg(dlg)
             except Exception as x:
@@ -887,16 +1148,29 @@ def main(page: ft.Page):
         tc = cur_test()
         if not tc: return
         nf = ft.TextField(label="テスト名", value=tc["name"], width=350)
+        numf = ft.TextField(label="番号", value=tc.get("number", ""), width=120)
         pat_opts = [ft.dropdown.Option("なし")] + [ft.dropdown.Option(n) for n in pat_set_names()]
         pf = ft.Dropdown(label="パターンセット", width=350, value=tc.get("pattern") or "なし", options=pat_opts)
+        page_opts = [ft.dropdown.Option(key=pg["_id"], text=f"{pg['number']} {pg['name']}") for pg in state["pages"]]
+        page_dd = ft.Dropdown(label="ページ", width=350, value=tc.get("page_id", ""), options=page_opts)
         def on_ok(e):
             try:
                 tc["name"] = nf.value
                 tc["pattern"] = None if pf.value == "なし" else pf.value
-                refresh_test_list(False); refresh_steps(); close_dlg(dlg)
+                # Move to different page if changed
+                new_pid = page_dd.value
+                if new_pid and new_pid != tc.get("page_id"):
+                    tc["page_id"] = new_pid
+                    state["selected_page"] = new_pid
+                # Allow manual number override
+                if numf.value.strip():
+                    tc["number"] = numf.value.strip()
+                else:
+                    auto_number_tests()
+                refresh_page_list(False); refresh_test_list(False); refresh_steps(); close_dlg(dlg)
             except Exception as x: _log_error("edit_test_name", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("テストケース設定"),
-            content=ft.Column([nf, pf], tight=True, spacing=10, width=400),
+            content=ft.Column([nf, numf, page_dd, pf], tight=True, spacing=10, width=400),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
@@ -1200,10 +1474,13 @@ def main(page: ft.Page):
                     new_steps.append({"type": "クリック", "selector": "{パターン}"})
                 if add_ss.value:
                     new_steps.append({"type": "スクショ", "mode": "fullpage"})
-                new_tc = {"name": tc_name, "pattern": pat_name, "steps": new_steps, "_id": _new_tc_id()}
+                cur_pid = state["selected_page"] or (state["pages"][0]["_id"] if state["pages"] else None)
+                new_tc = {"name": tc_name, "pattern": pat_name, "steps": new_steps, "_id": _new_tc_id(),
+                          "page_id": cur_pid, "number": ""}
                 state["tests"].append(new_tc)
+                auto_number_tests()
                 state["selected_test"] = len(state["tests"]) - 1
-                refresh_steps(False); refresh_test_list(False)
+                refresh_steps(False); refresh_test_list(False); refresh_page_list(False)
                 refresh_pat_set_list(False); refresh_pats()
                 snack(f"{el_type_name}の全パターン {len(options)} 件を追加")
                 close_dlg(dlg)
@@ -1529,7 +1806,7 @@ def main(page: ft.Page):
         close_browser()
         stop_ev = threading.Event()
         state["stop_event"] = stop_ev
-        run_btn.disabled = True; run_single_btn.disabled = True
+        run_btn.disabled = True; run_single_btn.disabled = True; run_page_btn.disabled = True
         stop_btn.visible = True; stop_btn.disabled = False
         open_folder_btn.visible = False
         progress.visible = True; progress.value = 0
@@ -1540,7 +1817,7 @@ def main(page: ft.Page):
             progress_label.value = f"{current}/{total} パターン"
             page.update()
         def on_done(outdir=None):
-            run_btn.disabled = False; run_single_btn.disabled = False
+            run_btn.disabled = False; run_single_btn.disabled = False; run_page_btn.disabled = False
             stop_btn.visible = False; progress.visible = False
             progress_label.visible = False
             state["stop_event"] = None
@@ -1550,7 +1827,7 @@ def main(page: ft.Page):
             page.update()
         page.run_thread(run_all_tests, dict(c), list(test_cases_to_run),
                         dict(state["pattern_sets"]), lambda m: log(m), on_done, stop_ev, on_progress,
-                        state["test_drivers"])
+                        state["test_drivers"], list(state["pages"]))
 
     def run_click(e):
         _do_run(state["tests"])
@@ -1570,7 +1847,7 @@ def main(page: ft.Page):
     def switch_tab(idx):
         tc_content.visible = (idx == 0); ps_content.visible = (idx == 1)
         if idx == 0:
-            refresh_test_list(False); refresh_steps(False)
+            refresh_page_list(False); refresh_test_list(False); refresh_steps(False)
         else:
             refresh_pat_set_list(False); refresh_pats(False)
         page.update()
@@ -1589,7 +1866,7 @@ def main(page: ft.Page):
                  ft.DataColumn(ft.Text("セレクタ",size=11))],
         rows=[], column_spacing=8, data_row_min_height=28, heading_row_height=30)
 
-    test_list = ft.ReorderableListView(controls=[], on_reorder=on_test_reorder, spacing=4, expand=True)
+    test_list = ft.Column(controls=[], spacing=4, expand=True, scroll=ft.ScrollMode.AUTO)
     step_reorder = ft.ReorderableListView(controls=[], on_reorder=on_reorder, spacing=1, expand=True)
     log_list = ft.ListView(spacing=1, auto_scroll=True, height=130)
     _log_expanded = [False]
@@ -1611,6 +1888,8 @@ def main(page: ft.Page):
     progress_label = ft.Text("", size=11, color=ft.Colors.GREY_600, visible=False)
     run_single_btn = ft.Button("選択テスト実行", icon=ft.Icons.PLAY_ARROW, bgcolor=ft.Colors.GREEN_600,
                                color=ft.Colors.WHITE, on_click=lambda e: run_single(state["selected_test"]), height=42)
+    run_page_btn = ft.Button("ページ実行", icon=ft.Icons.PLAY_ARROW, bgcolor=ft.Colors.TEAL_600,
+                             color=ft.Colors.WHITE, on_click=lambda e: run_page(), height=42)
     run_btn = ft.Button("全テスト実行", icon=ft.Icons.PLAY_ARROW, bgcolor=ft.Colors.BLUE_600,
                         color=ft.Colors.WHITE, on_click=run_click, height=42)
     stop_btn = ft.Button("中断", icon=ft.Icons.STOP, bgcolor=ft.Colors.RED_600,
@@ -1623,14 +1902,22 @@ def main(page: ft.Page):
     open_folder_btn = ft.Button("出力フォルダを開く", icon=ft.Icons.FOLDER_OPEN,
                                 on_click=open_folder_click, height=42, visible=False)
 
+    # ── Build page list control ──
+    page_list = ft.Column(controls=[], spacing=2, scroll=ft.ScrollMode.AUTO)
+
     # ── Layout: Tab 1 (Tests) ──
     tc_content = ft.Row([
         ft.Container(ft.Column([
-            ft.Row([ft.Text("テストケース", weight=ft.FontWeight.BOLD, size=14),
-                    ft.IconButton(ft.Icons.ADD, tooltip="追加", icon_size=18, on_click=add_test)],
+            ft.Row([ft.Text("ページ", weight=ft.FontWeight.BOLD, size=13),
+                    ft.IconButton(ft.Icons.ADD, tooltip="ページ追加", icon_size=16, on_click=add_page)],
+                   alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            ft.Container(page_list, height=160, border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4, padding=4),
+            ft.Divider(height=1),
+            ft.Row([ft.Text("テストケース", weight=ft.FontWeight.BOLD, size=13),
+                    ft.IconButton(ft.Icons.ADD, tooltip="テスト追加", icon_size=16, on_click=add_test)],
                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             test_list,
-        ], spacing=4), width=260, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
+        ], spacing=4), width=320, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
         ft.Column([
             ft.Container(ft.Column([
                 ft.Row([tc_header, ft.IconButton(ft.Icons.EDIT, icon_size=16, tooltip="テスト設定", on_click=edit_test_name)],
@@ -1703,13 +1990,13 @@ def main(page: ft.Page):
 
     page.add(ft.Column([ft.Stack([tc_content, ps_content], expand=True),
         ft.Row([progress, progress_label], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-        ft.Row([open_folder_btn, stop_btn, run_single_btn, run_btn], alignment=ft.MainAxisAlignment.END, spacing=8)], expand=True, spacing=4))
+        ft.Row([open_folder_btn, stop_btn, run_single_btn, run_page_btn, run_btn], alignment=ft.MainAxisAlignment.END, spacing=8)], expand=True, spacing=4))
     page.navigation_bar = nav_bar
 
-    refresh_test_list(False); refresh_steps(False); refresh_pat_set_list(False); refresh_pats(False)
+    refresh_page_list(False); refresh_test_list(False); refresh_steps(False); refresh_pat_set_list(False); refresh_pats(False)
     page.update()
     _init_done[0] = True
-    _flog.info(f"{APP_NAME} v{APP_VERSION} started ({len(state['tests'])} tests, {len(state['pattern_sets'])} pattern sets)")
+    _flog.info(f"{APP_NAME} v{APP_VERSION} started ({len(state['pages'])} pages, {len(state['tests'])} tests, {len(state['pattern_sets'])} pattern sets)")
     def _cleanup_all_drivers():
         """Quit all Selenium drivers (test + element browser) via kill_driver."""
         for drv in list(state.get("test_drivers", [])):

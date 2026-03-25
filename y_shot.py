@@ -5,7 +5,7 @@ y-shot: Web Screenshot Automation Tool  v1.6 (Flet)
   - v1.6: popup menu, reorder fix, pattern count sync, modal dialogs
 """
 
-import csv, os, sys, json, threading, time
+import csv, os, sys, json, threading, time, logging
 from datetime import datetime
 from urllib.parse import urlparse, urlunparse
 import flet as ft
@@ -13,6 +13,21 @@ import flet as ft
 APP_NAME = "y-shot"
 APP_VERSION = "1.6"
 APP_AUTHOR = "Yuri Norimatsu"
+
+# ── File logger (log/YYYYMMDD.log, append) ──
+def _setup_file_logger():
+    _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)) if not getattr(sys, 'frozen', False)
+                            else os.path.dirname(sys.executable), "log")
+    os.makedirs(_log_dir, exist_ok=True)
+    _log_file = os.path.join(_log_dir, datetime.now().strftime("%Y%m%d") + ".log")
+    logger = logging.getLogger("y-shot")
+    logger.setLevel(logging.DEBUG)
+    if not logger.handlers:
+        fh = logging.FileHandler(_log_file, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
+        logger.addHandler(fh)
+    return logger
+_flog = _setup_file_logger()
 
 import re
 def _safe_filename(s, max_len=30):
@@ -653,17 +668,36 @@ def main(page: ft.Page):
         _save_timer[0].start()
 
     def log(msg):
+        _flog.info(msg)
         log_list.controls.append(ft.Text(msg, size=11, selectable=True, font_family="Consolas"))
         if len(log_list.controls) > 400: log_list.controls.pop(0)
-        page.update()
+        try: page.update()
+        except Exception: pass
+    def _log_error(context, exc):
+        """Log error to both UI and file with traceback."""
+        import traceback
+        _flog.error(f"{context}: {exc}\n{traceback.format_exc()}")
+        log(f"[ERROR] {context}: {exc}")
     def snack(msg, color=ft.Colors.GREEN_700):
-        page.overlay.append(ft.SnackBar(ft.Text(msg, color=ft.Colors.WHITE), bgcolor=color, open=True))
-        page.update()
+        try:
+            sb = ft.SnackBar(ft.Text(msg, color=ft.Colors.WHITE), bgcolor=color)
+            page.show_dialog(sb)
+        except Exception: pass
     def open_dlg(d, modal=True):
         d.modal = modal
-        page.overlay.append(d); d.open = True; page.update()
+        try:
+            page.show_dialog(d)
+        except RuntimeError:
+            # Dialog already open - close and reopen
+            try: d.open = False; d.update()
+            except Exception: pass
+            try: page.show_dialog(d)
+            except Exception: pass
     def close_dlg(d):
-        d.open = False; page.update()
+        try:
+            d.open = False
+            d.update()
+        except Exception: pass
     def save_all():
         c = dict(state["config"])
         c["browser_url"] = browser_url.value or ""
@@ -691,6 +725,20 @@ def main(page: ft.Page):
     # Tab 1: Test Cases
     # ================================================================
 
+    def _find_test_idx(tc_id):
+        """Find current index of a test case by its _id."""
+        for i, tc in enumerate(state["tests"]):
+            if tc.get("_id") == tc_id:
+                return i
+        return -1
+
+    def _update_test_highlights():
+        """Update selection highlighting without rebuilding controls (Flet #5093 workaround)."""
+        for i, ctrl in enumerate(test_list.controls):
+            sel = (i == state["selected_test"])
+            ctrl.bgcolor = ft.Colors.BLUE_50 if sel else None
+            ctrl.border = ft.Border.all(2, ft.Colors.BLUE_300) if sel else ft.Border.all(1, ft.Colors.GREY_200)
+
     def refresh_test_list(update=True):
         test_list.controls.clear()
         if not state["tests"]:
@@ -707,7 +755,8 @@ def main(page: ft.Page):
             n_pats = len(state["pattern_sets"].get(pat,[])) if pat else 0
             subtitle = f"{n_steps}ステップ"
             if pat: subtitle += f" | {pat}({n_pats}件)"
-            tc_key = tc.get("_id", f"tc_fallback_{i}")
+            tc_id = tc.get("_id", f"tc_fallback_{i}")
+            # All callbacks use _id, not index (safe after reorder)
             test_list.controls.append(ft.Container(
                 ft.Row([
                     ft.Column([
@@ -720,20 +769,20 @@ def main(page: ft.Page):
                         tooltip="操作",
                         items=[
                             ft.PopupMenuItem(icon=ft.Icons.PLAY_ARROW, content="実行",
-                                             on_click=lambda e, idx=i: run_single(idx)),
+                                             on_click=lambda e, tid=tc_id: run_single(_find_test_idx(tid))),
                             ft.PopupMenuItem(icon=ft.Icons.COPY, content="コピー",
-                                             on_click=lambda e, idx=i: copy_test(idx)),
+                                             on_click=lambda e, tid=tc_id: copy_test(_find_test_idx(tid))),
                             ft.PopupMenuItem(),  # divider
                             ft.PopupMenuItem(icon=ft.Icons.DELETE, content="削除",
-                                             on_click=lambda e, idx=i: del_test(idx)),
+                                             on_click=lambda e, tid=tc_id: del_test(_find_test_idx(tid))),
                         ],
                     ),
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 bgcolor=ft.Colors.BLUE_50 if selected else None,
                 padding=ft.Padding(10, 6, 36, 6), border_radius=6,
                 border=ft.Border.all(2, ft.Colors.BLUE_300) if selected else ft.Border.all(1, ft.Colors.GREY_200),
-                on_click=lambda e, idx=i: select_test(idx),
-                key=tc_key,
+                on_click=lambda e, tid=tc_id: select_test(_find_test_idx(tid)),
+                key=tc_id,
             ))
         # Update run button state based on URL config
         has_url = bool(state["config"].get("url","").strip())
@@ -743,38 +792,46 @@ def main(page: ft.Page):
         schedule_save()
         if update: page.update()
 
+    _last_reorder_event = [None, None, 0]  # [old, new, timestamp] for dedup
+
+    def _is_dup_reorder(old, new):
+        """Flet fires on_reorder twice per drag. Dedup by matching old+new within 1s."""
+        now = time.time()
+        if (_last_reorder_event[0] == old and _last_reorder_event[1] == new
+                and now - _last_reorder_event[2] < 1.0):
+            return True
+        _last_reorder_event[0] = old
+        _last_reorder_event[1] = new
+        _last_reorder_event[2] = now
+        return False
+
     def on_test_reorder(e):
-        """Flutter best practice: update data, sync controls list, page.update()."""
+        """Dedup + sync data & controls + page.update(). Safe because dedup prevents double-fire corruption."""
         try:
-            tests = state["tests"]
             old, new = e.old_index, e.new_index
             if old is None or new is None: return
+            if _is_dup_reorder(old, new): return
+            tests = state["tests"]
             if not (0 <= old < len(tests) and 0 <= new <= len(tests)): return
-            # 1) Update backing data
-            item = tests.pop(old)
             adj_new = new - 1 if new > old else new
-            tests.insert(adj_new, item)
-            # 2) Sync controls list to match
-            ctrl = test_list.controls.pop(old)
-            test_list.controls.insert(adj_new, ctrl)
-            # 3) Update selection index
+            if old == adj_new: return
+            tests.insert(adj_new, tests.pop(old))
+            test_list.controls.insert(adj_new, test_list.controls.pop(old))
             if state["selected_test"] == old: state["selected_test"] = adj_new
             elif old < state["selected_test"] <= adj_new: state["selected_test"] -= 1
             elif adj_new <= state["selected_test"] < old: state["selected_test"] += 1
-            # 4) Update selection highlighting
-            for i, c in enumerate(test_list.controls):
-                sel = (i == state["selected_test"])
-                c.bgcolor = ft.Colors.BLUE_50 if sel else None
-                c.border = ft.Border.all(2, ft.Colors.BLUE_300) if sel else ft.Border.all(1, ft.Colors.GREY_200)
+            _update_test_highlights()
             schedule_save()
             page.update()
-        except Exception as x:
-            log(f"[ERROR] on_test_reorder: {x}")
+        except Exception as x: _log_error("on_test_reorder", x)
 
     def select_test(idx):
+        if idx < 0 or idx >= len(state["tests"]): return
         state["selected_test"] = idx
         state["collapsed"] = set()
-        refresh_test_list(False); refresh_steps()
+        _update_test_highlights()
+        refresh_steps(False)
+        page.update()
 
     def add_test(e):
         state["tests"].append({"name": f"テスト{len(state['tests'])+1}", "pattern": None, "steps": [], "_id": _new_tc_id()})
@@ -805,15 +862,18 @@ def main(page: ft.Page):
             label=f"パターンセット「{pat}」も削除",
             value=True, visible=pat_orphan)
         def on_yes(e):
-            if pat_orphan and del_pat_cb.value and pat in state["pattern_sets"]:
-                del state["pattern_sets"][pat]
-                if state["selected_pat_set"] == pat: state["selected_pat_set"] = None
-            state["tests"].pop(idx)
-            if state["selected_test"] >= len(state["tests"]):
-                state["selected_test"] = max(0, len(state["tests"])-1)
-            refresh_test_list(False); refresh_steps()
-            refresh_pat_set_list(False); refresh_pats()
-            close_dlg(dlg)
+            try:
+                if pat_orphan and del_pat_cb.value and pat in state["pattern_sets"]:
+                    del state["pattern_sets"][pat]
+                    if state["selected_pat_set"] == pat: state["selected_pat_set"] = None
+                state["tests"].pop(idx)
+                if state["selected_test"] >= len(state["tests"]):
+                    state["selected_test"] = max(0, len(state["tests"])-1)
+                refresh_test_list(False); refresh_steps()
+                refresh_pat_set_list(False); refresh_pats()
+                close_dlg(dlg)
+            except Exception as x:
+                _log_error("del_test", x); close_dlg(dlg)
         content = ft.Column([
             ft.Text(f"「{name}」を削除しますか？"),
             del_pat_cb,
@@ -831,9 +891,11 @@ def main(page: ft.Page):
         pat_opts = [ft.dropdown.Option("なし")] + [ft.dropdown.Option(n) for n in pat_set_names()]
         pf = ft.Dropdown(label="パターンセット", width=350, value=tc.get("pattern") or "なし", options=pat_opts)
         def on_ok(e):
-            tc["name"] = nf.value
-            tc["pattern"] = None if pf.value == "なし" else pf.value
-            refresh_test_list(False); refresh_steps(); close_dlg(dlg)
+            try:
+                tc["name"] = nf.value
+                tc["pattern"] = None if pf.value == "なし" else pf.value
+                refresh_test_list(False); refresh_steps(); close_dlg(dlg)
+            except Exception as x: _log_error("edit_test_name", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("テストケース設定"),
             content=ft.Column([nf, pf], tight=True, spacing=10, width=400),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
@@ -899,23 +961,22 @@ def main(page: ft.Page):
         if update: page.update()
 
     def on_reorder(e):
-        """Flutter pattern: update data, sync controls list, page.update()."""
-        tc = cur_test()
-        if not tc: return
-        steps = tc["steps"]; vis = _get_vis(steps)
-        old, new = e.old_index, e.new_index
-        if old is None or new is None: return
-        if old < len(vis) and new <= len(vis):
-            ao = vis[old]; an = vis[new] if new < len(vis) else len(steps)
-            item = steps.pop(ao)
-            if an > ao: an -= 1
-            steps.insert(an, item)
-            # Sync controls list
-            adj_new = new - 1 if new > old else new
-            ctrl = step_reorder.controls.pop(old)
-            step_reorder.controls.insert(adj_new, ctrl)
-            schedule_save()
-            page.update()
+        """Dedup + sync data & controls + page.update()."""
+        try:
+            tc = cur_test()
+            if not tc: return
+            old, new = e.old_index, e.new_index
+            if old is None or new is None: return
+            if _is_dup_reorder(old, new): return
+            steps = tc["steps"]; vis = _get_vis(steps)
+            if old < len(vis) and new <= len(vis):
+                ao = vis[old]; an = vis[new] if new < len(vis) else len(steps)
+                steps.insert(an - (1 if an > ao else 0), steps.pop(ao))
+                adj_new = new - 1 if new > old else new
+                step_reorder.controls.insert(adj_new, step_reorder.controls.pop(old))
+                schedule_save()
+                page.update()
+        except Exception as x: _log_error("on_reorder", x)
 
     def _get_vis(steps):
         vis, hidden = [], False
@@ -937,6 +998,9 @@ def main(page: ft.Page):
     def show_step_dlg(idx):
         tc = cur_test()
         if not tc: return
+        if idx is not None and idx >= len(tc.get("steps", [])):
+            _log_error("show_step_dlg", f"index {idx} out of range (steps={len(tc.get('steps',[]))})")
+            return
         init = tc["steps"][idx] if idx is not None else {}
         t0 = init.get("type","入力")
         type_dd = ft.Dropdown(label="種類", width=160, value=t0, options=[ft.dropdown.Option(t) for t in STEP_TYPES])
@@ -965,45 +1029,49 @@ def main(page: ft.Page):
         margin_f = ft.TextField(label="マージン(px)", width=120, value=init.get("margin_px","200"))
         text_f = ft.TextField(label="テキスト", width=450, value=init.get("text",""), multiline=True, min_lines=1, max_lines=3)
         def upd(e=None):
-            t = type_dd.value
-            sel_field.visible = t in ("入力","クリック","選択") or (t=="スクショ" and mode_dd.value in ("element","margin"))
-            val_mode.visible = t in ("入力","選択")
-            val_field.visible = t in ("入力","選択") and val_mode.value == "手入力"
-            sec_field.visible = (t=="待機"); mode_dd.visible = (t=="スクショ")
-            margin_f.visible = (t=="スクショ" and mode_dd.value=="margin"); text_f.visible = t in ("見出し","コメント")
-            if t == "選択": val_mode.label = "選択肢の指定方法"
-            else: val_mode.label = "値の指定方法"
-            page.update()
+            try:
+                t = type_dd.value
+                sel_field.visible = t in ("入力","クリック","選択") or (t=="スクショ" and mode_dd.value in ("element","margin"))
+                val_mode.visible = t in ("入力","選択")
+                val_field.visible = t in ("入力","選択") and val_mode.value == "手入力"
+                sec_field.visible = (t=="待機"); mode_dd.visible = (t=="スクショ")
+                margin_f.visible = (t=="スクショ" and mode_dd.value=="margin"); text_f.visible = t in ("見出し","コメント")
+                if t == "選択": val_mode.label = "選択肢の指定方法"
+                else: val_mode.label = "値の指定方法"
+                page.update()
+            except Exception as x: _log_error("show_step_dlg.upd", x)
         type_dd.on_select = upd; mode_dd.on_select = upd; val_mode.on_select = upd
         def on_ok(e):
-            t = type_dd.value; step = {"type": t}
-            if t in ("見出し","コメント"): step["text"] = text_f.value
-            elif t in ("入力","クリック","選択"):
-                s = sel_field.value if hasattr(sel_field,'value') else ""
-                if not s: snack("セレクタを入力", ft.Colors.RED_600); return
-                step["selector"] = s
-                if t in ("入力","選択"):
-                    if val_mode.value == "手入力":
-                        step["value"] = val_field.value
-                    else:
-                        step["value"] = "{パターン}"
-                        pat_name = val_mode.value.replace("パターン: ", "", 1)
-                        if pat_name in state["pattern_sets"]:
-                            tc["pattern"] = pat_name
-            elif t == "待機":
-                try: step["seconds"] = str(float(sec_field.value))
-                except Exception: snack("秒数を正しく", ft.Colors.RED_600); return
-            elif t == "スクショ":
-                step["mode"] = mode_dd.value
-                s = sel_field.value if hasattr(sel_field,'value') else ""
-                if mode_dd.value in ("element","margin") and not s: snack("セレクタ必要", ft.Colors.RED_600); return
-                if s: step["selector"] = s
-                if mode_dd.value == "margin":
-                    try: step["margin_px"] = str(int(margin_f.value))
-                    except Exception: snack("整数で", ft.Colors.RED_600); return
-            if idx is not None: tc["steps"][idx] = step
-            else: tc["steps"].append(step)
-            refresh_steps(False); refresh_test_list(); close_dlg(dlg)
+            try:
+                t = type_dd.value; step = {"type": t}
+                if t in ("見出し","コメント"): step["text"] = text_f.value
+                elif t in ("入力","クリック","選択"):
+                    s = sel_field.value if hasattr(sel_field,'value') else ""
+                    if not s: snack("セレクタを入力", ft.Colors.RED_600); return
+                    step["selector"] = s
+                    if t in ("入力","選択"):
+                        if val_mode.value == "手入力":
+                            step["value"] = val_field.value
+                        else:
+                            step["value"] = "{パターン}"
+                            pat_name = val_mode.value.replace("パターン: ", "", 1)
+                            if pat_name in state["pattern_sets"]:
+                                tc["pattern"] = pat_name
+                elif t == "待機":
+                    try: step["seconds"] = str(float(sec_field.value))
+                    except Exception: snack("秒数を正しく", ft.Colors.RED_600); return
+                elif t == "スクショ":
+                    step["mode"] = mode_dd.value
+                    s = sel_field.value if hasattr(sel_field,'value') else ""
+                    if mode_dd.value in ("element","margin") and not s: snack("セレクタ必要", ft.Colors.RED_600); return
+                    if s: step["selector"] = s
+                    if mode_dd.value == "margin":
+                        try: step["margin_px"] = str(int(margin_f.value))
+                        except Exception: snack("整数で", ft.Colors.RED_600); return
+                if idx is not None: tc["steps"][idx] = step
+                else: tc["steps"].append(step)
+                refresh_steps(False); refresh_test_list(); close_dlg(dlg)
+            except Exception as x: _log_error("show_step_dlg.on_ok", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("ステップ編集" if idx is not None else "ステップ追加"),
             content=ft.Column([type_dd, text_f, sel_field, val_mode, val_field, sec_field, mode_dd, margin_f],
                 tight=True, spacing=10, scroll=ft.ScrollMode.AUTO, width=500, height=420),
@@ -1126,24 +1194,24 @@ def main(page: ft.Page):
                      f"テストケース「{tc_name}」と\n"
                      f"パターンセット「{pat_name}」を作成します。")
         def on_ok(ev):
-            # パターンセット作成
-            state["pattern_sets"][pat_name] = list(options)
-            state["selected_pat_set"] = pat_name
-            # 専用テストケース作成
-            new_steps = []
-            if step_type == "選択":
-                new_steps.append({"type": "選択", "selector": sel, "value": "{パターン}"})
-            else:
-                new_steps.append({"type": "クリック", "selector": "{パターン}"})
-            if add_ss.value:
-                new_steps.append({"type": "スクショ", "mode": "fullpage"})
-            new_tc = {"name": tc_name, "pattern": pat_name, "steps": new_steps, "_id": _new_tc_id()}
-            state["tests"].append(new_tc)
-            state["selected_test"] = len(state["tests"]) - 1
-            refresh_steps(False); refresh_test_list(False)
-            refresh_pat_set_list(False); refresh_pats()
-            snack(f"{el_type_name}の全パターン {len(options)} 件を追加")
-            close_dlg(dlg)
+            try:
+                state["pattern_sets"][pat_name] = list(options)
+                state["selected_pat_set"] = pat_name
+                new_steps = []
+                if step_type == "選択":
+                    new_steps.append({"type": "選択", "selector": sel, "value": "{パターン}"})
+                else:
+                    new_steps.append({"type": "クリック", "selector": "{パターン}"})
+                if add_ss.value:
+                    new_steps.append({"type": "スクショ", "mode": "fullpage"})
+                new_tc = {"name": tc_name, "pattern": pat_name, "steps": new_steps, "_id": _new_tc_id()}
+                state["tests"].append(new_tc)
+                state["selected_test"] = len(state["tests"]) - 1
+                refresh_steps(False); refresh_test_list(False)
+                refresh_pat_set_list(False); refresh_pats()
+                snack(f"{el_type_name}の全パターン {len(options)} 件を追加")
+                close_dlg(dlg)
+            except Exception as x: _log_error("quick_add_all_options", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text(f"{el_type_name}の全パターン追加"),
             content=ft.Column([
                 ft.Text(info_text, size=13),
@@ -1199,13 +1267,20 @@ def main(page: ft.Page):
                                 color=ft.Colors.BLUE_800 if selected else ft.Colors.BLACK),
                         ft.Text(f"{len(pats)} パターン", size=10, color=ft.Colors.GREY_500),
                     ], spacing=2, expand=True),
-                    ft.IconButton(ft.Icons.EDIT, icon_size=16, tooltip="リネーム",
-                                  on_click=lambda e, n=name: rename_pat_set(n)),
-                    ft.IconButton(ft.Icons.DELETE, icon_size=16, icon_color=ft.Colors.RED_400,
-                                  on_click=lambda e, n=name: del_pat_set(n)),
+                    ft.PopupMenuButton(
+                        icon=ft.Icons.MORE_VERT, icon_size=18, icon_color=ft.Colors.GREY_500,
+                        tooltip="操作",
+                        items=[
+                            ft.PopupMenuItem(icon=ft.Icons.EDIT, content="リネーム",
+                                             on_click=lambda e, n=name: rename_pat_set(n)),
+                            ft.PopupMenuItem(),  # divider
+                            ft.PopupMenuItem(icon=ft.Icons.DELETE, content="削除",
+                                             on_click=lambda e, n=name: del_pat_set(n)),
+                        ],
+                    ),
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 bgcolor=ft.Colors.BLUE_50 if selected else None,
-                padding=ft.Padding(12, 8, 36, 8), border_radius=6,
+                padding=ft.Padding(10, 6, 36, 6), border_radius=6,
                 border=ft.Border.all(2, ft.Colors.BLUE_300) if selected else ft.Border.all(1, ft.Colors.GREY_200),
                 on_click=lambda e, n=name: select_pat_set(n),
                 key=f"ps_{name}",
@@ -1214,20 +1289,21 @@ def main(page: ft.Page):
         if update: page.update()
 
     def on_pat_set_reorder(e):
-        """Flutter pattern: update data, sync controls list, page.update()."""
-        names = list(state["pattern_sets"].keys())
-        old, new = e.old_index, e.new_index
-        if old is None or new is None: return
-        if 0 <= old < len(names) and 0 <= new <= len(names):
-            adj_new = new - 1 if new > old else new
-            item = names.pop(old)
-            names.insert(adj_new, item)
-            state["pattern_sets"] = {n: state["pattern_sets"][n] for n in names}
-            # Sync controls list
-            ctrl = pat_set_list.controls.pop(old)
-            pat_set_list.controls.insert(adj_new, ctrl)
-            schedule_save()
-            page.update()
+        """Dedup + sync data & controls + page.update()."""
+        try:
+            names = list(state["pattern_sets"].keys())
+            old, new = e.old_index, e.new_index
+            if old is None or new is None: return
+            if _is_dup_reorder(old, new): return
+            if 0 <= old < len(names) and 0 <= new <= len(names):
+                adj_new = new - 1 if new > old else new
+                if old == adj_new: return
+                names.insert(adj_new, names.pop(old))
+                state["pattern_sets"] = {n: state["pattern_sets"][n] for n in names}
+                pat_set_list.controls.insert(adj_new, pat_set_list.controls.pop(old))
+                schedule_save()
+                page.update()
+        except Exception as x: _log_error("on_pat_set_reorder", x)
 
     def select_pat_set(name):
         state["selected_pat_set"] = name; refresh_pat_set_list(False); refresh_pats()
@@ -1235,11 +1311,13 @@ def main(page: ft.Page):
     def add_pat_set(e):
         nf = ft.TextField(label="パターンセット名", width=300)
         def on_ok(e):
-            n = nf.value.strip()
-            if not n: snack("名前入力", ft.Colors.RED_600); return
-            if n in state["pattern_sets"]: snack("既に存在", ft.Colors.RED_600); return
-            state["pattern_sets"][n] = []; state["selected_pat_set"] = n
-            refresh_pat_set_list(False); refresh_pats(); close_dlg(dlg)
+            try:
+                n = nf.value.strip()
+                if not n: snack("名前入力", ft.Colors.RED_600); return
+                if n in state["pattern_sets"]: snack("既に存在", ft.Colors.RED_600); return
+                state["pattern_sets"][n] = []; state["selected_pat_set"] = n
+                refresh_pat_set_list(False); refresh_pats(); close_dlg(dlg)
+            except Exception as x: _log_error("add_pat_set", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("パターンセット追加"),
             content=nf, actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
@@ -1248,21 +1326,21 @@ def main(page: ft.Page):
         if old_name not in state["pattern_sets"]: return
         nf = ft.TextField(label="新しい名前", width=300, value=old_name)
         def on_ok(e):
-            new_name = nf.value.strip()
-            if not new_name: snack("名前入力", ft.Colors.RED_600); return
-            if new_name != old_name and new_name in state["pattern_sets"]:
-                snack("既に存在", ft.Colors.RED_600); return
-            if new_name != old_name:
-                # 順序を維持してリネーム
-                new_ps = {}
-                for k, v in state["pattern_sets"].items():
-                    new_ps[new_name if k == old_name else k] = v
-                state["pattern_sets"] = new_ps
-                # Update test cases referencing this pattern set
-                for tc in state["tests"]:
-                    if tc.get("pattern") == old_name: tc["pattern"] = new_name
-                if state["selected_pat_set"] == old_name: state["selected_pat_set"] = new_name
-            refresh_pat_set_list(False); refresh_pats(False); refresh_test_list(); close_dlg(dlg)
+            try:
+                new_name = nf.value.strip()
+                if not new_name: snack("名前入力", ft.Colors.RED_600); return
+                if new_name != old_name and new_name in state["pattern_sets"]:
+                    snack("既に存在", ft.Colors.RED_600); return
+                if new_name != old_name:
+                    new_ps = {}
+                    for k, v in state["pattern_sets"].items():
+                        new_ps[new_name if k == old_name else k] = v
+                    state["pattern_sets"] = new_ps
+                    for tc in state["tests"]:
+                        if tc.get("pattern") == old_name: tc["pattern"] = new_name
+                    if state["selected_pat_set"] == old_name: state["selected_pat_set"] = new_name
+                refresh_pat_set_list(False); refresh_pats(False); refresh_test_list(); close_dlg(dlg)
+            except Exception as x: _log_error("rename_pat_set", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("リネーム"),
             content=nf, actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
@@ -1271,9 +1349,11 @@ def main(page: ft.Page):
         if name not in state["pattern_sets"]: return
         cnt = len(state["pattern_sets"][name])
         def on_yes(e):
-            del state["pattern_sets"][name]
-            if state["selected_pat_set"] == name: state["selected_pat_set"] = None
-            refresh_pat_set_list(False); refresh_pats(False); refresh_test_list(); close_dlg(dlg)
+            try:
+                del state["pattern_sets"][name]
+                if state["selected_pat_set"] == name: state["selected_pat_set"] = None
+                refresh_pat_set_list(False); refresh_pats(False); refresh_test_list(); close_dlg(dlg)
+            except Exception as x: _log_error("del_pat_set", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("削除確認"),
             content=ft.Text(f"「{name}」({cnt}件) を削除しますか？"),
             actions=[ft.TextButton("削除", on_click=on_yes, style=ft.ButtonStyle(color=ft.Colors.RED_600)),
@@ -1281,21 +1361,22 @@ def main(page: ft.Page):
         open_dlg(dlg)
 
     def on_pat_reorder(e):
-        """Flutter pattern: update data, sync controls list, page.update()."""
-        name = state["selected_pat_set"]
-        if not name or name not in state["pattern_sets"]: return
-        pats = state["pattern_sets"][name]
-        old, new = e.old_index, e.new_index
-        if old is None or new is None: return
-        if 0 <= old < len(pats) and 0 <= new <= len(pats):
-            adj_new = new - 1 if new > old else new
-            item = pats.pop(old)
-            pats.insert(adj_new, item)
-            # Sync controls list
-            ctrl = pat_items.controls.pop(old)
-            pat_items.controls.insert(adj_new, ctrl)
-            schedule_save()
-            page.update()
+        """Dedup + sync data & controls + page.update()."""
+        try:
+            name = state["selected_pat_set"]
+            if not name or name not in state["pattern_sets"]: return
+            pats = state["pattern_sets"][name]
+            old, new = e.old_index, e.new_index
+            if old is None or new is None: return
+            if _is_dup_reorder(old, new): return
+            if 0 <= old < len(pats) and 0 <= new <= len(pats):
+                adj_new = new - 1 if new > old else new
+                if old == adj_new: return
+                pats.insert(adj_new, pats.pop(old))
+                pat_items.controls.insert(adj_new, pat_items.controls.pop(old))
+                schedule_save()
+                page.update()
+        except Exception as x: _log_error("on_pat_reorder", x)
 
     def refresh_pats(update=True):
         pat_items.controls.clear()
@@ -1336,11 +1417,13 @@ def main(page: ft.Page):
         lf = ft.TextField(label="ラベル", width=400, value=init.get("label",""))
         vf = ft.TextField(label="入力値", width=400, value=init.get("value",""), multiline=True, min_lines=3, max_lines=6)
         def on_ok(e):
-            if not lf.value: snack("ラベル入力", ft.Colors.RED_600); return
-            p = {"label": lf.value, "value": vf.value}
-            if idx is not None: pats[idx] = p
-            else: pats.append(p)
-            refresh_pats(False); refresh_pat_set_list(False); refresh_test_list(); close_dlg(dlg)
+            try:
+                if not lf.value: snack("ラベル入力", ft.Colors.RED_600); return
+                p = {"label": lf.value, "value": vf.value}
+                if idx is not None: pats[idx] = p
+                else: pats.append(p)
+                refresh_pats(False); refresh_pat_set_list(False); refresh_test_list(); close_dlg(dlg)
+            except Exception as x: _log_error("edit_pat", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("パターン"),
             content=ft.Column([lf, vf], tight=True, spacing=10, width=450),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
@@ -1374,8 +1457,10 @@ def main(page: ft.Page):
         # Pre-load all templates once for count display and selection
         csv_cache = {f: load_csv(os.path.join(td, f)) for f in csvs}
         def on_sel(fn):
-            state["pattern_sets"][name].extend(csv_cache[fn])
-            refresh_pats(False); refresh_pat_set_list(False); refresh_test_list(); snack(f"{len(csv_cache[fn])} 件追加"); close_dlg(dlg)
+            try:
+                state["pattern_sets"][name].extend(csv_cache[fn])
+                refresh_pats(False); refresh_pat_set_list(False); refresh_test_list(); snack(f"{len(csv_cache[fn])} 件追加"); close_dlg(dlg)
+            except Exception as x: _log_error("load_template", x); close_dlg(dlg)
         cards = [ft.Card(ft.Container(ft.Column([
             ft.Text(os.path.splitext(f)[0], weight=ft.FontWeight.BOLD, size=13),
             ft.Text(f"{len(csv_cache[f])} 件", size=11, color=ft.Colors.GREY_600)],
@@ -1392,19 +1477,21 @@ def main(page: ft.Page):
         cf = ft.TextField(label="繰り返す文字", width=80, value="あ")
         mf = ft.TextField(label="max_length", width=140, hint_text="例: 50")
         def on_ok(e):
-            ch = cf.value or "あ"
-            ml = mf.value.strip()
-            if not ml or not ml.isdigit() or int(ml) < 1:
-                snack("max_lengthを正の整数で入力", ft.Colors.RED_600); return
-            n = int(ml)
-            ps = []
-            if n > 1:
-                ps.append({"label": f"max-1({n-1}文字)", "value": ch * (n - 1)})
-            ps.append({"label": f"max({n}文字)", "value": ch * n})
-            ps.append({"label": f"max+1({n+1}文字)", "value": ch * (n + 1)})
-            state["pattern_sets"][name].extend(ps)
-            refresh_pats(False); refresh_pat_set_list(False); refresh_test_list()
-            snack(f"{len(ps)} 件追加"); close_dlg(dlg)
+            try:
+                ch = cf.value or "あ"
+                ml = mf.value.strip()
+                if not ml or not ml.isdigit() or int(ml) < 1:
+                    snack("max_lengthを正の整数で入力", ft.Colors.RED_600); return
+                n = int(ml)
+                ps = []
+                if n > 1:
+                    ps.append({"label": f"max-1({n-1}文字)", "value": ch * (n - 1)})
+                ps.append({"label": f"max({n}文字)", "value": ch * n})
+                ps.append({"label": f"max+1({n+1}文字)", "value": ch * (n + 1)})
+                state["pattern_sets"][name].extend(ps)
+                refresh_pats(False); refresh_pat_set_list(False); refresh_test_list()
+                snack(f"{len(ps)} 件追加"); close_dlg(dlg)
+            except Exception as x: _log_error("gen_input_check", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("max_length用 境界値生成"),
             content=ft.Column([
                 cf, mf,
@@ -1423,11 +1510,13 @@ def main(page: ft.Page):
         of = ft.TextField(label="出力フォルダ", value=c.get("output_dir", os.path.join(get_app_dir(), "screenshots")), width=450)
         hl = ft.Checkbox(label="ヘッドレスモード (ブラウザ非表示)", value=c.get("headless")=="1")
         def on_ok(e):
-            state["config"].update({"url":uf.value,"basic_auth_user":auf.value,
-                "basic_auth_pass":apf.value,"output_dir":of.value,
-                "headless":"1" if hl.value else "0"})
-            save_config(state["config"]); snack("設定保存")
-            refresh_test_list(False); page.update(); close_dlg(dlg)
+            try:
+                state["config"].update({"url":uf.value,"basic_auth_user":auf.value,
+                    "basic_auth_pass":apf.value,"output_dir":of.value,
+                    "headless":"1" if hl.value else "0"})
+                save_config(state["config"]); snack("設定保存")
+                refresh_test_list(False); page.update(); close_dlg(dlg)
+            except Exception as x: _log_error("show_settings", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("設定"),
             content=ft.Column([uf, ft.Row([auf, apf], spacing=10), of, hl], tight=True, spacing=12, width=500),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
@@ -1628,6 +1717,7 @@ def main(page: ft.Page):
     refresh_test_list(False); refresh_steps(False); refresh_pat_set_list(False); refresh_pats(False)
     page.update()
     _init_done[0] = True
+    _flog.info(f"{APP_NAME} v{APP_VERSION} started ({len(state['tests'])} tests, {len(state['pattern_sets'])} pattern sets)")
     def _cleanup_all_drivers():
         """Quit all Selenium drivers (test + element browser) via kill_driver."""
         for drv in list(state.get("test_drivers", [])):
@@ -1637,25 +1727,21 @@ def main(page: ft.Page):
             kill_driver(state["browser_driver"])
             state["browser_driver"] = None
 
-    def on_window_event(e):
-        if e.data == "close":
+    def on_window_event(e: ft.WindowEvent):
+        if e.type == ft.WindowEventType.CLOSE:
             if _save_timer[0]: _save_timer[0].cancel()
             save_all()
-            # テスト実行中なら中断シグナルを送り、スレッド終了を待つ
             ev = state.get("stop_event")
             if ev:
                 ev.set()
-                # テストスレッドのfinally内でdriver.quitが走るのを最大10秒待つ
                 for _ in range(100):
                     if not state.get("test_drivers"):
                         break
                     time.sleep(0.1)
-            # 残っていれば丁寧に終了
             _cleanup_all_drivers()
             page.window.destroy()
             os._exit(0)
 
-    # os._exit()ではatexitは呼ばれないため、シグナルハンドラで補完
     import signal
     def _signal_cleanup(signum, frame):
         _cleanup_all_drivers()
@@ -1663,8 +1749,9 @@ def main(page: ft.Page):
     try:
         signal.signal(signal.SIGTERM, _signal_cleanup)
         signal.signal(signal.SIGINT, _signal_cleanup)
-    except (OSError, ValueError): pass  # メインスレッド以外からは設定できない
+    except (OSError, ValueError): pass
 
+    page.window.prevent_close = True
     page.window.on_event = on_window_event
 
 if __name__ == "__main__":

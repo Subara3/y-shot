@@ -10,6 +10,9 @@ y_shot_steps.json
 # スクリーンショット出力
 screenshots/
 
+# ログ
+log/
+
 # メモ
 memo.txt
 

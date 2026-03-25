@@ -182,18 +182,6 @@ def build_auth_url(url, user, password):
     if p.port: nl += f":{p.port}"
     return urlunparse(p._replace(netloc=nl))
 
-def copy_image_to_clipboard(filepath):
-    try:
-        from PIL import Image; import io, ctypes
-        img = Image.open(filepath); out = io.BytesIO()
-        img.convert("RGB").save(out, "BMP"); bmp = out.getvalue()[14:]
-        u, k = ctypes.windll.user32, ctypes.windll.kernel32
-        u.OpenClipboard(0); u.EmptyClipboard()
-        h = k.GlobalAlloc(0x0042, len(bmp)); p = k.GlobalLock(h)
-        ctypes.memmove(p, bmp, len(bmp)); k.GlobalUnlock(h)
-        u.SetClipboardData(8, h); u.CloseClipboard(); return True
-    except Exception: return False
-
 STEP_TYPES = ["入力", "クリック", "選択", "待機", "スクショ", "見出し", "コメント"]
 STEP_ICONS = {"入力": ft.Icons.EDIT, "クリック": ft.Icons.MOUSE,
               "選択": ft.Icons.ARROW_DROP_DOWN_CIRCLE,
@@ -323,7 +311,6 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         outdir_base = config.get("output_dir", os.path.join(get_app_dir(), "screenshots"))
         outdir = os.path.join(outdir_base, datetime.now().strftime("%Y%m%d%H%M%S"))
         os.makedirs(outdir, exist_ok=True)
-        clip = config.get("clipboard_copy") == "1"
         gss = 0
         # Calculate total patterns for progress
         total_pats = 0
@@ -415,7 +402,6 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                 if x2>x1 and y2>y1: img.crop((x1,y1,x2,y2)).save(fp)
                             else: driver.save_screenshot(fp)
                             log_cb(f"  S{si} スクショ: {fn}")
-                            if clip: copy_image_to_clipboard(fp)
                         except Exception as x: log_cb(f"  S{si} [WARN] スクショ失敗: {x}")
                 done_pats += 1
                 if progress_cb and total_pats > 0:
@@ -1167,17 +1153,15 @@ def main(page: ft.Page):
         auf = ft.TextField(label="Basic認証ID", value=c.get("basic_auth_user",""), width=210)
         apf = ft.TextField(label="パスワード", value=c.get("basic_auth_pass",""), password=True, width=210)
         of = ft.TextField(label="出力フォルダ", value=c.get("output_dir", os.path.join(get_app_dir(), "screenshots")), width=450)
-        cc = ft.Checkbox(label="クリップボードコピー", value=c.get("clipboard_copy")=="1")
         hl = ft.Checkbox(label="ヘッドレスモード (ブラウザ非表示)", value=c.get("headless")=="1")
         def on_ok(e):
             state["config"].update({"url":uf.value,"basic_auth_user":auf.value,
                 "basic_auth_pass":apf.value,"output_dir":of.value,
-                "clipboard_copy":"1" if cc.value else "0",
                 "headless":"1" if hl.value else "0"})
             save_config(state["config"]); snack("設定保存")
             refresh_test_list(False); page.update(); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("設定"),
-            content=ft.Column([uf, ft.Row([auf, apf], spacing=10), of, cc, hl], tight=True, spacing=12, width=500),
+            content=ft.Column([uf, ft.Row([auf, apf], spacing=10), of, hl], tight=True, spacing=12, width=500),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 

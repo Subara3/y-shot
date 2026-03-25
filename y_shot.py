@@ -137,11 +137,64 @@ def capture_form_values(driver):
     for css_q in ["input[type='radio']:checked", "input[type='checkbox']:checked"]:
         for el in driver.find_elements(By.CSS_SELECTOR, css_q):
             try:
-                sel = _build_selector(driver, el, "input", el.get_attribute("id") or "", el.get_attribute("name") or "")
-                if sel in seen: continue; seen.add(sel)
+                eid = el.get_attribute("id") or ""
+                ename = el.get_attribute("name") or ""
+                sel = _build_selector(driver, el, "input", eid, ename)
+                # セレクタがタグ名だけ(input)の場合は曖昧すぎるのでスキップ
+                if sel in ("input",) or sel in seen: continue
+                seen.add(sel)
                 steps.append({"type": "クリック", "selector": sel})
             except Exception: continue
     return steps
+
+def collect_element_options(driver, el_info):
+    """Collect all options from a select or radio group.
+    Returns (step_type, options_list) where options_list = [{"label": ..., "value": ...}, ...]
+    For select: step_type="選択", value=option value
+    For radio: step_type="クリック", value=CSS selector for each radio"""
+    from selenium.webdriver.common.by import By
+    tag = el_info.get("tag", "")
+    etype = el_info.get("type", "").lower()
+    sel = el_info.get("selector", "")
+    if tag == "select":
+        try:
+            el = driver.find_element(By.CSS_SELECTOR, sel)
+            options = el.find_elements(By.TAG_NAME, "option")
+            result = []
+            for opt in options:
+                val = opt.get_attribute("value") or ""
+                text = opt.text.strip() or val
+                if val or text:  # 空optionもテスト対象にする
+                    result.append({"label": text, "value": val})
+            return "選択", result
+        except Exception:
+            return None, []
+    elif etype == "radio":
+        try:
+            name = el_info.get("name", "") or driver.find_element(By.CSS_SELECTOR, sel).get_attribute("name") or ""
+            if not name: return None, []
+            safe_name = _css_escape_attr(name)
+            radios = driver.find_elements(By.CSS_SELECTOR, f'input[type="radio"][name="{safe_name}"]')
+            result = []
+            for r in radios:
+                val = r.get_attribute("value") or ""
+                rid = r.get_attribute("id") or ""
+                # ラベルテキストを探す: label[for=id] or 隣接テキスト
+                label_text = ""
+                if rid:
+                    try:
+                        lbl = driver.find_element(By.CSS_SELECTOR, f'label[for="{_css_escape_attr(rid)}"]')
+                        label_text = lbl.text.strip()
+                    except Exception: pass
+                if not label_text:
+                    label_text = val or f"radio_{len(result)+1}"
+                # 各radioのCSSセレクタを生成
+                radio_sel = f'input[type="radio"][name="{safe_name}"][value="{_css_escape_attr(val)}"]'
+                result.append({"label": label_text, "value": radio_sel})
+            return "クリック", result
+        except Exception:
+            return None, []
+    return None, []
 
 # Highlight JS: scroll to element, highlight, remove on USER scroll (not programmatic)
 HIGHLIGHT_JS = ("(function(s){try{"
@@ -200,6 +253,7 @@ def step_short(step):
         return f"{sel} \u2190 {v}"
     if t == "クリック":
         sel = step.get("selector","")
+        if sel == "{パターン}": return "{パターン} (全パターン)"
         return sel[:30]+"..." if len(sel) > 30 else sel
     if t == "選択":
         sel = step.get("selector","")
@@ -362,7 +416,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             log_cb(f"  S{si} 入力: {sel}")
                         except Exception as x: log_cb(f"  S{si} [WARN] 入力失敗: {x}")
                     elif st == "クリック":
-                        sel = step.get("selector","")
+                        sel = step.get("selector","").replace("{パターン}",value).replace("{pattern}",value)
                         try:
                             WebDriverWait(driver,10).until(EC.element_to_be_clickable((By.CSS_SELECTOR,sel))).click()
                             log_cb(f"  S{si} クリック: {sel}")
@@ -657,14 +711,33 @@ def main(page: ft.Page):
 
     def del_test(idx):
         if not (0 <= idx < len(state["tests"])): return
-        name = state["tests"][idx].get("name", f"テスト{idx+1}")
+        tc = state["tests"][idx]
+        name = tc.get("name", f"テスト{idx+1}")
+        pat = tc.get("pattern")
+        # パターンセットが他のテストケースで使われているか
+        pat_orphan = False
+        if pat and pat in state["pattern_sets"]:
+            other_refs = [i for i, t in enumerate(state["tests"]) if i != idx and t.get("pattern") == pat]
+            pat_orphan = len(other_refs) == 0
+        del_pat_cb = ft.Checkbox(
+            label=f"パターンセット「{pat}」も削除",
+            value=True, visible=pat_orphan)
         def on_yes(e):
+            if pat_orphan and del_pat_cb.value and pat in state["pattern_sets"]:
+                del state["pattern_sets"][pat]
+                if state["selected_pat_set"] == pat: state["selected_pat_set"] = None
             state["tests"].pop(idx)
             if state["selected_test"] >= len(state["tests"]):
                 state["selected_test"] = max(0, len(state["tests"])-1)
-            refresh_test_list(False); refresh_steps(); close_dlg(dlg)
+            refresh_test_list(False); refresh_steps()
+            refresh_pat_set_list(False); refresh_pats()
+            close_dlg(dlg)
+        content = ft.Column([
+            ft.Text(f"「{name}」を削除しますか？"),
+            del_pat_cb,
+        ], tight=True, spacing=8) if pat_orphan else ft.Text(f"「{name}」を削除しますか？")
         dlg = ft.AlertDialog(title=ft.Text("削除確認"),
-            content=ft.Text(f"「{name}」を削除しますか？"),
+            content=content,
             actions=[ft.TextButton("削除", on_click=on_yes, style=ft.ButtonStyle(color=ft.Colors.RED_600)),
                      ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
@@ -915,12 +988,88 @@ def main(page: ft.Page):
         if idx < 0 or idx >= len(state["browser_elements"]): snack("要素をクリック", ft.Colors.ORANGE_600); return
         el_info = state["browser_elements"][idx]
         sel = el_info["selector"]
+        tag = el_info.get("tag", "")
+        etype = el_info.get("type", "").lower()
+        # 要素の種類に応じてステップタイプを自動補正
         actual_type = stype
-        if stype == "入力" and el_info.get("tag") == "select":
+        if tag == "select":
             actual_type = "選択"
+        elif etype in ("radio", "checkbox"):
+            actual_type = "クリック"
+        elif tag in ("button", "a") or etype in ("submit", "button", "reset", "image"):
+            actual_type = "クリック"
         step = {"type": actual_type, "selector": sel}
         if actual_type in ("入力", "選択"): step["value"] = "{パターン}"
         tc["steps"].append(step); refresh_steps(False); refresh_test_list(); snack(f"{actual_type}: {sel}")
+    def quick_add_all_options(e):
+        """select/radioの全パターンセットを自動生成し、専用テストケースを作成"""
+        if not state["browser_driver"]: snack("ページ読込必要", ft.Colors.ORANGE_600); return
+        idx = state["selected_el"]
+        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素をクリック", ft.Colors.ORANGE_600); return
+        el_info = state["browser_elements"][idx]
+        tag = el_info.get("tag", "")
+        etype = el_info.get("type", "").lower()
+        if tag != "select" and etype != "radio":
+            snack("セレクトボックスまたはラジオボタンを選択してください", ft.Colors.ORANGE_600); return
+        step_type, options = collect_element_options(state["browser_driver"], el_info)
+        if not options:
+            snack("選択肢が取得できませんでした", ft.Colors.RED_600); return
+        # 要素種別の表示名
+        el_type_name = "セレクトボックス" if tag == "select" else "ラジオボタン"
+        # 要素の識別名: name属性 > hint > セレクタ
+        sel = el_info.get("selector", "")
+        el_label = el_info.get("name", "") or el_info.get("hint", "") or sel
+        if len(el_label) > 25: el_label = el_label[:22] + "..."
+        # パターンセット名を生成
+        base_name = f"{el_label} ({el_type_name})"
+        pat_name = base_name
+        n = 1
+        while pat_name in state["pattern_sets"]:
+            n += 1; pat_name = f"{base_name} {n}"
+        # テストケース名
+        tc_name = f"{el_label} 全パターン"
+        # スクショ追加するか聞くダイアログ
+        add_ss = ft.Checkbox(label="選択ごとにスクショを追加", value=True)
+        info_text = (f"{el_type_name} {sel} から {len(options)} 件の選択肢を検出しました。\n"
+                     f"テストケース「{tc_name}」と\n"
+                     f"パターンセット「{pat_name}」を作成します。")
+        def on_ok(ev):
+            # パターンセット作成
+            state["pattern_sets"][pat_name] = list(options)
+            state["selected_pat_set"] = pat_name
+            # 専用テストケース作成
+            new_steps = []
+            if step_type == "選択":
+                new_steps.append({"type": "選択", "selector": sel, "value": "{パターン}"})
+            else:
+                new_steps.append({"type": "クリック", "selector": "{パターン}"})
+            if add_ss.value:
+                new_steps.append({"type": "スクショ", "mode": "fullpage"})
+            new_tc = {"name": tc_name, "pattern": pat_name, "steps": new_steps}
+            state["tests"].append(new_tc)
+            state["selected_test"] = len(state["tests"]) - 1
+            refresh_steps(False); refresh_test_list(False)
+            refresh_pat_set_list(False); refresh_pats()
+            snack(f"{el_type_name}の全パターン {len(options)} 件を追加")
+            close_dlg(dlg)
+        dlg = ft.AlertDialog(title=ft.Text(f"{el_type_name}の全パターン追加"),
+            content=ft.Column([
+                ft.Text(info_text, size=13),
+                ft.Divider(),
+                ft.Text("プレビュー:", size=11, weight=ft.FontWeight.BOLD),
+                ft.Column([
+                    ft.Text(f"  {o['label']}" + (f" = {o['value'][:30]}" if o['value'] != o['label'] else ""),
+                            size=11, color=ft.Colors.GREY_600)
+                    for o in options[:10]
+                ] + ([ft.Text(f"  ... 他 {len(options)-10} 件", size=11, color=ft.Colors.GREY_400)]
+                     if len(options) > 10 else []),
+                    spacing=2),
+                ft.Divider(),
+                add_ss,
+            ], tight=True, spacing=8, width=450, scroll=ft.ScrollMode.AUTO, height=350),
+            actions=[ft.TextButton("作成", on_click=on_ok),
+                     ft.TextButton("キャンセル", on_click=lambda ev: close_dlg(dlg))])
+        open_dlg(dlg)
     def capture_form(e):
         tc = cur_test()
         if not tc: snack("テストケースを選択", ft.Colors.ORANGE_600); return
@@ -1310,7 +1459,8 @@ def main(page: ft.Page):
             ft.Text("ステップ追加:", size=10, color=ft.Colors.GREY_500),
             ft.Row([ft.Button("入力", icon=ft.Icons.EDIT, tooltip="入力ステップを追加", on_click=lambda e: quick_add("入力")),
                     ft.Button("クリック", icon=ft.Icons.MOUSE, tooltip="クリックステップを追加", on_click=lambda e: quick_add("クリック")),
-                    ft.Button("選択", icon=ft.Icons.ARROW_DROP_DOWN_CIRCLE, tooltip="選択ステップを追加", on_click=lambda e: quick_add("選択")),
+                    ft.Button("選択", icon=ft.Icons.ARROW_DROP_DOWN_CIRCLE, tooltip="選択ステップを追加", on_click=lambda e: quick_add("選択"))], spacing=4),
+            ft.Row([ft.Button("全パターン", icon=ft.Icons.LIST, tooltip="セレクトボックス/ラジオボタンの全パターン追加", on_click=quick_add_all_options),
                     ft.Button("値取込", icon=ft.Icons.SAVE, tooltip="現在のフォーム入力値をステップに追加", on_click=capture_form)], spacing=4),
         ], spacing=4), width=500, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
     ], spacing=8, expand=True, vertical_alignment=ft.CrossAxisAlignment.START)

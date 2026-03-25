@@ -1,7 +1,7 @@
 """
-y-shot: Web Screenshot Automation Tool  v1.4 (Flet)
+y-shot: Web Screenshot Automation Tool  v1.5 (Flet)
   - Multiple test cases, each with own steps + pattern set reference
-  - v1.4: highlight fix, abort, tel capture, input check fix
+  - v1.5: highlight fix, abort, tel capture, input check fix
 """
 
 import csv, os, sys, json, threading, time
@@ -18,6 +18,10 @@ def _safe_filename(s, max_len=30):
     """Remove characters unsafe for filenames and truncate."""
     s = re.sub(r'[\\/:*?"<>|\x00-\x1f]', '_', s).strip().strip('.')
     return s[:max_len] if s else '_'
+
+def _has_non_bmp(s):
+    """Check if string contains characters outside the Basic Multilingual Plane (e.g. emoji, 𠮷)."""
+    return any(ord(c) > 0xFFFF for c in s)
 
 # ===================================================================
 # Backend
@@ -159,6 +163,19 @@ HIGHLIGHT_JS = ("(function(s){try{"
     "},600);"
     "}catch(x){}})(arguments[0]);")
 
+# JS for setting input value (handles emoji/non-BMP via React-compatible native setter)
+JS_SET_VALUE = (
+    "(function(el,val){"
+    "var proto=el.tagName==='TEXTAREA'"
+    "?window.HTMLTextAreaElement.prototype"
+    ":window.HTMLInputElement.prototype;"
+    "var setter=Object.getOwnPropertyDescriptor(proto,'value');"
+    "if(setter&&setter.set){setter.set.call(el,val);}else{el.value=val;}"
+    "el.dispatchEvent(new Event('input',{bubbles:true}));"
+    "el.dispatchEvent(new Event('change',{bubbles:true}));"
+    "})(arguments[0],arguments[1]);"
+)
+
 def build_auth_url(url, user, password):
     if not user: return url
     p = urlparse(url); nl = f"{user}:{password}@{p.hostname}"
@@ -280,9 +297,10 @@ def _generate_excel_report(outdir, log_cb):
     except Exception as x:
         log_cb(f"[WARN] Excel生成失敗: {x}")
 
-def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=None, progress_cb=None):
+def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=None, progress_cb=None, driver_ref=None):
     """Run all enabled test cases sequentially. stop_event: threading.Event to abort.
-    progress_cb(current, total): optional progress callback."""
+    progress_cb(current, total): optional progress callback.
+    driver_ref: list to register/unregister driver for external cleanup."""
     try:
         from selenium import webdriver
         from selenium.webdriver.common.by import By
@@ -297,6 +315,8 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
             opts.add_argument("--headless=new")
             log_cb("[INFO] ヘッドレスモード")
         driver = webdriver.Chrome(options=opts); driver.set_window_size(1280, 900)
+        if driver_ref is not None:
+            driver_ref.append(driver)
         ba = config.get("basic_auth_user","").strip()
         base = build_auth_url(config["url"], ba, config.get("basic_auth_pass",""))
         if ba: log_cb("[INFO] Basic認証を設定")
@@ -346,8 +366,10 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         try:
                             e = WebDriverWait(driver,10).until(EC.presence_of_element_located((By.CSS_SELECTOR,sel)))
                             etype = (e.get_attribute("type") or "").lower()
-                            if etype in ("date","time","datetime-local","month","week","color"):
-                                driver.execute_script("arguments[0].value=arguments[1];arguments[0].dispatchEvent(new Event('input',{bubbles:true}));arguments[0].dispatchEvent(new Event('change',{bubbles:true}));", e, iv)
+                            if etype in ("date","time","datetime-local","month","week","color") or _has_non_bmp(iv):
+                                # JS直接設定: date系type / 絵文字等BMP外文字 (send_keysはサロゲートペア非対応)
+                                driver.execute_script("arguments[0].focus();arguments[0].value='';", e)
+                                driver.execute_script(JS_SET_VALUE, e, iv)
                             else:
                                 e.clear(); e.send_keys(iv)
                             log_cb(f"  S{si} 入力: {sel}")
@@ -408,7 +430,12 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
     except Exception as x:
         log_cb(f"[ERROR] {x}"); outdir = None
     finally:
-        if driver: driver.quit()
+        if driver:
+            try: driver.quit()
+            except Exception: pass
+            if driver_ref is not None:
+                try: driver_ref.remove(driver)
+                except ValueError: pass
         try: done_cb(outdir if 'outdir' in dir() else None)
         except TypeError: done_cb()  # backward compat
 
@@ -471,10 +498,22 @@ def load_selector_bank():
 def save_selector_bank(bank):
     with open(_data_path(SELECTOR_BANK_FILE), "w", encoding="utf-8") as f: json.dump(bank, f, ensure_ascii=False, indent=2)
 def get_templates_dir():
-    for d in [os.path.join(get_bundle_dir(), "templates"),
-              os.path.join(get_app_dir(), "templates")]:
-        if os.path.isdir(d): return d
-    return None
+    """Return the user-accessible templates dir (next to exe/script).
+    On first run after exe install, copy bundled templates there."""
+    user_dir = os.path.join(get_app_dir(), "templates")
+    bundle_dir = os.path.join(get_bundle_dir(), "templates")
+    # exe横にフォルダがなければ作成し、バンドル内テンプレートをコピー
+    if not os.path.isdir(user_dir):
+        os.makedirs(user_dir, exist_ok=True)
+        if os.path.isdir(bundle_dir) and bundle_dir != user_dir:
+            import shutil
+            for f in os.listdir(bundle_dir):
+                if f.lower().endswith(".csv"):
+                    src = os.path.join(bundle_dir, f)
+                    dst = os.path.join(user_dir, f)
+                    if not os.path.exists(dst):
+                        shutil.copy2(src, dst)
+    return user_dir if os.path.isdir(user_dir) else None
 
 # ===================================================================
 # Flet UI
@@ -495,6 +534,7 @@ def main(page: ft.Page):
         "selected_test": 0, "selected_pat_set": None, "selected_el": -1,
         "collapsed": set(),
         "stop_event": None,  # threading.Event for abort
+        "test_drivers": [],  # active test drivers (for cleanup on exit)
     }
     cfg = state["config"]
 
@@ -570,7 +610,6 @@ def main(page: ft.Page):
             if pat: subtitle += f" × {pat}({n_pats}件)"
             test_list.controls.append(ft.Container(
                 ft.Row([
-                    ft.Icon(ft.Icons.DRAG_HANDLE, size=14, color=ft.Colors.GREY_400),
                     ft.Column([
                         ft.Text(tc.get("name",""), weight=ft.FontWeight.BOLD, size=13,
                                 color=ft.Colors.BLUE_800 if selected else ft.Colors.BLACK),
@@ -586,7 +625,7 @@ def main(page: ft.Page):
                                   on_click=lambda e, idx=i: del_test(idx)),
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 bgcolor=ft.Colors.BLUE_50 if selected else None,
-                padding=ft.Padding(12, 8, 8, 8), border_radius=6,
+                padding=ft.Padding(12, 8, 36, 8), border_radius=6,
                 border=ft.Border.all(2, ft.Colors.BLUE_300) if selected else ft.Border.all(1, ft.Colors.GREY_200),
                 on_click=lambda e, idx=i: select_test(idx),
                 key=f"tc_{i}",
@@ -689,35 +728,32 @@ def main(page: ft.Page):
                 sid = i; is_c = sid in collapsed; hidden = is_c
                 ic = ft.Icons.EXPAND_LESS if not is_c else ft.Icons.EXPAND_MORE
                 step_reorder.controls.append(ft.Container(ft.Row([
-                    ft.Icon(ft.Icons.DRAG_HANDLE, size=14, color=ft.Colors.GREY_400),
                     ft.Icon(ft.Icons.TITLE, color=ft.Colors.BLUE_800, size=16),
                     ft.Text(s.get("text",""), weight=ft.FontWeight.BOLD, size=13, color=ft.Colors.BLUE_800, expand=True),
                     ft.IconButton(ic, icon_size=16, on_click=lambda e, sid=sid: toggle_sec(sid)),
                     ft.IconButton(ft.Icons.EDIT, icon_size=14, on_click=lambda e, idx=i: show_step_dlg(idx)),
                     ft.IconButton(ft.Icons.DELETE, icon_size=14, on_click=lambda e, idx=i: del_step(idx)),
                 ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    bgcolor=ft.Colors.BLUE_50, padding=ft.Padding(8,4,8,4), border_radius=4, key=key, height=36))
+                    bgcolor=ft.Colors.BLUE_50, padding=ft.Padding(8,4,36,4), border_radius=4, key=key, height=36))
             elif t == "コメント":
                 if hidden: continue
                 step_reorder.controls.append(ft.Container(ft.Row([
-                    ft.Icon(ft.Icons.DRAG_HANDLE, size=14, color=ft.Colors.GREY_400),
                     ft.Icon(ft.Icons.COMMENT, color=ft.Colors.GREY_400, size=14),
                     ft.Text(s.get("text",""), size=11, italic=True, color=ft.Colors.GREY_500, expand=True),
                     ft.IconButton(ft.Icons.EDIT, icon_size=14, on_click=lambda e, idx=i: show_step_dlg(idx)),
                     ft.IconButton(ft.Icons.DELETE, icon_size=14, on_click=lambda e, idx=i: del_step(idx)),
                 ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    padding=ft.Padding(8,2,8,2), key=key, height=28))
+                    padding=ft.Padding(8,2,36,2), key=key, height=28))
             else:
                 if hidden: continue
                 step_reorder.controls.append(ft.Container(ft.Row([
-                    ft.Icon(ft.Icons.DRAG_HANDLE, size=14, color=ft.Colors.GREY_400),
                     ft.Icon(STEP_ICONS.get(t, ft.Icons.HELP), color=ft.Colors.BLUE_600, size=16),
                     ft.Text(t, size=11, color=ft.Colors.GREY_500, width=40),
                     ft.Text(step_short(s), size=12, expand=True),
                     ft.IconButton(ft.Icons.EDIT, icon_size=14, on_click=lambda e, idx=i: show_step_dlg(idx)),
                     ft.IconButton(ft.Icons.DELETE, icon_size=14, on_click=lambda e, idx=i: del_step(idx)),
                 ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    padding=ft.Padding(8,2,8,2), key=key, height=30))
+                    padding=ft.Padding(8,2,36,2), key=key, height=30))
         schedule_save()
         if update: page.update()
 
@@ -996,6 +1032,17 @@ def main(page: ft.Page):
                      ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
+    def on_pat_reorder(e):
+        name = state["selected_pat_set"]
+        if not name or name not in state["pattern_sets"]: return
+        pats = state["pattern_sets"][name]
+        old, new = e.old_index, e.new_index
+        if 0 <= old < len(pats) and 0 <= new <= len(pats):
+            item = pats.pop(old)
+            if new > old: new -= 1
+            pats.insert(new, item)
+            refresh_pats()
+
     def refresh_pats(update=True):
         pat_items.controls.clear()
         name = state["selected_pat_set"]
@@ -1017,7 +1064,8 @@ def main(page: ft.Page):
                 ft.IconButton(ft.Icons.DELETE, icon_size=14, icon_color=ft.Colors.RED_400,
                               on_click=lambda e, idx=i: del_pat(idx)),
             ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
-                padding=ft.Padding(10, 6, 6, 6), border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4))
+                padding=ft.Padding(10, 6, 36, 6), border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4,
+                key=f"pat_{i}"))
         schedule_save()
         if update: page.update()
 
@@ -1168,7 +1216,8 @@ def main(page: ft.Page):
                 open_folder_btn.visible = True
             page.update()
         page.run_thread(run_all_tests, dict(c), list(test_cases_to_run),
-                        dict(state["pattern_sets"]), lambda m: log(m), on_done, stop_ev, on_progress)
+                        dict(state["pattern_sets"]), lambda m: log(m), on_done, stop_ev, on_progress,
+                        state["test_drivers"])
 
     def run_click(e):
         _do_run(state["tests"])
@@ -1217,7 +1266,7 @@ def main(page: ft.Page):
     tc_pattern_label = ft.Text("", size=11, color=ft.Colors.GREY_600)
 
     pat_set_list = ft.ListView(spacing=4, expand=True)
-    pat_items = ft.ListView(spacing=3, expand=True)
+    pat_items = ft.ReorderableListView(controls=[], on_reorder=on_pat_reorder, spacing=3, expand=True)
     pat_header = ft.Text("", weight=ft.FontWeight.BOLD, size=15)
 
     progress = ft.ProgressBar(visible=False, value=0)
@@ -1275,10 +1324,10 @@ def main(page: ft.Page):
             ft.Container(ft.Column([el_table], scroll=ft.ScrollMode.AUTO),
                 expand=True, border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4),
             ft.Text("ステップ追加:", size=10, color=ft.Colors.GREY_500),
-            ft.Row([ft.Button("入力追加", icon=ft.Icons.EDIT, tooltip="入力ステップを追加", on_click=lambda e: quick_add("入力")),
-                    ft.Button("クリック追加", icon=ft.Icons.MOUSE, tooltip="クリックステップを追加", on_click=lambda e: quick_add("クリック")),
-                    ft.Button("選択追加", icon=ft.Icons.ARROW_DROP_DOWN_CIRCLE, tooltip="選択ステップを追加", on_click=lambda e: quick_add("選択")),
-                    ft.Button("フォーム値取込", icon=ft.Icons.SAVE, tooltip="現在の入力値をステップに", on_click=capture_form)], spacing=4),
+            ft.Row([ft.Button("入力", icon=ft.Icons.EDIT, tooltip="入力ステップを追加", on_click=lambda e: quick_add("入力")),
+                    ft.Button("クリック", icon=ft.Icons.MOUSE, tooltip="クリックステップを追加", on_click=lambda e: quick_add("クリック")),
+                    ft.Button("選択", icon=ft.Icons.ARROW_DROP_DOWN_CIRCLE, tooltip="選択ステップを追加", on_click=lambda e: quick_add("選択")),
+                    ft.Button("値取込", icon=ft.Icons.SAVE, tooltip="現在のフォーム入力値をステップに追加", on_click=capture_form)], spacing=4),
         ], spacing=4), width=500, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
     ], spacing=8, expand=True, vertical_alignment=ft.CrossAxisAlignment.START)
 
@@ -1321,13 +1370,28 @@ def main(page: ft.Page):
     refresh_test_list(False); refresh_steps(False); refresh_pat_set_list(False); refresh_pats(False)
     page.update()
     _init_done[0] = True
+    def _cleanup_all_drivers():
+        """Quit all Selenium drivers (test + element browser)."""
+        for drv in list(state.get("test_drivers", [])):
+            try: drv.quit()
+            except Exception: pass
+        state["test_drivers"] = []
+        close_browser()
+
     def on_window_event(e):
         if e.data == "close":
             if _save_timer[0]: _save_timer[0].cancel()
             save_all()
-            close_browser()
+            # テスト実行中なら中断シグナルを送る
+            ev = state.get("stop_event")
+            if ev: ev.set()
+            # 全ドライバーを終了（テスト用 + 要素ブラウザ用）
+            _cleanup_all_drivers()
             page.window.destroy()
             os._exit(0)
+
+    import atexit
+    atexit.register(_cleanup_all_drivers)
 
     page.window.on_event = on_window_event
 

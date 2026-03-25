@@ -744,23 +744,30 @@ def main(page: ft.Page):
         if update: page.update()
 
     def on_test_reorder(e):
+        """Flutter best practice: update data, sync controls list, page.update()."""
         try:
             tests = state["tests"]
             old, new = e.old_index, e.new_index
             if old is None or new is None: return
-            if 0 <= old < len(tests) and 0 <= new <= len(tests):
-                item = tests.pop(old)
-                if new > old: new -= 1
-                tests.insert(new, item)
-                if state["selected_test"] == old: state["selected_test"] = new
-                elif old < state["selected_test"] <= new: state["selected_test"] -= 1
-                elif new <= state["selected_test"] < old: state["selected_test"] += 1
-                schedule_save()
-                # Deferred rebuild: let the widget finish its animation first
-                def _deferred():
-                    time.sleep(0.3)
-                    refresh_test_list(False); refresh_steps()
-                page.run_thread(_deferred)
+            if not (0 <= old < len(tests) and 0 <= new <= len(tests)): return
+            # 1) Update backing data
+            item = tests.pop(old)
+            adj_new = new - 1 if new > old else new
+            tests.insert(adj_new, item)
+            # 2) Sync controls list to match
+            ctrl = test_list.controls.pop(old)
+            test_list.controls.insert(adj_new, ctrl)
+            # 3) Update selection index
+            if state["selected_test"] == old: state["selected_test"] = adj_new
+            elif old < state["selected_test"] <= adj_new: state["selected_test"] -= 1
+            elif adj_new <= state["selected_test"] < old: state["selected_test"] += 1
+            # 4) Update selection highlighting
+            for i, c in enumerate(test_list.controls):
+                sel = (i == state["selected_test"])
+                c.bgcolor = ft.Colors.BLUE_50 if sel else None
+                c.border = ft.Border.all(2, ft.Colors.BLUE_300) if sel else ft.Border.all(1, ft.Colors.GREY_200)
+            schedule_save()
+            page.update()
         except Exception as x:
             log(f"[ERROR] on_test_reorder: {x}")
 
@@ -892,6 +899,7 @@ def main(page: ft.Page):
         if update: page.update()
 
     def on_reorder(e):
+        """Flutter pattern: update data, sync controls list, page.update()."""
         tc = cur_test()
         if not tc: return
         steps = tc["steps"]; vis = _get_vis(steps)
@@ -902,10 +910,12 @@ def main(page: ft.Page):
             item = steps.pop(ao)
             if an > ao: an -= 1
             steps.insert(an, item)
+            # Sync controls list
+            adj_new = new - 1 if new > old else new
+            ctrl = step_reorder.controls.pop(old)
+            step_reorder.controls.insert(adj_new, ctrl)
             schedule_save()
-            def _deferred():
-                time.sleep(0.3); refresh_steps()
-            page.run_thread(_deferred)
+            page.update()
 
     def _get_vis(steps):
         vis, hidden = [], False
@@ -1204,18 +1214,20 @@ def main(page: ft.Page):
         if update: page.update()
 
     def on_pat_set_reorder(e):
+        """Flutter pattern: update data, sync controls list, page.update()."""
         names = list(state["pattern_sets"].keys())
         old, new = e.old_index, e.new_index
         if old is None or new is None: return
         if 0 <= old < len(names) and 0 <= new <= len(names):
+            adj_new = new - 1 if new > old else new
             item = names.pop(old)
-            if new > old: new -= 1
-            names.insert(new, item)
+            names.insert(adj_new, item)
             state["pattern_sets"] = {n: state["pattern_sets"][n] for n in names}
+            # Sync controls list
+            ctrl = pat_set_list.controls.pop(old)
+            pat_set_list.controls.insert(adj_new, ctrl)
             schedule_save()
-            def _deferred():
-                time.sleep(0.3); refresh_pat_set_list(False); refresh_pats()
-            page.run_thread(_deferred)
+            page.update()
 
     def select_pat_set(name):
         state["selected_pat_set"] = name; refresh_pat_set_list(False); refresh_pats()
@@ -1269,19 +1281,21 @@ def main(page: ft.Page):
         open_dlg(dlg)
 
     def on_pat_reorder(e):
+        """Flutter pattern: update data, sync controls list, page.update()."""
         name = state["selected_pat_set"]
         if not name or name not in state["pattern_sets"]: return
         pats = state["pattern_sets"][name]
         old, new = e.old_index, e.new_index
         if old is None or new is None: return
         if 0 <= old < len(pats) and 0 <= new <= len(pats):
+            adj_new = new - 1 if new > old else new
             item = pats.pop(old)
-            if new > old: new -= 1
-            pats.insert(new, item)
+            pats.insert(adj_new, item)
+            # Sync controls list
+            ctrl = pat_items.controls.pop(old)
+            pat_items.controls.insert(adj_new, ctrl)
             schedule_save()
-            def _deferred():
-                time.sleep(0.3); refresh_pats()
-            page.run_thread(_deferred)
+            page.update()
 
     def refresh_pats(update=True):
         pat_items.controls.clear()

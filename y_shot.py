@@ -116,7 +116,7 @@ def _build_selector(driver, el, tag, eid, ename):
                 if pid[0].isdigit() or not all(c.isalnum() or c in '-_' for c in pid):
                     return f'[id="{_css_escape_attr(pid)}"] > {tag}:nth-of-type({idx})'
                 return f"#{pid} > {tag}:nth-of-type({idx})"
-    except: pass
+    except Exception: pass
     return tag
 
 def capture_form_values(driver):
@@ -719,7 +719,7 @@ def main(page: ft.Page):
         if 0 <= idx < len(state["tests"]): return state["tests"][idx]
         return None
     def pat_set_names():
-        return sorted(state["pattern_sets"].keys())
+        return list(state["pattern_sets"].keys())
 
     # ================================================================
     # Tab 1: Test Cases
@@ -792,17 +792,16 @@ def main(page: ft.Page):
         schedule_save()
         if update: page.update()
 
-    _last_reorder_event = [None, None, 0]  # [old, new, timestamp] for dedup
+    # Per-handler dedup state: {handler_name: [old, new, timestamp]}
+    _reorder_dedup = {}
 
-    def _is_dup_reorder(old, new):
-        """Flet fires on_reorder twice per drag. Dedup by matching old+new within 1s."""
+    def _is_dup_reorder(handler, old, new):
+        """Flet fires on_reorder twice per drag. Dedup by matching handler+old+new within 1s."""
         now = time.time()
-        if (_last_reorder_event[0] == old and _last_reorder_event[1] == new
-                and now - _last_reorder_event[2] < 1.0):
+        prev = _reorder_dedup.get(handler)
+        if prev and prev[0] == old and prev[1] == new and now - prev[2] < 1.0:
             return True
-        _last_reorder_event[0] = old
-        _last_reorder_event[1] = new
-        _last_reorder_event[2] = now
+        _reorder_dedup[handler] = [old, new, now]
         return False
 
     def on_test_reorder(e):
@@ -810,7 +809,7 @@ def main(page: ft.Page):
         try:
             old, new = e.old_index, e.new_index
             if old is None or new is None: return
-            if _is_dup_reorder(old, new): return
+            if _is_dup_reorder("test", old, new): return
             tests = state["tests"]
             if not (0 <= old < len(tests) and 0 <= new <= len(tests)): return
             adj_new = new - 1 if new > old else new
@@ -967,15 +966,12 @@ def main(page: ft.Page):
             if not tc: return
             old, new = e.old_index, e.new_index
             if old is None or new is None: return
-            if _is_dup_reorder(old, new): return
+            if _is_dup_reorder("step", old, new): return
             steps = tc["steps"]; vis = _get_vis(steps)
             if old < len(vis) and new <= len(vis):
                 ao = vis[old]; an = vis[new] if new < len(vis) else len(steps)
                 steps.insert(an - (1 if an > ao else 0), steps.pop(ao))
-                adj_new = new - 1 if new > old else new
-                step_reorder.controls.insert(adj_new, step_reorder.controls.pop(old))
-                schedule_save()
-                page.update()
+                refresh_steps()  # Full rebuild to keep lambda indices correct
         except Exception as x: _log_error("on_reorder", x)
 
     def _get_vis(steps):
@@ -1294,15 +1290,13 @@ def main(page: ft.Page):
             names = list(state["pattern_sets"].keys())
             old, new = e.old_index, e.new_index
             if old is None or new is None: return
-            if _is_dup_reorder(old, new): return
+            if _is_dup_reorder("patset", old, new): return
             if 0 <= old < len(names) and 0 <= new <= len(names):
                 adj_new = new - 1 if new > old else new
                 if old == adj_new: return
                 names.insert(adj_new, names.pop(old))
                 state["pattern_sets"] = {n: state["pattern_sets"][n] for n in names}
-                pat_set_list.controls.insert(adj_new, pat_set_list.controls.pop(old))
-                schedule_save()
-                page.update()
+                refresh_pat_set_list()  # Full rebuild to keep lambda indices correct
         except Exception as x: _log_error("on_pat_set_reorder", x)
 
     def select_pat_set(name):
@@ -1368,14 +1362,12 @@ def main(page: ft.Page):
             pats = state["pattern_sets"][name]
             old, new = e.old_index, e.new_index
             if old is None or new is None: return
-            if _is_dup_reorder(old, new): return
+            if _is_dup_reorder("pat", old, new): return
             if 0 <= old < len(pats) and 0 <= new <= len(pats):
                 adj_new = new - 1 if new > old else new
                 if old == adj_new: return
                 pats.insert(adj_new, pats.pop(old))
-                pat_items.controls.insert(adj_new, pat_items.controls.pop(old))
-                schedule_save()
-                page.update()
+                refresh_pats()  # Full rebuild to keep lambda indices correct
         except Exception as x: _log_error("on_pat_reorder", x)
 
     def refresh_pats(update=True):

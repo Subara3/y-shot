@@ -1,7 +1,8 @@
 """
-y-shot: Web Screenshot Automation Tool  v1.5 (Flet)
+y-shot: Web Screenshot Automation Tool  v1.6 (Flet)
   - Multiple test cases, each with own steps + pattern set reference
   - v1.5: highlight fix, abort, tel capture, input check fix
+  - v1.6: popup menu, reorder fix, pattern count sync, modal dialogs
 """
 
 import csv, os, sys, json, threading, time
@@ -10,7 +11,7 @@ from urllib.parse import urlparse, urlunparse
 import flet as ft
 
 APP_NAME = "y-shot"
-APP_VERSION = "1.5"
+APP_VERSION = "1.6"
 APP_AUTHOR = "Yuri Norimatsu"
 
 import re
@@ -588,7 +589,22 @@ def main(page: ft.Page):
         "collapsed": set(),
         "stop_event": None,  # threading.Event for abort
         "test_drivers": [],  # active test drivers (for cleanup on exit)
+        "_tc_id_counter": 0,  # unique ID counter for test cases
     }
+    # Assign unique IDs to loaded test cases
+    _max_id = 0
+    for tc in state["tests"]:
+        if "_id" in tc:
+            # Extract numeric part from existing IDs like "tc_5"
+            try: _max_id = max(_max_id, int(tc["_id"].split("_", 1)[1]))
+            except (ValueError, IndexError): pass
+        else:
+            state["_tc_id_counter"] += 1
+            tc["_id"] = f"tc_{state['_tc_id_counter']}"
+    state["_tc_id_counter"] = max(state["_tc_id_counter"], _max_id)
+    def _new_tc_id():
+        state["_tc_id_counter"] += 1
+        return f"tc_{state['_tc_id_counter']}"
     cfg = state["config"]
 
     # ── Helpers ──
@@ -613,7 +629,8 @@ def main(page: ft.Page):
     def snack(msg, color=ft.Colors.GREEN_700):
         page.overlay.append(ft.SnackBar(ft.Text(msg, color=ft.Colors.WHITE), bgcolor=color, open=True))
         page.update()
-    def open_dlg(d):
+    def open_dlg(d, modal=True):
+        d.modal = modal
         page.overlay.append(d); d.open = True; page.update()
     def close_dlg(d):
         d.open = False; page.update()
@@ -660,7 +677,8 @@ def main(page: ft.Page):
             n_steps = len([s for s in tc.get("steps",[]) if s["type"] not in ("見出し","コメント")])
             n_pats = len(state["pattern_sets"].get(pat,[])) if pat else 0
             subtitle = f"{n_steps}ステップ"
-            if pat: subtitle += f" × {pat}({n_pats}件)"
+            if pat: subtitle += f" | {pat}({n_pats}件)"
+            tc_key = tc.get("_id", f"tc_fallback_{i}")
             test_list.controls.append(ft.Container(
                 ft.Row([
                     ft.Column([
@@ -668,20 +686,25 @@ def main(page: ft.Page):
                                 color=ft.Colors.BLUE_800 if selected else ft.Colors.BLACK),
                         ft.Text(subtitle, size=10, color=ft.Colors.GREY_500),
                     ], spacing=2, expand=True),
-                    ft.IconButton(ft.Icons.PLAY_ARROW, icon_size=16, tooltip="このテストだけ実行",
-                                  icon_color=ft.Colors.GREEN_600,
-                                  on_click=lambda e, idx=i: run_single(idx)),
-                    ft.IconButton(ft.Icons.COPY, icon_size=16, tooltip="コピー",
-                                  on_click=lambda e, idx=i: copy_test(idx)),
-                    ft.IconButton(ft.Icons.DELETE, icon_size=16, icon_color=ft.Colors.RED_400,
-                                  tooltip="削除",
-                                  on_click=lambda e, idx=i: del_test(idx)),
+                    ft.PopupMenuButton(
+                        icon=ft.Icons.MORE_VERT, icon_size=18, icon_color=ft.Colors.GREY_500,
+                        tooltip="操作",
+                        items=[
+                            ft.PopupMenuItem(icon=ft.Icons.PLAY_ARROW, text="実行",
+                                             on_click=lambda e, idx=i: run_single(idx)),
+                            ft.PopupMenuItem(icon=ft.Icons.COPY, text="コピー",
+                                             on_click=lambda e, idx=i: copy_test(idx)),
+                            ft.PopupMenuItem(),  # divider
+                            ft.PopupMenuItem(icon=ft.Icons.DELETE, text="削除",
+                                             on_click=lambda e, idx=i: del_test(idx)),
+                        ],
+                    ),
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 bgcolor=ft.Colors.BLUE_50 if selected else None,
-                padding=ft.Padding(12, 8, 36, 8), border_radius=6,
+                padding=ft.Padding(10, 6, 36, 6), border_radius=6,
                 border=ft.Border.all(2, ft.Colors.BLUE_300) if selected else ft.Border.all(1, ft.Colors.GREY_200),
                 on_click=lambda e, idx=i: select_test(idx),
-                key=f"tc_{i}",
+                key=tc_key,
             ))
         # Update run button state based on URL config
         has_url = bool(state["config"].get("url","").strip())
@@ -709,7 +732,7 @@ def main(page: ft.Page):
         refresh_test_list(False); refresh_steps()
 
     def add_test(e):
-        state["tests"].append({"name": f"テスト{len(state['tests'])+1}", "pattern": None, "steps": []})
+        state["tests"].append({"name": f"テスト{len(state['tests'])+1}", "pattern": None, "steps": [], "_id": _new_tc_id()})
         state["selected_test"] = len(state["tests"]) - 1
         refresh_test_list(False); refresh_steps()
 
@@ -718,6 +741,7 @@ def main(page: ft.Page):
             import copy
             tc = copy.deepcopy(state["tests"][idx])
             tc["name"] = tc["name"] + " (コピー)"
+            tc["_id"] = _new_tc_id()
             state["tests"].insert(idx + 1, tc)
             state["selected_test"] = idx + 1
             refresh_test_list(False); refresh_steps()
@@ -931,7 +955,7 @@ def main(page: ft.Page):
             content=ft.Column([type_dd, text_f, sel_field, val_mode, val_field, sec_field, mode_dd, margin_f],
                 tight=True, spacing=10, scroll=ft.ScrollMode.AUTO, width=500, height=420),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
-        open_dlg(dlg); upd()
+        open_dlg(dlg)
 
     # ── Element browser ──
     def load_page_click(e):
@@ -1058,7 +1082,7 @@ def main(page: ft.Page):
                 new_steps.append({"type": "クリック", "selector": "{パターン}"})
             if add_ss.value:
                 new_steps.append({"type": "スクショ", "mode": "fullpage"})
-            new_tc = {"name": tc_name, "pattern": pat_name, "steps": new_steps}
+            new_tc = {"name": tc_name, "pattern": pat_name, "steps": new_steps, "_id": _new_tc_id()}
             state["tests"].append(new_tc)
             state["selected_test"] = len(state["tests"]) - 1
             refresh_steps(False); refresh_test_list(False)
@@ -1109,8 +1133,8 @@ def main(page: ft.Page):
                     ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE, size=28, color=ft.Colors.GREY_400),
                     ft.Text("＋ボタンでパターンセットを追加", size=11, color=ft.Colors.GREY_500, text_align=ft.TextAlign.CENTER),
                 ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=6),
-                padding=ft.Padding(16, 30, 16, 16)))
-        for name in sorted(state["pattern_sets"].keys()):
+                padding=ft.Padding(16, 30, 16, 16), key="empty_ps"))
+        for name in state["pattern_sets"].keys():
             pats = state["pattern_sets"][name]
             selected = (state["selected_pat_set"] == name)
             pat_set_list.controls.append(ft.Container(
@@ -1126,12 +1150,23 @@ def main(page: ft.Page):
                                   on_click=lambda e, n=name: del_pat_set(n)),
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 bgcolor=ft.Colors.BLUE_50 if selected else None,
-                padding=ft.Padding(12, 8, 8, 8), border_radius=6,
+                padding=ft.Padding(12, 8, 36, 8), border_radius=6,
                 border=ft.Border.all(2, ft.Colors.BLUE_300) if selected else ft.Border.all(1, ft.Colors.GREY_200),
                 on_click=lambda e, n=name: select_pat_set(n),
+                key=f"ps_{name}",
             ))
         schedule_save()
         if update: page.update()
+
+    def on_pat_set_reorder(e):
+        names = list(state["pattern_sets"].keys())
+        old, new = e.old_index, e.new_index
+        if 0 <= old < len(names) and 0 <= new <= len(names):
+            item = names.pop(old)
+            if new > old: new -= 1
+            names.insert(new, item)
+            state["pattern_sets"] = {n: state["pattern_sets"][n] for n in names}
+            refresh_pat_set_list(False); refresh_pats()
 
     def select_pat_set(name):
         state["selected_pat_set"] = name; refresh_pat_set_list(False); refresh_pats()
@@ -1157,7 +1192,11 @@ def main(page: ft.Page):
             if new_name != old_name and new_name in state["pattern_sets"]:
                 snack("既に存在", ft.Colors.RED_600); return
             if new_name != old_name:
-                state["pattern_sets"][new_name] = state["pattern_sets"].pop(old_name)
+                # 順序を維持してリネーム
+                new_ps = {}
+                for k, v in state["pattern_sets"].items():
+                    new_ps[new_name if k == old_name else k] = v
+                state["pattern_sets"] = new_ps
                 # Update test cases referencing this pattern set
                 for tc in state["tests"]:
                     if tc.get("pattern") == old_name: tc["pattern"] = new_name
@@ -1173,7 +1212,7 @@ def main(page: ft.Page):
         def on_yes(e):
             del state["pattern_sets"][name]
             if state["selected_pat_set"] == name: state["selected_pat_set"] = None
-            refresh_pat_set_list(False); refresh_pats(); close_dlg(dlg)
+            refresh_pat_set_list(False); refresh_pats(False); refresh_test_list(); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("削除確認"),
             content=ft.Text(f"「{name}」({cnt}件) を削除しますか？"),
             actions=[ft.TextButton("削除", on_click=on_yes, style=ft.ButtonStyle(color=ft.Colors.RED_600)),
@@ -1234,7 +1273,7 @@ def main(page: ft.Page):
             p = {"label": lf.value, "value": vf.value}
             if idx is not None: pats[idx] = p
             else: pats.append(p)
-            refresh_pats(False); refresh_pat_set_list(); close_dlg(dlg)
+            refresh_pats(False); refresh_pat_set_list(False); refresh_test_list(); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("パターン"),
             content=ft.Column([lf, vf], tight=True, spacing=10, width=450),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
@@ -1243,7 +1282,7 @@ def main(page: ft.Page):
     def del_pat(idx):
         name = state["selected_pat_set"]
         if name and name in state["pattern_sets"]:
-            state["pattern_sets"][name].pop(idx); refresh_pats(False); refresh_pat_set_list()
+            state["pattern_sets"][name].pop(idx); refresh_pats(False); refresh_pat_set_list(False); refresh_test_list()
 
     def export_csv(e):
         name = state["selected_pat_set"]
@@ -1269,7 +1308,7 @@ def main(page: ft.Page):
         csv_cache = {f: load_csv(os.path.join(td, f)) for f in csvs}
         def on_sel(fn):
             state["pattern_sets"][name].extend(csv_cache[fn])
-            refresh_pats(False); refresh_pat_set_list(); snack(f"{len(csv_cache[fn])} 件追加"); close_dlg(dlg)
+            refresh_pats(False); refresh_pat_set_list(False); refresh_test_list(); snack(f"{len(csv_cache[fn])} 件追加"); close_dlg(dlg)
         cards = [ft.Card(ft.Container(ft.Column([
             ft.Text(os.path.splitext(f)[0], weight=ft.FontWeight.BOLD, size=13),
             ft.Text(f"{len(csv_cache[f])} 件", size=11, color=ft.Colors.GREY_600)],
@@ -1297,7 +1336,7 @@ def main(page: ft.Page):
             ps.append({"label": f"max({n}文字)", "value": ch * n})
             ps.append({"label": f"max+1({n+1}文字)", "value": ch * (n + 1)})
             state["pattern_sets"][name].extend(ps)
-            refresh_pats(False); refresh_pat_set_list()
+            refresh_pats(False); refresh_pat_set_list(False); refresh_test_list()
             snack(f"{len(ps)} 件追加"); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("max_length用 境界値生成"),
             content=ft.Column([
@@ -1333,7 +1372,7 @@ def main(page: ft.Page):
                 ft.Text("Web Screenshot Automation Tool"), ft.Divider(),
                 ft.Text(f"Developed by {APP_AUTHOR}")], tight=True, spacing=8, width=300),
             actions=[ft.TextButton("閉じる", on_click=lambda e: close_dlg(dlg))])
-        open_dlg(dlg)
+        open_dlg(dlg, modal=False)
 
     def _do_run(test_cases_to_run):
         c = state["config"]
@@ -1381,7 +1420,12 @@ def main(page: ft.Page):
             page.update()
 
     def switch_tab(idx):
-        tc_content.visible = (idx == 0); ps_content.visible = (idx == 1); page.update()
+        tc_content.visible = (idx == 0); ps_content.visible = (idx == 1)
+        if idx == 0:
+            refresh_test_list(False); refresh_steps(False)
+        else:
+            refresh_pat_set_list(False); refresh_pats(False)
+        page.update()
     def on_nav(e): switch_tab(e.control.selected_index)
 
     # ── Build controls ──
@@ -1411,7 +1455,7 @@ def main(page: ft.Page):
     tc_header = ft.Text("", weight=ft.FontWeight.BOLD, size=15)
     tc_pattern_label = ft.Text("", size=11, color=ft.Colors.GREY_600)
 
-    pat_set_list = ft.ListView(spacing=4, expand=True)
+    pat_set_list = ft.ReorderableListView(controls=[], on_reorder=on_pat_set_reorder, spacing=4, expand=True)
     pat_items = ft.ReorderableListView(controls=[], on_reorder=on_pat_reorder, spacing=3, expand=True)
     pat_header = ft.Text("", weight=ft.FontWeight.BOLD, size=15)
 

@@ -46,7 +46,7 @@ def _has_non_bmp(s):
 # Backend
 # ===================================================================
 
-def collect_elements_python(driver):
+def collect_elements_python(driver, include_hidden=False):
     from selenium.webdriver.common.by import By
     results, seen = [], set()
     css = ("input, textarea, select, button, a, [role='button'], [type='submit'], "
@@ -55,8 +55,11 @@ def collect_elements_python(driver):
     except Exception: return results
     for el in elements:
         try:
-            if not el.is_displayed():
-                if (el.get_attribute("type") or "") not in ("radio","checkbox"): continue
+            visible = el.is_displayed()
+            if not visible:
+                if (el.get_attribute("type") or "") not in ("radio","checkbox"):
+                    if not include_hidden:
+                        continue
             tag = el.tag_name.lower(); etype = el.get_attribute("type") or ""
             if etype == "hidden": continue
             eid = el.get_attribute("id") or ""; ename = el.get_attribute("name") or ""
@@ -64,7 +67,7 @@ def collect_elements_python(driver):
             if sel in seen: continue; seen.add(sel)
             hint = (el.get_attribute("placeholder") or el.get_attribute("alt") or
                     (el.text or "").strip()[:50] or (el.get_attribute("value") or "")[:30])
-            results.append({"selector": sel, "tag": tag, "type": etype, "name": ename, "id": eid, "hint": hint})
+            results.append({"selector": sel, "tag": tag, "type": etype, "name": ename, "id": eid, "hint": hint, "visible": visible})
         except Exception: continue
     return results
 
@@ -1413,10 +1416,11 @@ def _main_inner(page: ft.Page):
             try: w = float(browser_wait.value)
             except Exception: w = 3.0
             time.sleep(w); log(f"[DEBUG] {state['browser_driver'].title}")
-            elems = collect_elements_python(state["browser_driver"])
+            # Always collect ALL elements (including hidden) for filtering
+            elems = collect_elements_python(state["browser_driver"], include_hidden=True)
             state["browser_elements"] = list(elems)
-            state["selector_bank"][url.split("?")[0]] = elems
-            update_el_table(elems, url); update_url_dd()
+            state["selector_bank"][url.split("?")[0]] = [el for el in elems if el.get("visible", True)]
+            filter_el_table(); update_url_dd()
         except Exception as x:
             if state["browser_driver"]:
                 try: state["browser_driver"].title
@@ -1424,16 +1428,55 @@ def _main_inner(page: ft.Page):
                     kill_driver(state["browser_driver"]); state["browser_driver"] = None
             log(f"[ERROR] {x}")
         finally: load_btn.disabled = False; page.update()
-    def update_el_table(elems, url):
+    def filter_el_table(update=True):
+        """Filter and display elements based on search text and hidden visibility."""
         el_table.rows.clear()
-        for i, el in enumerate(elems):
+        query = (el_search.value or "").strip().lower()
+        show_hidden = el_show_hidden.value
+        visible_count = 0
+        total_count = len(state["browser_elements"])
+        hidden_count = sum(1 for el in state["browser_elements"] if not el.get("visible", True))
+        for i, el in enumerate(state["browser_elements"]):
+            is_visible = el.get("visible", True)
+            # Filter: hidden visibility
+            if not is_visible and not show_hidden:
+                continue
+            # Filter: search query (match against tag, type, id, name, hint, selector)
+            if query:
+                searchable = " ".join([
+                    el.get("tag", ""), el.get("type", ""), el.get("id", ""),
+                    el.get("name", ""), el.get("hint", ""), el.get("selector", "")
+                ]).lower()
+                if query not in searchable:
+                    continue
+            visible_count += 1
+            # Row color: dim for hidden elements
+            row_color = ft.Colors.ORANGE_50 if not is_visible else None
+            vis_indicator = "" if is_visible else " [hidden]"
             el_table.rows.append(ft.DataRow(
-                cells=[ft.DataCell(ft.Text(el["tag"],size=11)), ft.DataCell(ft.Text(el.get("type",""),size=11)),
+                cells=[ft.DataCell(ft.Text(el["tag"],size=11)),
+                       ft.DataCell(ft.Text(el.get("type",""),size=11)),
                        ft.DataCell(ft.Text(el.get("id") or el.get("name",""),size=11)),
-                       ft.DataCell(ft.Text(el.get("hint","")[:20],size=11)),
+                       ft.DataCell(ft.Text((el.get("hint","")[:20]) + vis_indicator,size=11,
+                                           color=ft.Colors.ORANGE_700 if not is_visible else None)),
                        ft.DataCell(ft.Text(el["selector"],size=10,color=ft.Colors.GREY_600))],
-                on_select_change=lambda e, idx=i: on_el_click(idx)))
-        el_status.value = f"{len(elems)} 要素"; log(f"[要素] {url} -> {len(elems)}"); page.update()
+                on_select_change=lambda e, idx=i: on_el_click(idx),
+                color=row_color))
+        status_parts = [f"{visible_count}/{total_count} 要素"]
+        if hidden_count > 0:
+            status_parts.append(f"(非表示: {hidden_count})")
+        if query:
+            status_parts.append(f"検索: \"{el_search.value}\"")
+        el_status.value = " ".join(status_parts)
+        if update:
+            try: page.update()
+            except Exception: pass
+    def update_el_table(elems, url):
+        """Legacy wrapper: store elements and apply filter."""
+        state["browser_elements"] = list(elems)
+        filter_el_table(False)
+        log(f"[要素] {url} -> {len(elems)}")
+        page.update()
     def update_url_dd():
         ex = {o.key for o in browser_url_dd.options}
         for u in state["selector_bank"]:
@@ -1446,15 +1489,42 @@ def _main_inner(page: ft.Page):
         clean = url.split("?")[0]
         if clean in state["selector_bank"]:
             elems = state["selector_bank"][clean]; state["browser_elements"] = list(elems)
-            update_el_table(elems, url); snack(f"バンク {len(elems)} 要素")
+            filter_el_table(); snack(f"バンク {len(elems)} 要素")
         else: snack("未保存URL", ft.Colors.ORANGE_600)
     def on_el_click(idx):
         state["selected_el"] = idx
-        for ri, row in enumerate(el_table.rows): row.color = ft.Colors.BLUE_50 if ri == idx else None
-        if idx < len(state["browser_elements"]) and state["browser_driver"]:
-            try: state["browser_driver"].execute_script(HIGHLIGHT_JS, state["browser_elements"][idx]["selector"])
+        el = state["browser_elements"][idx] if idx < len(state["browser_elements"]) else None
+        # Update row highlight (need to map idx to visible row)
+        for ri, row in enumerate(el_table.rows):
+            row.selected = False
+        # Find which row corresponds to this element index
+        query = (el_search.value or "").strip().lower()
+        show_hidden = el_show_hidden.value
+        row_idx = 0
+        for i, el_item in enumerate(state["browser_elements"]):
+            is_visible = el_item.get("visible", True)
+            if not is_visible and not show_hidden: continue
+            if query:
+                searchable = " ".join([
+                    el_item.get("tag", ""), el_item.get("type", ""), el_item.get("id", ""),
+                    el_item.get("name", ""), el_item.get("hint", ""), el_item.get("selector", "")
+                ]).lower()
+                if query not in searchable: continue
+            if i == idx:
+                if row_idx < len(el_table.rows):
+                    el_table.rows[row_idx].selected = True
+                break
+            row_idx += 1
+        if el and state["browser_driver"]:
+            try: state["browser_driver"].execute_script(HIGHLIGHT_JS, el["selector"])
             except Exception: pass
         page.update()
+    def on_el_search_change(e):
+        """Re-filter table when search text changes."""
+        filter_el_table()
+    def on_show_hidden_change(e):
+        """Re-filter table when hidden visibility toggles."""
+        filter_el_table()
     def quick_add(stype):
         tc = cur_test()
         if not tc: snack("テストケースを選択", ft.Colors.ORANGE_600); return
@@ -1876,11 +1946,15 @@ def _main_inner(page: ft.Page):
     browser_wait = ft.TextField(label="秒", width=55, dense=True, value=cfg.get("browser_wait","3.0"))
     load_btn = ft.Button("読込", icon=ft.Icons.REFRESH, on_click=load_page_click)
     el_status = ft.Text("未読込", size=11, color=ft.Colors.GREY_500)
+    el_search = ft.TextField(label="検索", width=250, dense=True, hint_text="セレクタ/id/name/ヒント",
+                             on_change=on_el_search_change, prefix_icon=ft.Icons.SEARCH)
+    el_show_hidden = ft.Checkbox(label="非表示要素も表示", value=False, on_change=on_show_hidden_change)
     el_table = ft.DataTable(
         columns=[ft.DataColumn(ft.Text("タグ",size=11)), ft.DataColumn(ft.Text("type",size=11)),
                  ft.DataColumn(ft.Text("id/name",size=11)), ft.DataColumn(ft.Text("ヒント",size=11)),
                  ft.DataColumn(ft.Text("セレクタ",size=11))],
-        rows=[], column_spacing=8, data_row_min_height=28, heading_row_height=30)
+        rows=[], column_spacing=8, data_row_min_height=28, heading_row_height=30,
+        show_checkbox_column=True)
 
     # Page selector
     page_dd = ft.Dropdown(label="ページ", width=200, dense=True,
@@ -1958,6 +2032,7 @@ def _main_inner(page: ft.Page):
             ft.Row([browser_url_dd, ft.OutlinedButton("保存済みを読込", on_click=load_bank)], spacing=4),
             ft.Row([load_btn, ft.OutlinedButton("閉じる", on_click=close_br),
                     ft.TextButton("設定URLを使う", icon=ft.Icons.SYNC, on_click=sync_url)], spacing=4, wrap=True),
+            ft.Row([el_search, el_show_hidden], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             el_status,
             ft.Container(ft.Column([el_table], scroll=ft.ScrollMode.AUTO),
                 expand=True, border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4),

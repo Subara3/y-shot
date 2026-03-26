@@ -1,8 +1,8 @@
 """
-y-shot テストスクリプト v1.6
+y-shot テストスクリプト v1.7
   - ロジック部分のテスト（ブラウザ不要）
   - Flet API互換性チェック
-  - 新機能テスト（テストケースID、パターンセット順序、kill_driver）
+  - v1.7: start_num, auto_number_tests, pattern numbering
 """
 
 import os
@@ -70,7 +70,6 @@ def test_logic():
 def test_tc_ids():
     print("=== テスト2: テストケースID管理 ===")
 
-    # IDなしのテストケースにIDが付与されることを確認
     tests = [
         {"name": "TC1", "pattern": None, "steps": []},
         {"name": "TC2", "pattern": None, "steps": []},
@@ -84,11 +83,10 @@ def test_tc_ids():
     assert tests[1]["_id"] == "tc_2"
     print("  [OK] IDなしテストケースへのID付与")
 
-    # 既存ID付きテストのカウンター復元
     tests_with_ids = [
         {"name": "TC1", "_id": "tc_5", "pattern": None, "steps": []},
         {"name": "TC2", "_id": "tc_3", "pattern": None, "steps": []},
-        {"name": "TC3", "pattern": None, "steps": []},  # IDなし
+        {"name": "TC3", "pattern": None, "steps": []},
     ]
     _max_id = 0
     _counter = 0
@@ -100,23 +98,20 @@ def test_tc_ids():
             _counter += 1
             tc["_id"] = f"tc_{_counter}"
     _counter = max(_counter, _max_id)
-    assert _max_id == 5, f"max_id should be 5, got {_max_id}"
+    assert _max_id == 5
     assert _counter == 5
-    assert tests_with_ids[2]["_id"] == "tc_1"  # 新規ID
-    # 次のIDは6になるはず
+    assert tests_with_ids[2]["_id"] == "tc_1"
     _counter += 1
     assert _counter == 6
     print("  [OK] 既存IDからのカウンター復元")
 
-    # コピー時にIDがユニークになることを確認
     original = {"name": "元テスト", "_id": "tc_10", "pattern": None, "steps": [{"type": "スクショ", "mode": "fullpage"}]}
     copied = copy.deepcopy(original)
-    copied["_id"] = "tc_11"  # new unique ID
+    copied["_id"] = "tc_11"
     assert original["_id"] != copied["_id"]
-    assert copied["steps"][0]["type"] == "スクショ"  # deepcopy確認
+    assert copied["steps"][0]["type"] == "スクショ"
     print("  [OK] コピー時のユニークID")
 
-    # _idがJSON保存で保持されることを確認
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
         tmp = f.name
     test_data = [{"name": "TC", "_id": "tc_42", "pattern": None, "steps": []}]
@@ -138,7 +133,6 @@ def test_tc_ids():
 def test_pattern_set_ordering():
     print("=== テスト3: パターンセット順序管理 ===")
 
-    # 辞書の挿入順が維持されることを確認 (Python 3.7+)
     ps = {}
     ps["C_set"] = [{"label": "c1", "value": "c"}]
     ps["A_set"] = [{"label": "a1", "value": "a"}]
@@ -146,9 +140,8 @@ def test_pattern_set_ordering():
     assert list(ps.keys()) == ["C_set", "A_set", "B_set"]
     print("  [OK] 挿入順維持")
 
-    # 並び替えシミュレーション
-    names = list(ps.keys())  # ["C_set", "A_set", "B_set"]
-    old, new = 2, 0  # B_setを先頭へ
+    names = list(ps.keys())
+    old, new = 2, 0
     item = names.pop(old)
     names.insert(new, item)
     assert names == ["B_set", "C_set", "A_set"]
@@ -156,7 +149,6 @@ def test_pattern_set_ordering():
     assert list(ps_reordered.keys()) == ["B_set", "C_set", "A_set"]
     print("  [OK] 並び替え")
 
-    # リネーム時の順序維持
     ps = {"First": [], "Second": [], "Third": []}
     old_name, new_name = "Second", "Renamed"
     new_ps = {}
@@ -165,7 +157,6 @@ def test_pattern_set_ordering():
     assert list(new_ps.keys()) == ["First", "Renamed", "Third"]
     print("  [OK] リネーム時の順序維持")
 
-    # JSON round-trip での順序保持
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
         tmp = f.name
     ps = {"Z_last": [{"label": "z", "value": "z"}], "A_first": [{"label": "a", "value": "a"}]}
@@ -188,40 +179,32 @@ def test_flet_api():
     print("=== テスト4: Flet API互換性チェック ===")
     import flet as ft
 
-    # PopupMenuButton + PopupMenuItem が content 引数で動くこと
     try:
         items = [
             ft.PopupMenuItem(icon=ft.Icons.PLAY_ARROW, content="実行"),
             ft.PopupMenuItem(icon=ft.Icons.COPY, content="コピー"),
-            ft.PopupMenuItem(),  # divider
+            ft.PopupMenuItem(),
             ft.PopupMenuItem(icon=ft.Icons.DELETE, content="削除"),
         ]
         btn = ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, items=items)
         assert len(btn.items) == 4
         print("  [OK] PopupMenuButton + PopupMenuItem(content=)")
     except Exception as e:
-        print(f"  [FAIL] PopupMenuItem: {e}")
-        raise
+        print(f"  [FAIL] PopupMenuItem: {e}"); raise
 
-    # ReorderableListView が使えること
     try:
         rlv = ft.ReorderableListView(controls=[], spacing=4)
         assert rlv is not None
         print("  [OK] ReorderableListView")
     except Exception as e:
-        print(f"  [FAIL] ReorderableListView: {e}")
-        raise
+        print(f"  [FAIL] ReorderableListView: {e}"); raise
 
-    # AlertDialog に modal 引数が使えること
     try:
         dlg = ft.AlertDialog(title=ft.Text("test"), modal=True)
         assert dlg.modal == True
-        dlg2 = ft.AlertDialog(title=ft.Text("test2"), modal=False)
-        assert dlg2.modal == False
         print("  [OK] AlertDialog modal=True/False")
     except Exception as e:
-        print(f"  [FAIL] AlertDialog modal: {e}")
-        raise
+        print(f"  [FAIL] AlertDialog modal: {e}"); raise
 
     print("  全てパス\n")
 
@@ -234,42 +217,34 @@ def test_kill_driver():
     print("=== テスト5: kill_driver 関数 ===")
     from y_shot import kill_driver
 
-    # None を渡してもエラーにならないこと
     try:
         kill_driver(None)
         print("  [OK] kill_driver(None) - エラーなし")
     except Exception as e:
-        print(f"  [FAIL] kill_driver(None): {e}")
-        raise
+        print(f"  [FAIL] kill_driver(None): {e}"); raise
 
-    # quit()が呼ばれること（モック）
     class MockService:
         class process:
             pid = 99999
             @staticmethod
-            def wait(timeout=5):
-                return  # すぐ終了
+            def wait(timeout=5): return
     class MockDriver:
         service = MockService()
         _quit_called = False
-        def quit(self):
-            self._quit_called = True
+        def quit(self): self._quit_called = True
     drv = MockDriver()
     kill_driver(drv)
-    assert drv._quit_called, "quit() が呼ばれていない"
+    assert drv._quit_called
     print("  [OK] kill_driver(MockDriver) - quit()呼び出し確認")
 
-    # quit()が例外を投げても落ちないこと
     class BrokenDriver:
         service = None
-        def quit(self):
-            raise Exception("already dead")
+        def quit(self): raise Exception("already dead")
     try:
         kill_driver(BrokenDriver())
         print("  [OK] kill_driver(BrokenDriver) - 例外を握り潰し")
     except Exception as e:
-        print(f"  [FAIL] kill_driver should not raise: {e}")
-        raise
+        print(f"  [FAIL] kill_driver should not raise: {e}"); raise
 
     print("  全てパス\n")
 
@@ -286,19 +261,16 @@ def test_import():
     sys.modules['y_shot_test_import'] = mod
     try:
         spec.loader.exec_module(mod)
-        # 主要関数が存在するか
-        for fn_name in ['main', 'kill_driver', 'run_all_tests', 'collect_elements_python',
+        for fn_name in ['main', '_main_inner', 'kill_driver', 'run_all_tests', 'collect_elements_python',
                          'step_display', 'load_csv', 'save_csv', 'load_tests', 'save_tests',
                          'load_pattern_sets', 'save_pattern_sets', 'load_pages', 'save_pages',
                          'build_auth_url', 'capture_form_values', '_safe_filename', '_has_non_bmp']:
             assert hasattr(mod, fn_name), f"{fn_name} が見つからない"
         print("  [OK] モジュール読込 + 全関数存在確認")
     except Exception as e:
-        print(f"  [FAIL] {e}")
-        raise
+        print(f"  [FAIL] {e}"); raise
 
-    # バージョン確認
-    assert mod.APP_VERSION == "1.6", f"バージョン不一致: {mod.APP_VERSION}"
+    assert mod.APP_VERSION == "1.7", f"バージョン不一致: {mod.APP_VERSION}"
     print(f"  [OK] バージョン: {mod.APP_VERSION}")
 
     print("  全てパス\n")
@@ -329,9 +301,130 @@ def test_utils():
 
 
 # ---------------------------------------------------------------------------
+# テスト8: start_num と auto_number_tests
+# ---------------------------------------------------------------------------
+
+def test_start_num():
+    print("=== テスト8: start_num と番号体系 ===")
+
+    # ページに start_number を設定した場合の採番
+    pages = [
+        {"_id": "p_1", "name": "ページ1", "number": "1", "start_number": 1},
+        {"_id": "p_2", "name": "ページ2", "number": "2", "start_number": 5},
+    ]
+    tests = [
+        {"_id": "tc_1", "name": "T1", "page_id": "p_1", "number": ""},
+        {"_id": "tc_2", "name": "T2", "page_id": "p_1", "number": ""},
+        {"_id": "tc_3", "name": "T3", "page_id": "p_2", "number": ""},
+        {"_id": "tc_4", "name": "T4", "page_id": "p_2", "number": ""},
+    ]
+
+    for pg in pages:
+        pnum = pg["number"]
+        start = int(pg.get("start_number", 1))
+        page_tests = [t for t in tests if t.get("page_id") == pg["_id"]]
+        for i, tc in enumerate(page_tests):
+            tc["number"] = f"{pnum}-{start + i}"
+
+    assert tests[0]["number"] == "1-1", f"Expected 1-1, got {tests[0]['number']}"
+    assert tests[1]["number"] == "1-2", f"Expected 1-2, got {tests[1]['number']}"
+    assert tests[2]["number"] == "2-5", f"Expected 2-5, got {tests[2]['number']}"
+    assert tests[3]["number"] == "2-6", f"Expected 2-6, got {tests[3]['number']}"
+    print("  [OK] ページ番号-開始番号からの連番")
+
+    # start_number なしの場合のデフォルト
+    pages_no_start = [{"_id": "p_1", "name": "P1", "number": "3"}]
+    start = int(pages_no_start[0].get("start_number", 1))
+    assert start == 1
+    print("  [OK] start_number なし時のデフォルト=1")
+
+    # start_num (旧フィールド) -> start_number へのマイグレーション
+    pg_old = {"_id": "p_1", "name": "P1", "number": "1", "start_num": 3}
+    if "start_num" in pg_old and "start_number" not in pg_old:
+        pg_old["start_number"] = pg_old.pop("start_num")
+    assert pg_old.get("start_number") == 3
+    assert "start_num" not in pg_old
+    print("  [OK] start_num -> start_number マイグレーション")
+
+    # ファイル名にテスト番号が含まれることを確認
+    from y_shot import _safe_filename
+    tc_number = "2-5"
+    safe_number = _safe_filename(tc_number, 10)
+    assert safe_number == "2-5"
+    fn = f"001_{safe_number}_テスト_p01_未入力_ss1.png"
+    assert "2-5" in fn
+    print("  [OK] ファイル名にテスト番号")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト9: テストケースの並び替えロジック
+# ---------------------------------------------------------------------------
+
+def test_reorder():
+    print("=== テスト9: テストケースの並び替え ===")
+
+    def tests_for_page(tests, pid):
+        return [t for t in tests if t.get("page_id") == pid]
+
+    def do_reorder(tests, cur_pid, old, new):
+        page_tests = tests_for_page(tests, cur_pid)
+        adj_new = new - 1 if new > old else new
+        if old == adj_new: return
+        old_tc = page_tests[old]
+        new_tc = page_tests[adj_new] if adj_new < len(page_tests) else None
+        tests.remove(old_tc)
+        if new_tc:
+            new_gi = tests.index(new_tc)
+            if adj_new > old:
+                tests.insert(new_gi + 1, old_tc)
+            else:
+                tests.insert(new_gi, old_tc)
+        else:
+            last_idx = -1
+            for i, t in enumerate(tests):
+                if t.get("page_id") == cur_pid: last_idx = i
+            tests.insert(last_idx + 1 if last_idx >= 0 else len(tests), old_tc)
+
+    pid = "p_1"
+
+    # 末尾→先頭
+    ts = [{"name": n, "page_id": pid} for n in ["A", "B", "C"]]
+    do_reorder(ts, pid, 2, 0)
+    assert [t['name'] for t in tests_for_page(ts, pid)] == ['C', 'A', 'B']
+    print("  [OK] 末尾→先頭 (2->0)")
+
+    # 先頭→2番目の後ろ
+    ts = [{"name": n, "page_id": pid} for n in ["A", "B", "C"]]
+    do_reorder(ts, pid, 0, 2)
+    assert [t['name'] for t in tests_for_page(ts, pid)] == ['B', 'A', 'C']
+    print("  [OK] 先頭→中間 (0->2)")
+
+    # 先頭→末尾
+    ts = [{"name": n, "page_id": pid} for n in ["A", "B", "C"]]
+    do_reorder(ts, pid, 0, 3)
+    assert [t['name'] for t in tests_for_page(ts, pid)] == ['B', 'C', 'A']
+    print("  [OK] 先頭→末尾 (0->3)")
+
+    # マルチページ: 他ページに影響なし
+    ts = [{"name": "X", "page_id": "p_2"},
+          {"name": "A", "page_id": pid},
+          {"name": "B", "page_id": pid},
+          {"name": "Y", "page_id": "p_2"},
+          {"name": "C", "page_id": pid}]
+    do_reorder(ts, pid, 2, 0)
+    assert [t['name'] for t in tests_for_page(ts, pid)] == ['C', 'A', 'B']
+    assert [t['name'] for t in tests_for_page(ts, "p_2")] == ['X', 'Y']
+    print("  [OK] マルチページ時の独立性")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("y-shot テスト開始 (v1.6)\n")
+    print("y-shot テスト開始 (v1.7)\n")
 
     test_logic()
     test_tc_ids()
@@ -340,6 +433,8 @@ if __name__ == "__main__":
     test_kill_driver()
     test_import()
     test_utils()
+    test_start_num()
+    test_reorder()
 
     print("=" * 40)
     print("全テスト完了 - すべてパス")

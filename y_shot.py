@@ -295,10 +295,10 @@ def step_short(step):
     if t == "待機": return f"{step.get('seconds','1.0')}秒"
     if t == "スクショ":
         m = step.get("mode","fullpage")
-        if m == "fullpage": return "ページ全体"
-        if m == "fullshot": return "フルショット"
-        if m == "margin": return f"+{step.get('margin_px','200')}px"
-        return "要素"
+        if m == "fullpage": return "表示範囲"
+        if m == "fullshot": return "ページ全体(縦長)"
+        if m == "margin": return f"要素+{step.get('margin_px','200')}px"
+        return "要素のみ"
     return str(step)
 
 step_display = step_short
@@ -706,14 +706,18 @@ def _main_inner(page: ft.Page):
         return [t for t in state["tests"] if t.get("page_id") == page_id]
 
     def auto_number_tests():
-        """Re-number tests: page_number-start_number+offset. Skip manually numbered ones."""
+        """Re-number tests: page_number-sub_number.
+        If a test has _sub_number set, use it and continue from there."""
         for pg in state["pages"]:
             pnum = pg["number"]
-            start = int(pg.get("start_number", 1))
+            next_sub = int(pg.get("start_number", 1))
             page_tests = tests_for_page(pg["_id"])
-            for i, tc in enumerate(page_tests):
-                if not tc.get("_manual_number"):
-                    tc["number"] = f"{pnum}-{start + i}"
+            for tc in page_tests:
+                forced = tc.get("_sub_number")
+                if forced is not None:
+                    next_sub = int(forced)
+                tc["number"] = f"{pnum}-{next_sub}"
+                next_sub += 1
 
     # Migration
     if not state["pages"] and state["tests"]:
@@ -730,6 +734,12 @@ def _main_inner(page: ft.Page):
         for tc in state["tests"]:
             if "page_id" not in tc: tc["page_id"] = first_pid
             if "number" not in tc: tc["number"] = ""
+            # Migration: _manual_number -> _sub_number
+            if tc.pop("_manual_number", False):
+                num = tc.get("number", "")
+                if "-" in num:
+                    try: tc["_sub_number"] = int(num.split("-", 1)[1])
+                    except (ValueError, IndexError): pass
         for pg in state["pages"]:
             # Migration: start_num (v1.7 early) -> start_number
             if "start_num" in pg and "start_number" not in pg:
@@ -934,8 +944,8 @@ def _main_inner(page: ft.Page):
             if pat: subtitle += f" | {pat} ({n_pats}件)"
             tc_id = tc.get("_id", f"tc_fallback_{global_idx}")
             tc_number = tc.get("number", "")
-            is_manual = tc.get("_manual_number", False)
-            num_color = ft.Colors.ORANGE_700 if is_manual else ft.Colors.BLUE_600
+            is_forced = tc.get("_sub_number") is not None
+            num_color = ft.Colors.ORANGE_700 if is_forced else ft.Colors.BLUE_600
             card = ft.Container(
                 ft.Row([
                     ft.Text(tc_number, size=11, color=num_color, weight=ft.FontWeight.BOLD, width=50),
@@ -1024,7 +1034,7 @@ def _main_inner(page: ft.Page):
         if 0 <= idx < len(state["tests"]):
             import copy as _copy
             tc = _copy.deepcopy(state["tests"][idx])
-            tc["name"] += " (コピー)"; tc["_id"] = _new_tc_id(); tc["_manual_number"] = False
+            tc["name"] += " (コピー)"; tc["_id"] = _new_tc_id(); tc.pop("_sub_number", None)
             state["tests"].insert(idx + 1, tc); auto_number_tests()
             state["selected_test"] = idx + 1
             refresh_page_dd(False); refresh_test_list(False); refresh_steps()
@@ -1058,11 +1068,19 @@ def _main_inner(page: ft.Page):
         tc = cur_test()
         if not tc: return
         nf = ft.TextField(label="テスト名", value=tc["name"], width=350)
-        numf = ft.TextField(label="番号", value=tc.get("number", ""), width=140, hint_text="例: 1-3")
-        manual_cb = ft.Checkbox(label="手動番号を固定", value=tc.get("_manual_number", False))
+        # 枝番: ページ番号は自動、枝番のみ編集可
+        pg = None
+        for p in state["pages"]:
+            if p["_id"] == tc.get("page_id"): pg = p; break
+        pg_prefix = pg["number"] if pg else "?"
+        cur_sub = tc.get("_sub_number")
+        sub_f = ft.TextField(label="枝番", width=100,
+                             value=str(cur_sub) if cur_sub is not None else "",
+                             hint_text="自動", keyboard_type=ft.KeyboardType.NUMBER)
+        num_preview = ft.Text(f"現在: {tc.get('number','')}", size=11, color=ft.Colors.GREY_600)
         pat_opts = [ft.dropdown.Option("なし")] + [ft.dropdown.Option(n) for n in pat_set_names()]
         pf = ft.Dropdown(label="パターンセット", width=350, value=tc.get("pattern") or "なし", options=pat_opts)
-        page_opts = [ft.dropdown.Option(key=pg["_id"], text=f"{pg['number']} {pg['name']}") for pg in state["pages"]]
+        page_opts = [ft.dropdown.Option(key=pg2["_id"], text=f"{pg2['number']} {pg2['name']}") for pg2 in state["pages"]]
         page_dd_edit = ft.Dropdown(label="ページ", width=350, value=tc.get("page_id", ""), options=page_opts)
         def on_ok(e):
             try:
@@ -1071,17 +1089,24 @@ def _main_inner(page: ft.Page):
                 new_pid = page_dd_edit.value
                 if new_pid and new_pid != tc.get("page_id"):
                     tc["page_id"] = new_pid; state["selected_page"] = new_pid
-                if manual_cb.value and numf.value.strip():
-                    tc["number"] = numf.value.strip(); tc["_manual_number"] = True
+                sub_val = sub_f.value.strip()
+                if sub_val:
+                    try:
+                        tc["_sub_number"] = int(sub_val)
+                    except ValueError:
+                        snack("枝番は整数で入力してください", ft.Colors.RED_600); return
                 else:
-                    tc["_manual_number"] = False
+                    tc.pop("_sub_number", None)
                 auto_number_tests()
                 refresh_page_dd(False); refresh_test_list(False); refresh_steps(); close_dlg(dlg)
             except Exception as x: _log_error("edit_test_name", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("テストケース設定"),
-            content=ft.Column([nf, ft.Row([numf, manual_cb], spacing=8,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER), page_dd_edit, pf],
-                tight=True, spacing=10, width=400),
+            content=ft.Column([nf,
+                ft.Row([ft.Text(f"{pg_prefix} -", size=14, weight=ft.FontWeight.BOLD), sub_f, num_preview],
+                       spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Text("枝番を指定すると、以降のテストも自動で連番になります。空欄で自動。",
+                         size=11, color=ft.Colors.GREY_500),
+                page_dd_edit, pf], tight=True, spacing=10, width=400),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
@@ -1192,10 +1217,17 @@ def _main_inner(page: ft.Page):
         val_mode = ft.Dropdown(label="値の指定方法", width=450, value=init_val_mode, options=val_mode_opts)
         val_field = ft.TextField(label="値 (固定値を直接入力)", width=450,
             value="" if init_val == "{パターン}" else init_val,
-            multiline=True, min_lines=2, max_lines=4, visible=(init_val_mode == "手入力"))
+            multiline=True, min_lines=2, max_lines=4)
         sec_field = ft.TextField(label="秒数", width=120, value=init.get("seconds","1.0"))
-        mode_dd = ft.Dropdown(label="スクショ範囲", width=180, value=init.get("mode","fullpage"),
-            options=[ft.dropdown.Option(m) for m in ["fullpage","fullshot","element","margin"]])
+        # スクショモード: key=内部値, text=表示名
+        _SS_MODES = [
+            ("fullpage", "表示範囲のみ"),
+            ("fullshot", "ページ全体 (縦長)"),
+            ("element", "要素のみ"),
+            ("margin", "要素 + 余白"),
+        ]
+        mode_dd = ft.Dropdown(label="スクショ範囲", width=220, value=init.get("mode","fullpage"),
+            options=[ft.dropdown.Option(key=k, text=t) for k, t in _SS_MODES])
         margin_f = ft.TextField(label="マージン(px)", width=120, value=init.get("margin_px","200"))
         text_f = ft.TextField(label="テキスト", width=450, value=init.get("text",""), multiline=True, min_lines=1, max_lines=3)
         def upd(e=None):
@@ -1208,9 +1240,12 @@ def _main_inner(page: ft.Page):
                 margin_f.visible = (t=="スクショ" and mode_dd.value=="margin"); text_f.visible = t in ("見出し","コメント")
                 if t == "選択": val_mode.label = "選択肢の指定方法"
                 else: val_mode.label = "値の指定方法"
-                page.update()
+                try: page.update()
+                except Exception: pass
             except Exception as x: _log_error("show_step_dlg.upd", x)
         type_dd.on_select = upd; mode_dd.on_select = upd; val_mode.on_select = upd
+        # 初期表示を正しく設定
+        upd()
         def on_ok(e):
             try:
                 t = type_dd.value; step = {"type": t}
@@ -1811,56 +1846,81 @@ def _main_inner(page: ft.Page):
     _flog.info(f"{APP_NAME} v{APP_VERSION} started ({len(state['pages'])} pages, {len(state['tests'])} tests, {len(state['pattern_sets'])} pattern sets)")
 
     def _cleanup_all_drivers():
-        for drv in list(state.get("test_drivers", [])): kill_driver(drv)
+        """Best-effort quit of Selenium drivers (non-blocking)."""
+        for drv in list(state.get("test_drivers", [])):
+            try: drv.quit()
+            except Exception: pass
         state["test_drivers"] = []
         if state["browser_driver"]:
-            kill_driver(state["browser_driver"]); state["browser_driver"] = None
+            try: state["browser_driver"].quit()
+            except Exception: pass
+            state["browser_driver"] = None
 
-    def _kill_process_tree():
-        """Kill this process and all child processes (Flet runtime, WebView, etc.).
-        Prevents orphaned 'Flet' processes from lingering after exit."""
-        import subprocess as _sp
-        pid = os.getpid()
-        _flog.info(f"Killing process tree (PID={pid})")
+    def _kill_children_and_exit():
+        """Kill all child processes (Flet runtime, WebView) but NOT this process.
+        Then sys.exit(0) so PyInstaller's atexit cleanup can delete _MEIxxxxxx."""
+        my_pid = os.getpid()
+        _flog.info(f"Killing child processes of PID={my_pid}")
         if sys.platform == 'win32':
-            # taskkill /F /T kills the entire process tree including children
+            import subprocess as _sp
             try:
-                _sp.Popen(['taskkill', '/F', '/T', '/PID', str(pid)],
-                          stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-                          creationflags=0x08000000)  # CREATE_NO_WINDOW
-            except Exception:
-                pass
-            # Fallback: if taskkill hasn't killed us yet
-            time.sleep(0.5)
-            os._exit(0)
+                # Enumerate child PIDs via wmic
+                result = _sp.run(
+                    ['wmic', 'process', 'where', f'ParentProcessId={my_pid}',
+                     'get', 'ProcessId'],
+                    capture_output=True, text=True, timeout=3,
+                    creationflags=0x08000000)  # CREATE_NO_WINDOW
+                for line in result.stdout.strip().split('\n'):
+                    cpid = line.strip()
+                    if cpid.isdigit() and cpid != str(my_pid):
+                        try:
+                            _sp.run(['taskkill', '/F', '/T', '/PID', cpid],
+                                    capture_output=True, timeout=3,
+                                    creationflags=0x08000000)
+                        except Exception:
+                            pass
+            except Exception as x:
+                _flog.error(f"Child kill failed: {x}")
+                # Fallback: kill whole tree (will cause _MEI warning but at least exits)
+                try:
+                    _sp.Popen(['taskkill', '/F', '/T', '/PID', str(my_pid)],
+                              stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                              creationflags=0x08000000)
+                except Exception:
+                    pass
+            # Brief wait for child processes to die
+            time.sleep(0.2)
         else:
             try:
                 import signal as _sig
-                os.killpg(os.getpgid(pid), _sig.SIGTERM)
-                time.sleep(0.3)
-                os.killpg(os.getpgid(pid), _sig.SIGKILL)
+                os.killpg(os.getpgid(my_pid), _sig.SIGTERM)
             except Exception:
                 pass
-            os._exit(0)
+        # Normal exit → PyInstaller atexit cleanup runs → _MEI folder deleted
+        # Set a hard deadline: if sys.exit doesn't work in 2s, force os._exit
+        _deadline = threading.Timer(2.0, lambda: os._exit(0))
+        _deadline.daemon = True; _deadline.start()
+        sys.exit(0)
 
     def on_window_event(e: ft.WindowEvent):
         if e.type == ft.WindowEventType.CLOSE:
+            # 1. Save data (fast)
             if _save_timer[0]: _save_timer[0].cancel()
-            save_all()
-            ev = state.get("stop_event")
-            if ev:
-                ev.set()
-                for _ in range(100):
-                    if not state.get("test_drivers"): break
-                    time.sleep(0.1)
-            _cleanup_all_drivers()
-            try: page.window.destroy()
+            try: save_all()
             except Exception: pass
-            _kill_process_tree()
+            # 2. Signal any running tests to stop
+            ev = state.get("stop_event")
+            if ev: ev.set()
+            # 3. Best-effort Selenium cleanup
+            _cleanup_all_drivers()
+            # 4. Kill Flet children, then clean exit
+            _kill_children_and_exit()
 
     import signal
     def _signal_cleanup(signum, frame):
-        _cleanup_all_drivers(); _kill_process_tree()
+        try: save_all()
+        except Exception: pass
+        _kill_children_and_exit()
     try:
         signal.signal(signal.SIGTERM, _signal_cleanup)
         signal.signal(signal.SIGINT, _signal_cleanup)

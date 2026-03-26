@@ -57,7 +57,7 @@ def test_logic():
     assert "入力" in step_display(steps[0]) or "#name" in step_display(steps[0])
     assert "クリック" in step_display(steps[1]) or "#btn" in step_display(steps[1])
     assert "2.0" in step_display(steps[2])
-    assert "fullpage" in step_display(steps[3]) or "ページ全体" in step_display(steps[3])
+    assert "表示範囲" in step_display(steps[3]) or "fullpage" in step_display(steps[3])
     print("  [OK] ステップ表示")
 
     print("  全てパス\n")
@@ -305,12 +305,25 @@ def test_utils():
 # ---------------------------------------------------------------------------
 
 def test_start_num():
-    print("=== テスト8: start_num と番号体系 ===")
+    print("=== テスト8: 番号体系と枝番 ===")
 
-    # ページに start_number を設定した場合の採番
+    def auto_number(pages, tests):
+        """Reproduce auto_number_tests logic"""
+        for pg in pages:
+            pnum = pg["number"]
+            next_sub = int(pg.get("start_number", 1))
+            page_tests = [t for t in tests if t.get("page_id") == pg["_id"]]
+            for tc in page_tests:
+                forced = tc.get("_sub_number")
+                if forced is not None:
+                    next_sub = int(forced)
+                tc["number"] = f"{pnum}-{next_sub}"
+                next_sub += 1
+
+    # 基本: start_number からの連番
     pages = [
-        {"_id": "p_1", "name": "ページ1", "number": "1", "start_number": 1},
-        {"_id": "p_2", "name": "ページ2", "number": "2", "start_number": 5},
+        {"_id": "p_1", "name": "P1", "number": "1", "start_number": 1},
+        {"_id": "p_2", "name": "P2", "number": "2", "start_number": 5},
     ]
     tests = [
         {"_id": "tc_1", "name": "T1", "page_id": "p_1", "number": ""},
@@ -318,42 +331,69 @@ def test_start_num():
         {"_id": "tc_3", "name": "T3", "page_id": "p_2", "number": ""},
         {"_id": "tc_4", "name": "T4", "page_id": "p_2", "number": ""},
     ]
-
-    for pg in pages:
-        pnum = pg["number"]
-        start = int(pg.get("start_number", 1))
-        page_tests = [t for t in tests if t.get("page_id") == pg["_id"]]
-        for i, tc in enumerate(page_tests):
-            tc["number"] = f"{pnum}-{start + i}"
-
-    assert tests[0]["number"] == "1-1", f"Expected 1-1, got {tests[0]['number']}"
-    assert tests[1]["number"] == "1-2", f"Expected 1-2, got {tests[1]['number']}"
-    assert tests[2]["number"] == "2-5", f"Expected 2-5, got {tests[2]['number']}"
-    assert tests[3]["number"] == "2-6", f"Expected 2-6, got {tests[3]['number']}"
+    auto_number(pages, tests)
+    assert tests[0]["number"] == "1-1"
+    assert tests[1]["number"] == "1-2"
+    assert tests[2]["number"] == "2-5"
+    assert tests[3]["number"] == "2-6"
     print("  [OK] ページ番号-開始番号からの連番")
 
+    # _sub_number で途中から番号を飛ばす (1-1, 1-2, 1-5, 1-6)
+    pages2 = [{"_id": "p_1", "name": "P1", "number": "1", "start_number": 1}]
+    tests2 = [
+        {"_id": "tc_1", "name": "T1", "page_id": "p_1", "number": ""},
+        {"_id": "tc_2", "name": "T2", "page_id": "p_1", "number": ""},
+        {"_id": "tc_3", "name": "T3", "page_id": "p_1", "number": "", "_sub_number": 5},
+        {"_id": "tc_4", "name": "T4", "page_id": "p_1", "number": ""},
+    ]
+    auto_number(pages2, tests2)
+    assert tests2[0]["number"] == "1-1", f"Got {tests2[0]['number']}"
+    assert tests2[1]["number"] == "1-2", f"Got {tests2[1]['number']}"
+    assert tests2[2]["number"] == "1-5", f"Got {tests2[2]['number']}"
+    assert tests2[3]["number"] == "1-6", f"Got {tests2[3]['number']}"
+    print("  [OK] _sub_number で番号飛ばし (1-1,1-2,1-5,1-6)")
+
+    # _sub_number が先頭にある場合
+    tests3 = [
+        {"_id": "tc_1", "name": "T1", "page_id": "p_1", "number": "", "_sub_number": 10},
+        {"_id": "tc_2", "name": "T2", "page_id": "p_1", "number": ""},
+    ]
+    auto_number(pages2, tests3)
+    assert tests3[0]["number"] == "1-10"
+    assert tests3[1]["number"] == "1-11"
+    print("  [OK] 先頭に_sub_number (1-10, 1-11)")
+
+    # _sub_number なしのテストだけ → start_number からの連番
+    tests4 = [
+        {"_id": "tc_1", "name": "T1", "page_id": "p_1", "number": ""},
+        {"_id": "tc_2", "name": "T2", "page_id": "p_1", "number": ""},
+    ]
+    auto_number(pages2, tests4)
+    assert tests4[0]["number"] == "1-1"
+    assert tests4[1]["number"] == "1-2"
+    print("  [OK] _sub_number なし → 通常連番")
+
     # start_number なしの場合のデフォルト
-    pages_no_start = [{"_id": "p_1", "name": "P1", "number": "3"}]
-    start = int(pages_no_start[0].get("start_number", 1))
-    assert start == 1
+    assert int({"_id": "p_1", "name": "P1", "number": "3"}.get("start_number", 1)) == 1
     print("  [OK] start_number なし時のデフォルト=1")
 
-    # start_num (旧フィールド) -> start_number へのマイグレーション
+    # マイグレーション: start_num -> start_number
     pg_old = {"_id": "p_1", "name": "P1", "number": "1", "start_num": 3}
     if "start_num" in pg_old and "start_number" not in pg_old:
         pg_old["start_number"] = pg_old.pop("start_num")
-    assert pg_old.get("start_number") == 3
-    assert "start_num" not in pg_old
+    assert pg_old.get("start_number") == 3 and "start_num" not in pg_old
     print("  [OK] start_num -> start_number マイグレーション")
 
-    # ファイル名にテスト番号が含まれることを確認
-    from y_shot import _safe_filename
-    tc_number = "2-5"
-    safe_number = _safe_filename(tc_number, 10)
-    assert safe_number == "2-5"
-    fn = f"001_{safe_number}_テスト_p01_未入力_ss1.png"
-    assert "2-5" in fn
-    print("  [OK] ファイル名にテスト番号")
+    # マイグレーション: _manual_number -> _sub_number
+    tc_old = {"_id": "tc_1", "name": "T", "number": "1-7", "_manual_number": True, "page_id": "p_1"}
+    if tc_old.pop("_manual_number", False):
+        num = tc_old.get("number", "")
+        if "-" in num:
+            try: tc_old["_sub_number"] = int(num.split("-", 1)[1])
+            except (ValueError, IndexError): pass
+    assert tc_old.get("_sub_number") == 7
+    assert "_manual_number" not in tc_old
+    print("  [OK] _manual_number -> _sub_number マイグレーション")
 
     print("  全てパス\n")
 

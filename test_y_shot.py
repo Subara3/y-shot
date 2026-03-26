@@ -270,7 +270,7 @@ def test_import():
     except Exception as e:
         print(f"  [FAIL] {e}"); raise
 
-    assert mod.APP_VERSION == "1.7", f"バージョン不一致: {mod.APP_VERSION}"
+    assert mod.APP_VERSION == "1.8", f"バージョン不一致: {mod.APP_VERSION}"
     print(f"  [OK] バージョン: {mod.APP_VERSION}")
 
     print("  全てパス\n")

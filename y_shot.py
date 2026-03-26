@@ -14,7 +14,7 @@ from urllib.parse import urlparse, urlunparse
 import flet as ft
 
 APP_NAME = "y-shot"
-APP_VERSION = "1.7"
+APP_VERSION = "1.8"
 APP_AUTHOR = "Yuri Norimatsu"
 
 # ── File logger (log/YYYYMMDD.log, append) ──
@@ -269,11 +269,13 @@ def build_auth_url(url, user, password):
     if p.port: nl += f":{p.port}"
     return urlunparse(p._replace(netloc=nl))
 
-STEP_TYPES = ["入力", "クリック", "選択", "待機", "スクショ", "見出し", "コメント"]
+STEP_TYPES = ["入力", "クリック", "選択", "待機", "スクショ", "戻る", "ナビゲーション", "見出し", "コメント"]
 STEP_ICONS = {"入力": ft.Icons.EDIT, "クリック": ft.Icons.MOUSE,
               "選択": ft.Icons.ARROW_DROP_DOWN_CIRCLE,
               "待機": ft.Icons.HOURGLASS_BOTTOM, "スクショ": ft.Icons.CAMERA_ALT,
+              "戻る": ft.Icons.ARROW_BACK, "ナビゲーション": ft.Icons.OPEN_IN_BROWSER,
               "見出し": ft.Icons.TITLE, "コメント": ft.Icons.COMMENT}
+INPUT_MODES = [("overwrite", "上書き"), ("append", "追記"), ("clear", "クリアのみ")]
 
 def step_short(step):
     t = step["type"]
@@ -284,7 +286,8 @@ def step_short(step):
         if len(v) > 20: v = v[:17]+"..."
         sel = step.get("selector","")
         if len(sel) > 20: sel = sel[:17]+"..."
-        return f"{sel} \u2190 {v}"
+        mode_label = {"append": "[追記]", "clear": "[クリア]"}.get(step.get("input_mode",""), "")
+        return f"{sel} \u2190 {v} {mode_label}".strip()
     if t == "クリック":
         sel = step.get("selector","")
         if sel == "{パターン}": return "{パターン} (全パターン)"
@@ -295,6 +298,10 @@ def step_short(step):
         v = step.get("value","")
         if len(v) > 15: v = v[:12]+"..."
         return f"{sel} \u2190 [{v}]"
+    if t == "戻る": return f"ブラウザバック +{step.get('seconds','1.0')}秒"
+    if t == "ナビゲーション":
+        url = step.get("url","")
+        return url[:40]+"..." if len(url) > 40 else url
     if t == "待機": return f"{step.get('seconds','1.0')}秒"
     if t == "スクショ":
         m = step.get("mode","fullpage")
@@ -513,15 +520,32 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                     if st == "入力":
                         sel = step.get("selector","")
                         iv = step.get("value","{パターン}").replace("{パターン}",value).replace("{pattern}",value)
+                        input_mode = step.get("input_mode", "overwrite")
                         try:
                             e = WebDriverWait(driver,10).until(EC.presence_of_element_located((By.CSS_SELECTOR,sel)))
                             etype = (e.get_attribute("type") or "").lower()
-                            if etype in ("date","time","datetime-local","month","week","color") or _has_non_bmp(iv):
-                                driver.execute_script("arguments[0].focus();arguments[0].value='';", e)
-                                driver.execute_script(JS_SET_VALUE, e, iv)
+                            if input_mode == "clear":
+                                # Clear only — no new value
+                                if etype in ("date","time","datetime-local","month","week","color"):
+                                    driver.execute_script("arguments[0].value='';arguments[0].dispatchEvent(new Event('change',{bubbles:true}));", e)
+                                else:
+                                    e.clear()
+                                log_cb(f"  S{si} クリア: {sel}")
+                            elif input_mode == "append":
+                                # Append to existing value (click end, then type)
+                                from selenium.webdriver.common.keys import Keys
+                                e.click()
+                                e.send_keys(Keys.END)
+                                e.send_keys(iv)
+                                log_cb(f"  S{si} 追記: {sel}")
                             else:
-                                e.clear(); e.send_keys(iv)
-                            log_cb(f"  S{si} 入力: {sel}")
+                                # Overwrite (default)
+                                if etype in ("date","time","datetime-local","month","week","color") or _has_non_bmp(iv):
+                                    driver.execute_script("arguments[0].focus();arguments[0].value='';", e)
+                                    driver.execute_script(JS_SET_VALUE, e, iv)
+                                else:
+                                    e.clear(); e.send_keys(iv)
+                                log_cb(f"  S{si} 入力: {sel}")
                         except Exception as x: log_cb(f"  S{si} [WARN] 入力失敗: {x}")
                     elif st == "クリック":
                         sel = step.get("selector","").replace("{パターン}",value).replace("{pattern}",value)
@@ -540,6 +564,21 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             except Exception: dd.select_by_visible_text(sv)
                             log_cb(f"  S{si} 選択: {sel} -> {sv}")
                         except Exception as x: log_cb(f"  S{si} [WARN] 選択失敗: {x}")
+                    elif st == "戻る":
+                        try:
+                            driver.back()
+                            s = float(step.get("seconds","1.0")); time.sleep(s)
+                            log_cb(f"  S{si} 戻る (+{s}秒)")
+                        except Exception as x: log_cb(f"  S{si} [WARN] 戻る失敗: {x}")
+                    elif st == "ナビゲーション":
+                        nav_url = step.get("url","").replace("{パターン}",value).replace("{pattern}",value)
+                        try:
+                            if ba: nav_url = build_auth_url(nav_url, ba, config.get("basic_auth_pass",""))
+                            driver.get(nav_url)
+                            try: WebDriverWait(driver, 15).until(lambda d: d.execute_script("return document.readyState") == "complete")
+                            except Exception: pass
+                            log_cb(f"  S{si} ナビ: {nav_url[:60]}")
+                        except Exception as x: log_cb(f"  S{si} [WARN] ナビゲーション失敗: {x}")
                     elif st == "待機":
                         s = float(step.get("seconds","1.0")); time.sleep(s); log_cb(f"  S{si} 待機: {s}秒")
                     elif st == "スクショ":
@@ -1360,6 +1399,12 @@ def _main_inner(page: ft.Page):
         val_field = ft.TextField(label="値 (固定値を直接入力)", width=450,
             value="" if init_val == "{パターン}" else init_val,
             multiline=True, min_lines=2, max_lines=4)
+        # 入力モード
+        input_mode_dd = ft.Dropdown(label="入力モード", width=200, value=init.get("input_mode","overwrite"),
+            options=[ft.dropdown.Option(key=k, text=t) for k, t in INPUT_MODES])
+        # ナビゲーションURL
+        nav_url_f = ft.TextField(label="遷移先URL", width=450, value=init.get("url",""),
+            hint_text="https://... ({パターン}可)")
         sec_field = ft.TextField(label="秒数", width=120, value=init.get("seconds","1.0"))
         # スクショモード: key=内部値, text=表示名
         _SS_MODES = [
@@ -1376,16 +1421,22 @@ def _main_inner(page: ft.Page):
             try:
                 t = type_dd.value
                 sel_field.visible = t in ("入力","クリック","選択") or (t=="スクショ" and mode_dd.value in ("element","margin"))
-                val_mode.visible = t in ("入力","選択")
-                val_field.visible = t in ("入力","選択") and val_mode.value == "手入力"
-                sec_field.visible = (t=="待機"); mode_dd.visible = (t=="スクショ")
+                is_input = (t == "入力")
+                input_mode_dd.visible = is_input
+                val_mode.visible = is_input or t == "選択"
+                val_field.visible = (is_input or t == "選択") and val_mode.value == "手入力"
+                # クリアモードでは値入力不要
+                if is_input and input_mode_dd.value == "clear":
+                    val_mode.visible = False; val_field.visible = False
+                nav_url_f.visible = (t == "ナビゲーション")
+                sec_field.visible = t in ("待機", "戻る"); mode_dd.visible = (t=="スクショ")
                 margin_f.visible = (t=="スクショ" and mode_dd.value=="margin"); text_f.visible = t in ("見出し","コメント")
                 if t == "選択": val_mode.label = "選択肢の指定方法"
                 else: val_mode.label = "値の指定方法"
                 try: page.update()
                 except Exception: pass
             except Exception as x: _log_error("show_step_dlg.upd", x)
-        type_dd.on_select = upd; mode_dd.on_select = upd; val_mode.on_select = upd
+        type_dd.on_select = upd; mode_dd.on_select = upd; val_mode.on_select = upd; input_mode_dd.on_select = upd
         # 初期表示を正しく設定
         upd()
         def on_ok(e):
@@ -1396,12 +1447,27 @@ def _main_inner(page: ft.Page):
                     s = sel_field.value if hasattr(sel_field,'value') else ""
                     if not s: snack("セレクタを入力", ft.Colors.RED_600); return
                     step["selector"] = s
-                    if t in ("入力","選択"):
+                    if t == "入力":
+                        step["input_mode"] = input_mode_dd.value
+                        if input_mode_dd.value != "clear":
+                            if val_mode.value == "手入力": step["value"] = val_field.value
+                            else:
+                                step["value"] = "{パターン}"
+                                pn = val_mode.value.replace("パターン: ", "", 1)
+                                if pn in state["pattern_sets"]: tc["pattern"] = pn
+                    elif t == "選択":
                         if val_mode.value == "手入力": step["value"] = val_field.value
                         else:
                             step["value"] = "{パターン}"
                             pn = val_mode.value.replace("パターン: ", "", 1)
                             if pn in state["pattern_sets"]: tc["pattern"] = pn
+                elif t == "戻る":
+                    try: step["seconds"] = str(float(sec_field.value))
+                    except Exception: snack("秒数を正しく", ft.Colors.RED_600); return
+                elif t == "ナビゲーション":
+                    url = nav_url_f.value.strip()
+                    if not url: snack("URLを入力", ft.Colors.RED_600); return
+                    step["url"] = url
                 elif t == "待機":
                     try: step["seconds"] = str(float(sec_field.value))
                     except Exception: snack("秒数を正しく", ft.Colors.RED_600); return
@@ -1418,7 +1484,7 @@ def _main_inner(page: ft.Page):
                 refresh_steps(False); refresh_test_list(); close_dlg(dlg)
             except Exception as x: _log_error("show_step_dlg.on_ok", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("ステップ編集" if idx is not None else "ステップ追加"),
-            content=ft.Column([type_dd, text_f, sel_field, val_mode, val_field, sec_field, mode_dd, margin_f],
+            content=ft.Column([type_dd, text_f, sel_field, input_mode_dd, val_mode, val_field, nav_url_f, sec_field, mode_dd, margin_f],
                 tight=True, spacing=10, scroll=ft.ScrollMode.AUTO, width=500, height=420),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)

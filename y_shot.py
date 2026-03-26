@@ -460,9 +460,11 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
 
         # Build page lookup and create per-page subfolders
         page_dirs = {}  # page_id -> directory path
+        save_source = config.get("save_source") == "1"
         source_dirs = {}  # page_id -> _source subdirectory path
         source_root = os.path.join(outdir, "_source")
-        os.makedirs(source_root, exist_ok=True)
+        if save_source:
+            os.makedirs(source_root, exist_ok=True)
         if pages:
             for pg in pages:
                 pg_num = pg.get("number", "0")
@@ -470,9 +472,10 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                 pg_dir = os.path.join(outdir, f"{pg_num}_{pg_name}")
                 os.makedirs(pg_dir, exist_ok=True)
                 page_dirs[pg["_id"]] = pg_dir
-                src_dir = os.path.join(source_root, f"{pg_num}_{pg_name}")
-                os.makedirs(src_dir, exist_ok=True)
-                source_dirs[pg["_id"]] = src_dir
+                if save_source:
+                    src_dir = os.path.join(source_root, f"{pg_num}_{pg_name}")
+                    os.makedirs(src_dir, exist_ok=True)
+                    source_dirs[pg["_id"]] = src_dir
 
         for tc_idx, tc in enumerate(test_cases, 1):
             if stop_event and stop_event.is_set():
@@ -592,20 +595,18 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             else: driver.save_screenshot(fp)
                             rel_dir = os.path.basename(tc_outdir) if tc_outdir != outdir else ""
                             log_cb(f"  S{si} スクショ: {rel_dir + '/' if rel_dir else ''}{fn}")
-                            # Save HTML sources for diff comparison
-                            try:
-                                src_dir = source_dirs.get(tc_pid, source_root)
-                                src_base = fn.replace(".png", "")
-                                # Raw HTML (server response)
-                                raw = driver.page_source or ""
-                                with open(os.path.join(src_dir, f"{src_base}_raw.html"), "w", encoding="utf-8") as sf:
-                                    sf.write(_normalize_source(raw))
-                                # Rendered DOM (after JS)
-                                dom = driver.execute_script("return document.documentElement.outerHTML;") or ""
-                                with open(os.path.join(src_dir, f"{src_base}_dom.html"), "w", encoding="utf-8") as sf:
-                                    sf.write(_normalize_source(dom))
-                            except Exception as sx:
-                                _flog.debug(f"Source save failed: {sx}")
+                            if save_source:
+                                try:
+                                    src_dir = source_dirs.get(tc_pid, source_root)
+                                    src_base = fn.replace(".png", "")
+                                    raw = driver.page_source or ""
+                                    with open(os.path.join(src_dir, f"{src_base}_raw.html"), "w", encoding="utf-8") as sf:
+                                        sf.write(_normalize_source(raw))
+                                    dom = driver.execute_script("return document.documentElement.outerHTML;") or ""
+                                    with open(os.path.join(src_dir, f"{src_base}_dom.html"), "w", encoding="utf-8") as sf:
+                                        sf.write(_normalize_source(dom))
+                                except Exception as sx:
+                                    _flog.debug(f"Source save failed: {sx}")
                         except Exception as x: log_cb(f"  S{si} [WARN] スクショ失敗: {x}")
                 done_pats += 1
                 if progress_cb and total_pats > 0:
@@ -784,8 +785,22 @@ def _main_inner(page: ft.Page):
             if p["_id"] == pid: return p
         return None
 
+    # Index cache for O(1) lookups (invalidated on data change)
+    _idx_cache = {"valid": False, "by_page": {}, "by_id": {}}
+    def _rebuild_idx():
+        c = _idx_cache
+        c["by_page"] = {}; c["by_id"] = {}
+        for i, tc in enumerate(state["tests"]):
+            tid = tc.get("_id", "")
+            pid = tc.get("page_id", "")
+            c["by_id"][tid] = i
+            c["by_page"].setdefault(pid, []).append(tc)
+        c["valid"] = True
+    def _invalidate_idx():
+        _idx_cache["valid"] = False
     def tests_for_page(page_id):
-        return [t for t in state["tests"] if t.get("page_id") == page_id]
+        if not _idx_cache["valid"]: _rebuild_idx()
+        return list(_idx_cache["by_page"].get(page_id, []))
 
     def auto_number_tests():
         """Re-number tests: page_number-sub_number.
@@ -1006,11 +1021,11 @@ def _main_inner(page: ft.Page):
     # ================================================================
 
     def _find_test_idx(tc_id):
-        for i, tc in enumerate(state["tests"]):
-            if tc.get("_id") == tc_id: return i
-        return -1
+        if not _idx_cache["valid"]: _rebuild_idx()
+        return _idx_cache["by_id"].get(tc_id, -1)
 
     def refresh_test_list(update=True):
+        _invalidate_idx()
         test_list.controls.clear()
         cur_pid = state["selected_page"]
         page_tests = tests_for_page(cur_pid) if cur_pid else []
@@ -1069,12 +1084,12 @@ def _main_inner(page: ft.Page):
 
     _reorder_dedup = {}
     def _is_dup_reorder(handler, old, new):
-        """Flet fires on_reorder twice per drag. Block ALL reorder events
-        for the same handler within 0.5s of the last one, regardless of indices."""
+        """Flet fires on_reorder twice per drag. Block same (handler, old, new) within 0.5s."""
         now = time.time()
-        prev = _reorder_dedup.get(handler)
+        key = (handler, old, new)
+        prev = _reorder_dedup.get(key)
         if prev and now - prev < 0.5: return True
-        _reorder_dedup[handler] = now; return False
+        _reorder_dedup[key] = now; return False
 
     def on_test_reorder(e):
         try:
@@ -1877,15 +1892,17 @@ def _main_inner(page: ft.Page):
         apf = ft.TextField(label="パスワード", value=c.get("basic_auth_pass",""), password=True, width=210)
         of = ft.TextField(label="出力フォルダ", value=c.get("output_dir", os.path.join(get_app_dir(), "screenshots")), width=450)
         hl = ft.Checkbox(label="ヘッドレスモード (ブラウザ非表示)", value=c.get("headless")=="1")
+        ss = ft.Checkbox(label="HTMLソース保存 (diff比較用)", value=c.get("save_source")=="1")
         def on_ok(e):
             try:
                 state["config"].update({"url":uf.value,"basic_auth_user":auf.value,"basic_auth_pass":apf.value,
-                    "output_dir":of.value,"headless":"1" if hl.value else "0"})
+                    "output_dir":of.value,"headless":"1" if hl.value else "0",
+                    "save_source":"1" if ss.value else "0"})
                 save_config(state["config"]); snack("設定保存")
                 refresh_test_list(False); page.update(); close_dlg(dlg)
             except Exception as x: _log_error("show_settings", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("設定"),
-            content=ft.Column([uf, ft.Row([auf, apf], spacing=10), of, hl], tight=True, spacing=12, width=500),
+            content=ft.Column([uf, ft.Row([auf, apf], spacing=10), of, hl, ss], tight=True, spacing=12, width=500),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
@@ -2147,7 +2164,7 @@ def _main_inner(page: ft.Page):
             except Exception:
                 pass
         # Normal exit → PyInstaller atexit cleanup runs → _MEI folder deleted
-        _deadline = threading.Timer(2.0, lambda: os._exit(0))
+        _deadline = threading.Timer(1.0, lambda: os._exit(0))
         _deadline.daemon = True; _deadline.start()
         sys.exit(0)
 

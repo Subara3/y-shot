@@ -306,31 +306,28 @@ def step_short(step):
 
 step_display = step_short
 
+# Pre-compiled regexes for _normalize_source (avoid re-compiling on every screenshot)
+_NS_PATTERNS = None
+def _get_ns_patterns():
+    global _NS_PATTERNS
+    if _NS_PATTERNS is None:
+        _NS_PATTERNS = [
+            (re.compile(r'(<input[^>]*name=["\'](?:_token|csrf_token|csrfmiddlewaretoken|__RequestVerificationToken|authenticity_token|nonce)["\'][^>]*value=["\'])[^"\']*(["\'])', re.IGNORECASE), r'\1__NORMALIZED__\2'),
+            (re.compile(r'(<meta[^>]*name=["\'](?:csrf-token|_token)["\'][^>]*content=["\'])[^"\']*(["\'])', re.IGNORECASE), r'\1__NORMALIZED__\2'),
+            (re.compile(r'(<input[^>]*name=["\'](?:PHPSESSID|session_id|_session|jsessionid)["\'][^>]*value=["\'])[^"\']*(["\'])', re.IGNORECASE), r'\1__NORMALIZED__\2'),
+            (re.compile(r'\d{4}[-/]\d{2}[-/]\d{2}[\sT]\d{2}:\d{2}:\d{2}'), '__DATETIME__'),
+            (re.compile(r'\d{4}[-/]\d{2}[-/]\d{2}[\sT]\d{2}:\d{2}'), '__DATETIME__'),
+            (re.compile(r'(?<=["\'\s=])\d{10,13}(?=["\'\s&;])'), '__TIMESTAMP__'),
+            (re.compile(r'(nonce=["\'])[A-Za-z0-9+/=]+(["\'])'), r'\1__NONCE__\2'),
+            (re.compile(r'(\?(?:v|t|_|ver|version|cache|cb)=)[^"\'&\s]+'), r'\1__CACHE__'),
+        ]
+    return _NS_PATTERNS
+
 def _normalize_source(html):
     """Normalize HTML source for diff comparison.
     Removes volatile values that change between runs (timestamps, CSRF tokens, etc.)."""
-    import re
-    # CSRF tokens (common patterns: hidden input with token/csrf/_token/nonce)
-    html = re.sub(
-        r'(<input[^>]*name=["\'](?:_token|csrf_token|csrfmiddlewaretoken|__RequestVerificationToken|authenticity_token|nonce)["\'][^>]*value=["\'])[^"\']*(["\'])',
-        r'\1__NORMALIZED__\2', html, flags=re.IGNORECASE)
-    # meta csrf tokens
-    html = re.sub(
-        r'(<meta[^>]*name=["\'](?:csrf-token|_token)["\'][^>]*content=["\'])[^"\']*(["\'])',
-        r'\1__NORMALIZED__\2', html, flags=re.IGNORECASE)
-    # Session IDs in hidden fields
-    html = re.sub(
-        r'(<input[^>]*name=["\'](?:PHPSESSID|session_id|_session|jsessionid)["\'][^>]*value=["\'])[^"\']*(["\'])',
-        r'\1__NORMALIZED__\2', html, flags=re.IGNORECASE)
-    # Timestamps in common formats: 2026-03-26 14:30:00, 2026/03/26, etc.
-    html = re.sub(r'\d{4}[-/]\d{2}[-/]\d{2}[\sT]\d{2}:\d{2}:\d{2}', '__DATETIME__', html)
-    html = re.sub(r'\d{4}[-/]\d{2}[-/]\d{2}[\sT]\d{2}:\d{2}', '__DATETIME__', html)
-    # Unix timestamps (10+ digits)
-    html = re.sub(r'(?<=["\'\s=])\d{10,13}(?=["\'\s&;])', '__TIMESTAMP__', html)
-    # Random nonce/hash values in script/link tags
-    html = re.sub(r'(nonce=["\'])[A-Za-z0-9+/=]+(["\'])', r'\1__NONCE__\2', html)
-    # Cache-busting query params: ?v=xxx, ?t=xxx, ?_=xxx
-    html = re.sub(r'(\?(?:v|t|_|ver|version|cache|cb)=)[^"\'&\s]+', r'\1__CACHE__', html)
+    for pattern, repl in _get_ns_patterns():
+        html = pattern.sub(repl, html)
     return html
 
 def _generate_report(outdir, log_cb):
@@ -414,6 +411,10 @@ def _generate_excel_report(outdir, log_cb, pages=None, test_cases=None, run_labe
             first_sheet = True
             for folder_name, pngs in groups.items():
                 sheet_name = folder_name[:31] if folder_name != "root" else "エビデンス"
+                # Avoid duplicate sheet names (Excel limitation)
+                _base, _n = sheet_name, 2
+                while sheet_name in [s.title for s in wb.worksheets]:
+                    sheet_name = f"{_base[:28]}({_n})"; _n += 1
                 if first_sheet:
                     ws = wb.active; ws.title = sheet_name; first_sheet = False
                 else:
@@ -805,6 +806,7 @@ def _main_inner(page: ft.Page):
     def auto_number_tests():
         """Re-number tests: page_number-sub_number.
         If a test has _sub_number set, use it and continue from there."""
+        _invalidate_idx()  # data may have changed before this call
         for pg in state["pages"]:
             pnum = pg["number"]
             next_sub = int(pg.get("start_number", 1))
@@ -851,18 +853,21 @@ def _main_inner(page: ft.Page):
     # ── Helpers ──
     _init_done = [False]
     _save_timer = [None]
+    _save_lock = threading.Lock()
     def schedule_save():
         if not _init_done[0]: return
         if _save_timer[0]: _save_timer[0].cancel()
         def do_save():
-            try: save_all()
-            except Exception: pass
+            with _save_lock:
+                try: save_all()
+                except Exception: pass
         _save_timer[0] = threading.Timer(2.0, do_save)
         _save_timer[0].daemon = True; _save_timer[0].start()
 
     def log(msg):
         _flog.info(msg)
-        log_list.controls.append(ft.Text(msg, size=11, selectable=True, font_family="Consolas"))
+        ts = datetime.now().strftime("%H:%M:%S")
+        log_list.controls.append(ft.Text(f"[{ts}] {msg}", size=11, selectable=True, font_family="Consolas"))
         if len(log_list.controls) > 400: log_list.controls.pop(0)
         try: page.update()
         except Exception: pass
@@ -948,6 +953,8 @@ def _main_inner(page: ft.Page):
                 name = nf.value.strip(); num = numf.value.strip()
                 if not name: snack("名前入力", ft.Colors.RED_600); return
                 if not num: snack("番号入力", ft.Colors.RED_600); return
+                if any(p["number"] == num for p in state["pages"]):
+                    snack(f"番号 {num} は既に使用されています", ft.Colors.RED_600); return
                 try: start = int(startf.value.strip() or "1")
                 except ValueError: snack("開始番号は整数で", ft.Colors.RED_600); return
                 new_pg = {"_id": _new_page_id(), "name": name, "number": num, "start_number": start}
@@ -973,6 +980,8 @@ def _main_inner(page: ft.Page):
                 name = nf.value.strip(); num = numf.value.strip()
                 if not name: snack("名前入力", ft.Colors.RED_600); return
                 if not num: snack("番号入力", ft.Colors.RED_600); return
+                if num != pg["number"] and any(p["number"] == num for p in state["pages"]):
+                    snack(f"番号 {num} は既に使用されています", ft.Colors.RED_600); return
                 try: start = int(startf.value.strip() or "1")
                 except ValueError: snack("開始番号は整数で", ft.Colors.RED_600); return
                 pg["name"] = name; pg["number"] = num; pg["start_number"] = start
@@ -2172,8 +2181,9 @@ def _main_inner(page: ft.Page):
         if e.type == ft.WindowEventType.CLOSE:
             # 1. Save data (fast)
             if _save_timer[0]: _save_timer[0].cancel()
-            try: save_all()
-            except Exception: pass
+            with _save_lock:
+                try: save_all()
+                except Exception: pass
             # 2. Signal any running tests to stop
             ev = state.get("stop_event")
             if ev: ev.set()

@@ -453,7 +453,6 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         driver = webdriver.Chrome(options=opts); driver.set_window_size(1280, 900)
         if driver_ref is not None: driver_ref.append(driver)
         ba = config.get("basic_auth_user","").strip()
-        global_url = config.get("url", "")
         if ba: log_cb("[INFO] Basic認証を設定")
         # Build page URL lookup: page_id -> url
         _page_urls = {}
@@ -461,12 +460,10 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
             pu = pg.get("url", "").strip()
             if pu: _page_urls[pg["_id"]] = pu
         def _resolve_url(tc):
-            """Resolve start URL: test URL > page URL > global URL."""
+            """Resolve start URL: test URL > page URL."""
             tc_url = tc.get("url", "").strip()
             if tc_url: return tc_url
-            pg_url = _page_urls.get(tc.get("page_id", ""), "")
-            if pg_url: return pg_url
-            return global_url
+            return _page_urls.get(tc.get("page_id", ""), "")
         outdir_base = config.get("output_dir", os.path.join(get_app_dir(), "screenshots"))
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         outdir = os.path.join(outdir_base, ts)
@@ -682,8 +679,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
             if driver_ref is not None:
                 try: driver_ref.remove(driver)
                 except ValueError: pass
-        try: done_cb(outdir if 'outdir' in dir() else None)
-        except TypeError: done_cb()
+        done_cb(outdir if 'outdir' in dir() else None)
 
 # ===================================================================
 # Path helpers
@@ -873,39 +869,14 @@ def _main_inner(page: ft.Page):
                 tc["number"] = f"{pnum}-{next_sub}"
                 next_sub += 1
 
-    # Migration
-    if not state["pages"] and state["tests"]:
-        dp = {"_id": _new_page_id(), "name": "ページ1", "number": "1", "start_number": 1}
+    # Ensure at least one page exists
+    if not state["pages"]:
+        dp = {"_id": _new_page_id(), "name": "ページ1", "number": "1", "start_number": 1, "url": ""}
         state["pages"].append(dp)
-        for i, tc in enumerate(state["tests"]):
-            tc["page_id"] = dp["_id"]; tc["number"] = f"1-{i+1}"
-        state["selected_page"] = dp["_id"]
-    elif not state["pages"]:
-        dp = {"_id": _new_page_id(), "name": "ページ1", "number": "1", "start_number": 1}
-        state["pages"].append(dp); state["selected_page"] = dp["_id"]
-    else:
-        first_pid = state["pages"][0]["_id"]
         for tc in state["tests"]:
-            if "page_id" not in tc: tc["page_id"] = first_pid
-            if "number" not in tc: tc["number"] = ""
-            # Migration: _manual_number -> _sub_number
-            if tc.pop("_manual_number", False):
-                num = tc.get("number", "")
-                if "-" in num:
-                    try: tc["_sub_number"] = int(num.split("-", 1)[1])
-                    except (ValueError, IndexError): pass
-        _global_url = state["config"].get("url", "")
-        for pg in state["pages"]:
-            # Migration: start_num (v1.7 early) -> start_number
-            if "start_num" in pg and "start_number" not in pg:
-                pg["start_number"] = pg.pop("start_num")
-            elif "start_number" not in pg:
-                pg["start_number"] = 1
-            # Migration v1.8: copy global URL to pages that don't have one
-            if "url" not in pg and _global_url:
-                pg["url"] = _global_url
-        auto_number_tests()
-        state["selected_page"] = state["pages"][0]["_id"]
+            tc.setdefault("page_id", dp["_id"])
+    auto_number_tests()
+    state["selected_page"] = state["pages"][0]["_id"]
 
     cfg = state["config"]
 

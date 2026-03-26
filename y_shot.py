@@ -303,19 +303,59 @@ def step_short(step):
 
 step_display = step_short
 
+def _normalize_source(html):
+    """Normalize HTML source for diff comparison.
+    Removes volatile values that change between runs (timestamps, CSRF tokens, etc.)."""
+    import re
+    # CSRF tokens (common patterns: hidden input with token/csrf/_token/nonce)
+    html = re.sub(
+        r'(<input[^>]*name=["\'](?:_token|csrf_token|csrfmiddlewaretoken|__RequestVerificationToken|authenticity_token|nonce)["\'][^>]*value=["\'])[^"\']*(["\'])',
+        r'\1__NORMALIZED__\2', html, flags=re.IGNORECASE)
+    # meta csrf tokens
+    html = re.sub(
+        r'(<meta[^>]*name=["\'](?:csrf-token|_token)["\'][^>]*content=["\'])[^"\']*(["\'])',
+        r'\1__NORMALIZED__\2', html, flags=re.IGNORECASE)
+    # Session IDs in hidden fields
+    html = re.sub(
+        r'(<input[^>]*name=["\'](?:PHPSESSID|session_id|_session|jsessionid)["\'][^>]*value=["\'])[^"\']*(["\'])',
+        r'\1__NORMALIZED__\2', html, flags=re.IGNORECASE)
+    # Timestamps in common formats: 2026-03-26 14:30:00, 2026/03/26, etc.
+    html = re.sub(r'\d{4}[-/]\d{2}[-/]\d{2}[\sT]\d{2}:\d{2}:\d{2}', '__DATETIME__', html)
+    html = re.sub(r'\d{4}[-/]\d{2}[-/]\d{2}[\sT]\d{2}:\d{2}', '__DATETIME__', html)
+    # Unix timestamps (10+ digits)
+    html = re.sub(r'(?<=["\'\s=])\d{10,13}(?=["\'\s&;])', '__TIMESTAMP__', html)
+    # Random nonce/hash values in script/link tags
+    html = re.sub(r'(nonce=["\'])[A-Za-z0-9+/=]+(["\'])', r'\1__NONCE__\2', html)
+    # Cache-busting query params: ?v=xxx, ?t=xxx, ?_=xxx
+    html = re.sub(r'(\?(?:v|t|_|ver|version|cache|cb)=)[^"\'&\s]+', r'\1__CACHE__', html)
+    return html
+
 def _generate_report(outdir, log_cb):
+    """Generate an HTML report. Walks subdirectories for PNGs."""
     try:
-        pngs = sorted([f for f in os.listdir(outdir) if f.lower().endswith(".png")])
-        if not pngs: return
+        all_pngs = []  # (relative_path, display_name)
+        for root, dirs, files in os.walk(outdir):
+            dirs[:] = [d for d in sorted(dirs) if not d.startswith("_")]
+            for fn in sorted(files):
+                if fn.lower().endswith(".png"):
+                    rel = os.path.relpath(os.path.join(root, fn), outdir).replace("\\", "/")
+                    all_pngs.append(rel)
+        if not all_pngs: return
         html = ['<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8">',
                 '<title>y-shot レポート</title>',
                 '<style>body{font-family:sans-serif;max-width:1200px;margin:0 auto;padding:20px;background:#f8f9fa}',
-                'h1{color:#333}.card{background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.1);margin:16px 0;padding:16px}',
+                'h1{color:#333}h2{color:#555;margin-top:32px;border-bottom:2px solid #ddd;padding-bottom:4px}',
+                '.card{background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.1);margin:16px 0;padding:16px}',
                 '.card img{max-width:100%;border:1px solid #ddd;border-radius:4px}',
                 '.card .name{font-weight:bold;color:#555;margin-bottom:8px;font-size:14px}</style></head><body>',
-                f'<h1>y-shot レポート</h1><p>{os.path.basename(outdir)} — {len(pngs)} 枚</p>']
-        for fn in pngs:
-            html.append(f'<div class="card"><div class="name">{fn}</div><img src="{fn}" loading="lazy"></div>')
+                f'<h1>y-shot レポート</h1><p>{os.path.basename(outdir)} — {len(all_pngs)} 枚</p>']
+        cur_dir = None
+        for rel in all_pngs:
+            d = os.path.dirname(rel)
+            if d != cur_dir:
+                cur_dir = d
+                if d: html.append(f'<h2>{d}</h2>')
+            html.append(f'<div class="card"><div class="name">{rel}</div><img src="{rel}" loading="lazy"></div>')
         html.append('</body></html>')
         rp = os.path.join(outdir, "report.html")
         with open(rp, "w", encoding="utf-8") as f: f.write("\n".join(html))
@@ -324,70 +364,64 @@ def _generate_report(outdir, log_cb):
         log_cb(f"[WARN] レポート生成失敗: {x}")
 
 def _generate_excel_report(outdir, log_cb, pages=None, test_cases=None, run_label=""):
+    """Generate Excel report. Walks subdirectories; one sheet per subfolder."""
     try:
         from openpyxl import Workbook
         from openpyxl.drawing.image import Image as XlImage
         from PIL import Image as PILImage
     except ImportError:
-        log_cb("[WARN] Excel出力には openpyxl と Pillow が必要です")
-        return
+        log_cb("[WARN] Excel出力には openpyxl と Pillow が必要です"); return
     try:
-        pngs = sorted([f for f in os.listdir(outdir) if f.lower().endswith(".png")])
-        if not pngs: return
+        # Collect all PNGs with full paths, grouped by subfolder
+        all_pngs = []  # (full_path, display_name, subfolder_name)
+        for root, dirs, files in os.walk(outdir):
+            dirs[:] = [d for d in sorted(dirs) if not d.startswith("_")]
+            for fn in sorted(files):
+                if fn.lower().endswith(".png"):
+                    fp = os.path.join(root, fn)
+                    rel = os.path.relpath(fp, outdir).replace("\\", "/")
+                    subdir = os.path.basename(root) if root != outdir else ""
+                    all_pngs.append((fp, rel, subdir))
+        if not all_pngs: return
         wb = Workbook()
         MAX_IMG_WIDTH = 800
 
-        def _write_sheet(ws, sheet_pngs):
-            ws.column_dimensions["A"].width = 60
-            ws.column_dimensions["B"].width = 5
+        def _write_sheet(ws, png_list):
+            ws.column_dimensions["A"].width = 60; ws.column_dimensions["B"].width = 5
             current_row = 1
-            for fn in sheet_pngs:
-                fp = os.path.join(outdir, fn)
-                cell = ws.cell(row=current_row, column=1, value=fn)
+            for fp, display, _ in png_list:
+                cell = ws.cell(row=current_row, column=1, value=display)
                 cell.font = cell.font.copy(bold=True, size=11)
-                ws.row_dimensions[current_row].height = 20
-                current_row += 1
+                ws.row_dimensions[current_row].height = 20; current_row += 1
                 pil_img = PILImage.open(fp)
                 orig_w, orig_h = pil_img.size
                 scale = min(1.0, MAX_IMG_WIDTH / orig_w) if orig_w > 0 else 1.0
-                disp_w = int(orig_w * scale)
-                disp_h = int(orig_h * scale)
                 xl_img = XlImage(fp)
-                xl_img.width = disp_w
-                xl_img.height = disp_h
+                xl_img.width = int(orig_w * scale); xl_img.height = int(orig_h * scale)
                 ws.add_image(xl_img, f"A{current_row}")
-                rows_needed = max(1, disp_h // 15 + 2)
-                current_row += rows_needed
+                current_row += max(1, int(orig_h * scale) // 15 + 2)
 
-        if pages and test_cases:
+        # Group by subfolder
+        groups = {}
+        for item in all_pngs:
+            key = item[2] or "root"
+            groups.setdefault(key, []).append(item)
+
+        if len(groups) > 1 or (len(groups) == 1 and "root" not in groups):
             first_sheet = True
-            for pg in pages:
-                sheet_name = f"{pg['number']}_{pg['name']}"[:31]
-                # Build set of (safe_number, safe_name) for matching
-                page_tc_keys = set()
-                for tc in test_cases:
-                    if tc.get("page_id") == pg["_id"]:
-                        sn = _safe_filename(tc.get("number", ""), 10)
-                        st = _safe_filename(tc.get("name", ""), 20)
-                        page_tc_keys.add(sn)
-                        page_tc_keys.add(st)
-                page_pngs = [fn for fn in pngs if any(k and k in fn for k in page_tc_keys)] if page_tc_keys else []
-                if not page_pngs: continue
+            for folder_name, pngs in groups.items():
+                sheet_name = folder_name[:31] if folder_name != "root" else "エビデンス"
                 if first_sheet:
                     ws = wb.active; ws.title = sheet_name; first_sheet = False
                 else:
                     ws = wb.create_sheet(title=sheet_name)
-                _write_sheet(ws, page_pngs)
-            if first_sheet:
-                ws = wb.active; ws.title = "エビデンス"; _write_sheet(ws, pngs)
+                _write_sheet(ws, pngs)
         else:
-            ws = wb.active; ws.title = "エビデンス"; _write_sheet(ws, pngs)
+            ws = wb.active; ws.title = "エビデンス"
+            _write_sheet(ws, all_pngs)
 
-        safe_xl = _safe_filename(run_label, 40) if run_label else ""
-        xl_name = f"{safe_xl}_evidence.xlsx" if safe_xl else "evidence.xlsx"
-        xp = os.path.join(outdir, xl_name)
-        wb.save(xp)
-        log_cb(f"[Excel] {xp}")
+        xp = os.path.join(outdir, "evidence.xlsx")
+        wb.save(xp); log_cb(f"[Excel] {xp}")
     except Exception as x:
         log_cb(f"[WARN] Excel生成失敗: {x}")
 
@@ -412,9 +446,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         if ba: log_cb("[INFO] Basic認証を設定")
         outdir_base = config.get("output_dir", os.path.join(get_app_dir(), "screenshots"))
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
-        safe_label = _safe_filename(run_label, 40) if run_label else ""
-        dir_name = f"{safe_label}_{ts}" if safe_label else ts
-        outdir = os.path.join(outdir_base, dir_name)
+        outdir = os.path.join(outdir_base, ts)
         os.makedirs(outdir, exist_ok=True)
         gss = 0
         total_pats = 0
@@ -422,6 +454,22 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
             pn = tc.get("pattern")
             total_pats += len(pattern_sets.get(pn, [])) if pn else 1
         done_pats = 0
+
+        # Build page lookup and create per-page subfolders
+        page_dirs = {}  # page_id -> directory path
+        source_dirs = {}  # page_id -> _source subdirectory path
+        source_root = os.path.join(outdir, "_source")
+        os.makedirs(source_root, exist_ok=True)
+        if pages:
+            for pg in pages:
+                pg_num = pg.get("number", "0")
+                pg_name = _safe_filename(pg.get("name", ""), 30)
+                pg_dir = os.path.join(outdir, f"{pg_num}_{pg_name}")
+                os.makedirs(pg_dir, exist_ok=True)
+                page_dirs[pg["_id"]] = pg_dir
+                src_dir = os.path.join(source_root, f"{pg_num}_{pg_name}")
+                os.makedirs(src_dir, exist_ok=True)
+                source_dirs[pg["_id"]] = src_dir
 
         for tc_idx, tc in enumerate(test_cases, 1):
             if stop_event and stop_event.is_set():
@@ -433,6 +481,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
             pats = pattern_sets.get(pat_name, []) if pat_name else []
             if not pats:
                 pats = [{"label": "single", "value": ""}]
+            # Determine output directory: page subfolder or root
+            tc_pid = tc.get("page_id")
+            tc_outdir = page_dirs.get(tc_pid, outdir)
             log_cb(f"\n{'='*50}")
             log_cb(f"テストケース: {tc_number} {tc_name} ({len(pats)} パターン)")
             log_cb(f"{'='*50}")
@@ -489,10 +540,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         safe_tc = _safe_filename(tc_name, 20)
                         safe_label = _safe_filename(label, 30)
                         safe_number = _safe_filename(tc_number, 10) if tc_number else ""
-                        # Filename: seq_number_testname_pNN_label_ssN.png
                         num_prefix = f"{safe_number}_" if safe_number else ""
                         fn = f"{gss:03d}_{num_prefix}{safe_tc}_p{pi:02d}_{safe_label}_ss{sc}.png"
-                        fp = os.path.join(outdir, fn)
+                        fp = os.path.join(tc_outdir, fn)
                         try:
                             if mode == "element" and sel:
                                 driver.find_element(By.CSS_SELECTOR, sel).screenshot(fp)
@@ -511,19 +561,48 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             elif mode == "fullshot":
                                 # CDP full-page screenshot (captures entire scrollable page)
                                 import base64 as _b64
-                                metrics = driver.execute_cdp_cmd('Page.getLayoutMetrics', {})
-                                cw = metrics['contentSize']['width']
-                                ch = metrics['contentSize']['height']
-                                dpr = driver.execute_script("return window.devicePixelRatio||1;")
-                                result = driver.execute_cdp_cmd('Page.captureScreenshot', {
-                                    'format': 'png',
-                                    'captureBeyondViewport': True,
-                                    'clip': {'x': 0, 'y': 0, 'width': cw, 'height': ch, 'scale': dpr}
-                                })
-                                with open(fp, 'wb') as _f:
-                                    _f.write(_b64.b64decode(result['data']))
+                                try:
+                                    metrics = driver.execute_cdp_cmd('Page.getLayoutMetrics', {})
+                                    # Chrome 120+: cssContentSize, older: contentSize
+                                    cs = metrics.get('cssContentSize') or metrics.get('contentSize', {})
+                                    cw = cs.get('width', 1280)
+                                    ch = cs.get('height', 900)
+                                    _flog.debug(f"fullshot: {cw}x{ch} (keys={list(metrics.keys())})")
+                                    result = driver.execute_cdp_cmd('Page.captureScreenshot', {
+                                        'format': 'png',
+                                        'captureBeyondViewport': True,
+                                        'clip': {'x': 0, 'y': 0, 'width': cw, 'height': ch, 'scale': 1}
+                                    })
+                                    with open(fp, 'wb') as _f:
+                                        _f.write(_b64.b64decode(result['data']))
+                                except Exception as cdp_err:
+                                    _flog.error(f"CDP fullshot failed: {cdp_err}, falling back to resize method")
+                                    # Fallback: resize window to full page height
+                                    try:
+                                        total_h = driver.execute_script("return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);")
+                                        total_w = driver.execute_script("return Math.max(document.body.scrollWidth, document.documentElement.scrollWidth);")
+                                        driver.set_window_size(max(total_w, 1280), min(total_h, 16384))
+                                        time.sleep(0.5)
+                                        driver.save_screenshot(fp)
+                                    finally:
+                                        driver.set_window_size(1280, 900)
                             else: driver.save_screenshot(fp)
-                            log_cb(f"  S{si} スクショ: {fn}")
+                            rel_dir = os.path.basename(tc_outdir) if tc_outdir != outdir else ""
+                            log_cb(f"  S{si} スクショ: {rel_dir + '/' if rel_dir else ''}{fn}")
+                            # Save HTML sources for diff comparison
+                            try:
+                                src_dir = source_dirs.get(tc_pid, source_root)
+                                src_base = fn.replace(".png", "")
+                                # Raw HTML (server response)
+                                raw = driver.page_source or ""
+                                with open(os.path.join(src_dir, f"{src_base}_raw.html"), "w", encoding="utf-8") as sf:
+                                    sf.write(_normalize_source(raw))
+                                # Rendered DOM (after JS)
+                                dom = driver.execute_script("return document.documentElement.outerHTML;") or ""
+                                with open(os.path.join(src_dir, f"{src_base}_dom.html"), "w", encoding="utf-8") as sf:
+                                    sf.write(_normalize_source(dom))
+                            except Exception as sx:
+                                _flog.debug(f"Source save failed: {sx}")
                         except Exception as x: log_cb(f"  S{si} [WARN] スクショ失敗: {x}")
                 done_pats += 1
                 if progress_cb and total_pats > 0:
@@ -791,8 +870,11 @@ def _main_inner(page: ft.Page):
         except Exception: pass
     def save_all():
         c = dict(state["config"])
-        c["browser_url"] = browser_url.value or ""
-        c["browser_wait"] = browser_wait.value or "3.0"
+        try:
+            c["browser_url"] = browser_url.value or ""
+            c["browser_wait"] = browser_wait.value or "3.0"
+        except NameError:
+            pass  # Widgets not yet created (early exit)
         save_config(c); save_tests(state["tests"])
         save_pattern_sets(state["pattern_sets"]); save_selector_bank(state["selector_bank"])
         save_pages(state["pages"])
@@ -832,6 +914,7 @@ def _main_inner(page: ft.Page):
         if update: page.update()
 
     def on_page_dd_change(e):
+        if not page_dd.value: return
         state["selected_page"] = page_dd.value
         state["selected_test"] = -1
         refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
@@ -912,7 +995,7 @@ def _main_inner(page: ft.Page):
         pg = None
         for p in state["pages"]:
             if p["_id"] == pid: pg = p; break
-        label = f"[{pg['number']}_{pg['name']}]" if pg else ""
+        label = f"【{pg['number']}_{pg['name']}】" if pg else ""
         _do_run(tests_for_page(pid), label)
 
     # ================================================================
@@ -967,7 +1050,8 @@ def _main_inner(page: ft.Page):
                         ]),
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
                 bgcolor=ft.Colors.BLUE_50 if selected else None,
-                padding=ft.Padding(8, 6, 4, 6), border_radius=6,
+                ink=True, ink_color=ft.Colors.BLUE_100,
+                padding=ft.Padding(8, 6, 36, 6), border_radius=6,
                 border=ft.Border.all(2, ft.Colors.BLUE_300) if selected else ft.Border.all(1, ft.Colors.GREY_200),
                 on_click=lambda e, tid=tc_id: select_test(_find_test_idx(tid)),
                 key=tc_id)
@@ -982,10 +1066,12 @@ def _main_inner(page: ft.Page):
 
     _reorder_dedup = {}
     def _is_dup_reorder(handler, old, new):
+        """Flet fires on_reorder twice per drag. Block ALL reorder events
+        for the same handler within 0.5s of the last one, regardless of indices."""
         now = time.time()
         prev = _reorder_dedup.get(handler)
-        if prev and prev[0] == old and prev[1] == new and now - prev[2] < 1.0: return True
-        _reorder_dedup[handler] = [old, new, now]; return False
+        if prev and now - prev < 0.5: return True
+        _reorder_dedup[handler] = now; return False
 
     def on_test_reorder(e):
         try:
@@ -995,31 +1081,54 @@ def _main_inner(page: ft.Page):
             cur_pid = state["selected_page"]
             page_tests = tests_for_page(cur_pid) if cur_pid else []
             if not (0 <= old < len(page_tests) and 0 <= new <= len(page_tests)): return
-            adj_new = new - 1 if new > old else new
-            if old == adj_new: return
+            if old == new: return
+            _flog.debug(f"on_test_reorder: old={old} new={new} len={len(page_tests)}")
+            # Build new page order: pop from old, insert at new
             old_tc = page_tests[old]
-            new_tc = page_tests[adj_new] if adj_new < len(page_tests) else None
-            state["tests"].remove(old_tc)
-            if new_tc:
-                new_gi = state["tests"].index(new_tc)
-                if adj_new > old:
-                    state["tests"].insert(new_gi + 1, old_tc)  # moving down: after target
+            new_order = list(page_tests)
+            new_order.pop(old)
+            new_order.insert(new, old_tc)
+            # Rebuild global list preserving other pages' positions
+            result = []
+            page_inserted = False
+            for t in state["tests"]:
+                if t.get("page_id") == cur_pid:
+                    if not page_inserted:
+                        result.extend(new_order)
+                        page_inserted = True
+                    # skip original page tests (already added via new_order)
                 else:
-                    state["tests"].insert(new_gi, old_tc)  # moving up: before target
-            else:
-                # Append after last test of this page
-                last_idx = -1
-                for i, t in enumerate(state["tests"]):
-                    if t.get("page_id") == cur_pid: last_idx = i
-                state["tests"].insert(last_idx + 1 if last_idx >= 0 else len(state["tests"]), old_tc)
+                    result.append(t)
+            if not page_inserted:
+                result.extend(new_order)
+            state["tests"] = result
             auto_number_tests()
             refresh_test_list(False); refresh_page_dd(False); schedule_save(); page.update()
         except Exception as x: _log_error("on_test_reorder", x)
 
+    def _update_test_highlight():
+        """Update visual selection state on existing cards without rebuilding.
+        Container structure: Container > Row > [Text(num), Column > [Text(name), Text(sub)], PopupMenu]"""
+        sel_tc = state["tests"][state["selected_test"]] if 0 <= state["selected_test"] < len(state["tests"]) else None
+        sel_id = sel_tc.get("_id") if sel_tc else None
+        for ctrl in test_list.controls:
+            if not isinstance(ctrl, ft.Container) or ctrl.key is None: continue
+            is_sel = (ctrl.key == sel_id)
+            ctrl.bgcolor = ft.Colors.BLUE_50 if is_sel else None
+            ctrl.border = ft.Border.all(2, ft.Colors.BLUE_300) if is_sel else ft.Border.all(1, ft.Colors.GREY_200)
+            try:
+                row = ctrl.content
+                name_txt = row.controls[1].controls[0]  # Column > first Text
+                name_txt.color = ft.Colors.BLUE_800 if is_sel else ft.Colors.BLACK
+            except (AttributeError, IndexError):
+                pass
+
     def select_test(idx):
         if idx < 0 or idx >= len(state["tests"]): return
+        if idx == state["selected_test"]: return  # already selected
         state["selected_test"] = idx; state["collapsed"] = set()
-        refresh_test_list(False); refresh_steps(False); page.update()
+        _update_test_highlight()
+        refresh_steps(False); page.update()
 
     def add_test(e):
         cur_pid = state["selected_page"]
@@ -1053,7 +1162,7 @@ def _main_inner(page: ft.Page):
                     if state["selected_pat_set"] == pat: state["selected_pat_set"] = None
                 state["tests"].pop(idx); auto_number_tests()
                 if state["selected_test"] >= len(state["tests"]):
-                    state["selected_test"] = max(0, len(state["tests"])-1)
+                    state["selected_test"] = len(state["tests"]) - 1  # -1 when empty
                 refresh_page_dd(False); refresh_test_list(False); refresh_steps()
                 refresh_pat_set_list(False); refresh_pats(); close_dlg(dlg)
             except Exception as x: _log_error("del_test", x); close_dlg(dlg)
@@ -1172,10 +1281,16 @@ def _main_inner(page: ft.Page):
             if old is None or new is None: return
             if _is_dup_reorder("step", old, new): return
             steps = tc["steps"]; vis = _get_vis(steps)
-            if old < len(vis) and new <= len(vis):
-                ao = vis[old]; an = vis[new] if new < len(vis) else len(steps)
-                steps.insert(an - (1 if an > ao else 0), steps.pop(ao))
-                refresh_steps()
+            if not (0 <= old < len(vis) and 0 <= new <= len(vis)): return
+            if old == new: return
+            _flog.debug(f"on_reorder(step): old={old} new={new} vis_len={len(vis)}")
+            # Extract visible items, reorder, write back
+            vis_items = [steps[i] for i in vis]
+            item = vis_items.pop(old)
+            vis_items.insert(new, item)
+            for slot, reordered in zip(vis, vis_items):
+                steps[slot] = reordered
+            refresh_steps()
         except Exception as x: _log_error("on_reorder", x)
 
     def _get_vis(steps):
@@ -1447,10 +1562,11 @@ def _main_inner(page: ft.Page):
             old, new = e.old_index, e.new_index
             if old is None or new is None: return
             if _is_dup_reorder("patset", old, new): return
+            _flog.debug(f"on_pat_set_reorder: old={old} new={new} len={len(names)}")
             if 0 <= old < len(names) and 0 <= new <= len(names):
-                adj_new = new - 1 if new > old else new
-                if old == adj_new: return
-                names.insert(adj_new, names.pop(old))
+                if old == new: return
+                item = names.pop(old)
+                names.insert(new, item)
                 state["pattern_sets"] = {n: state["pattern_sets"][n] for n in names}
                 refresh_pat_set_list()
         except Exception as x: _log_error("on_pat_set_reorder", x)
@@ -1515,10 +1631,12 @@ def _main_inner(page: ft.Page):
             old, new = e.old_index, e.new_index
             if old is None or new is None: return
             if _is_dup_reorder("pat", old, new): return
+            _flog.debug(f"on_pat_reorder: old={old} new={new} len={len(pats)}")
             if 0 <= old < len(pats) and 0 <= new <= len(pats):
-                adj_new = new - 1 if new > old else new
-                if old == adj_new: return
-                pats.insert(adj_new, pats.pop(old)); refresh_pats()
+                if old == new: return
+                item = pats.pop(old)
+                pats.insert(new, item)
+                refresh_pats()
         except Exception as x: _log_error("on_pat_reorder", x)
 
     def refresh_pats(update=True):
@@ -1609,25 +1727,74 @@ def _main_inner(page: ft.Page):
             actions=[ft.TextButton("閉じる", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
-    def gen_input_check(e):
+    def _ensure_pat_set(ml_hint=""):
+        """パターンセット未選択なら自動作成して返す。選択中ならその名前を返す。"""
         name = state["selected_pat_set"]
-        if not name: snack("パターンセットを選択", ft.Colors.ORANGE_600); return
+        if name and name in state["pattern_sets"]:
+            return name
+        # 自動作成
+        auto_name = f"パターンセット（{ml_hint}字）" if ml_hint else f"パターンセット{len(state['pattern_sets'])+1}"
+        # 同名があればサフィックス
+        base = auto_name; cnt = 2
+        while auto_name in state["pattern_sets"]:
+            auto_name = f"{base}_{cnt}"; cnt += 1
+        state["pattern_sets"][auto_name] = []
+        state["selected_pat_set"] = auto_name
+        refresh_pat_set_list(False)
+        return auto_name
+
+    def gen_input_check(e):
         cf = ft.TextField(label="繰り返す文字", width=80, value="あ")
         mf = ft.TextField(label="max_length", width=140, hint_text="例: 50")
         def on_ok(e):
             try:
                 ch = cf.value or "あ"; ml = mf.value.strip()
                 if not ml or not ml.isdigit() or int(ml) < 1: snack("max_lengthを正の整数で", ft.Colors.RED_600); return
-                n = int(ml); ps = []
+                n = int(ml)
+                name = _ensure_pat_set(ml)
+                ps = []
                 if n > 1: ps.append({"label": f"max-1({n-1}文字)", "value": ch * (n - 1)})
                 ps.append({"label": f"max({n}文字)", "value": ch * n})
                 ps.append({"label": f"max+1({n+1}文字)", "value": ch * (n + 1)})
                 state["pattern_sets"][name].extend(ps)
+                select_pat_set(name)
                 refresh_pats(False); refresh_pat_set_list(False); refresh_test_list()
-                snack(f"{len(ps)} 件追加"); close_dlg(dlg)
+                snack(f"{name} に {len(ps)} 件追加"); close_dlg(dlg)
             except Exception as x: _log_error("gen_input_check", x); close_dlg(dlg)
-        dlg = ft.AlertDialog(title=ft.Text("max_length用 境界値生成"),
-            content=ft.Column([cf, mf, ft.Text("指定文字を max-1, max, max+1 文字ずつ生成", size=11, color=ft.Colors.GREY_600)],
+        dlg = ft.AlertDialog(title=ft.Text("max_length用 境界値生成（文字）"),
+            content=ft.Column([cf, mf,
+                ft.Text("指定文字を max-1, max, max+1 文字ずつ生成", size=11, color=ft.Colors.GREY_600),
+                ft.Text("パターンセット未選択なら自動作成します", size=10, color=ft.Colors.BLUE_400)],
+                tight=True, spacing=10, width=350),
+            actions=[ft.TextButton("追加", on_click=on_ok), ft.TextButton("閉じる", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg)
+
+    def gen_numeric_check(e):
+        mf = ft.TextField(label="max_length", width=140, hint_text="例: 10")
+        DIGITS = "1234567890"
+        def _make_num(length):
+            """半角数値文字列を指定長で生成 (1234567890を繰り返し)"""
+            if length <= 0: return ""
+            return (DIGITS * (length // 10 + 1))[:length]
+        def on_ok(e):
+            try:
+                ml = mf.value.strip()
+                if not ml or not ml.isdigit() or int(ml) < 1: snack("max_lengthを正の整数で", ft.Colors.RED_600); return
+                n = int(ml)
+                name = _ensure_pat_set(ml)
+                ps = []
+                if n > 1: ps.append({"label": f"数値max-1({n-1}桁)", "value": _make_num(n - 1)})
+                ps.append({"label": f"数値max({n}桁)", "value": _make_num(n)})
+                ps.append({"label": f"数値max+1({n+1}桁)", "value": _make_num(n + 1)})
+                state["pattern_sets"][name].extend(ps)
+                select_pat_set(name)
+                refresh_pats(False); refresh_pat_set_list(False); refresh_test_list()
+                snack(f"{name} に {len(ps)} 件追加"); close_dlg(dlg)
+            except Exception as x: _log_error("gen_numeric_check", x); close_dlg(dlg)
+        dlg = ft.AlertDialog(title=ft.Text("max_length用 境界値生成（半角数値）"),
+            content=ft.Column([mf,
+                ft.Text("1234567890 を繰り返して max-1, max, max+1 桁生成", size=11, color=ft.Colors.GREY_600),
+                ft.Text("パターンセット未選択なら自動作成します", size=10, color=ft.Colors.BLUE_400)],
                 tight=True, spacing=10, width=350),
             actions=[ft.TextButton("追加", on_click=on_ok), ft.TextButton("閉じる", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
@@ -1685,11 +1852,11 @@ def _main_inner(page: ft.Page):
                         state["test_drivers"], list(state["pages"]), run_label)
 
     def run_click(e):
-        _do_run(state["tests"], "[全テスト]")
+        _do_run(state["tests"], "【全テスト】")
     def run_single(idx):
         if 0 <= idx < len(state["tests"]):
             tc = state["tests"][idx]
-            label = f"[{tc.get('number','')}_{tc.get('name','')}]"
+            label = f"【{tc.get('number','')}_{tc.get('name','')}】"
             _do_run([tc], label)
     def stop_click(e):
         ev = state.get("stop_event")
@@ -1815,7 +1982,8 @@ def _main_inner(page: ft.Page):
             ft.Row([pat_header,
                     ft.Row([ft.Button("追加", icon=ft.Icons.ADD, on_click=add_pat),
                             ft.Button("テンプレート", icon=ft.Icons.FOLDER_OPEN, on_click=load_template),
-                            ft.Button("max_length用", icon=ft.Icons.STRAIGHTEN, on_click=gen_input_check),
+                            ft.Button("文字max", icon=ft.Icons.STRAIGHTEN, on_click=gen_input_check, tooltip="max_length境界値(文字)"),
+                            ft.Button("数値max", icon=ft.Icons.PIN, on_click=gen_numeric_check, tooltip="max_length境界値(半角数値)"),
                             ft.Button("CSVエクスポート", icon=ft.Icons.DOWNLOAD, on_click=export_csv)], spacing=4)],
                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             ft.Container(pat_items, expand=True, padding=ft.Padding(4,4,4,4),
@@ -1863,33 +2031,40 @@ def _main_inner(page: ft.Page):
         _flog.info(f"Killing child processes of PID={my_pid}")
         if sys.platform == 'win32':
             import subprocess as _sp
+            child_pids = []
+            # Method 1: wmic (Win10, some Win11)
             try:
-                # Enumerate child PIDs via wmic
                 result = _sp.run(
-                    ['wmic', 'process', 'where', f'ParentProcessId={my_pid}',
-                     'get', 'ProcessId'],
-                    capture_output=True, text=True, timeout=3,
-                    creationflags=0x08000000)  # CREATE_NO_WINDOW
+                    ['wmic', 'process', 'where', f'ParentProcessId={my_pid}', 'get', 'ProcessId'],
+                    capture_output=True, text=True, timeout=3, creationflags=0x08000000)
                 for line in result.stdout.strip().split('\n'):
                     cpid = line.strip()
                     if cpid.isdigit() and cpid != str(my_pid):
-                        try:
-                            _sp.run(['taskkill', '/F', '/T', '/PID', cpid],
-                                    capture_output=True, timeout=3,
-                                    creationflags=0x08000000)
-                        except Exception:
-                            pass
-            except Exception as x:
-                _flog.error(f"Child kill failed: {x}")
-                # Fallback: kill whole tree (will cause _MEI warning but at least exits)
+                        child_pids.append(cpid)
+            except Exception:
+                pass
+            # Method 2: PowerShell (Win11 where wmic is removed)
+            if not child_pids:
                 try:
-                    _sp.Popen(['taskkill', '/F', '/T', '/PID', str(my_pid)],
-                              stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-                              creationflags=0x08000000)
+                    ps_cmd = f"Get-CimInstance Win32_Process -Filter 'ParentProcessId={my_pid}' | Select-Object -ExpandProperty ProcessId"
+                    result = _sp.run(['powershell', '-NoProfile', '-Command', ps_cmd],
+                        capture_output=True, text=True, timeout=5, creationflags=0x08000000)
+                    for line in result.stdout.strip().split('\n'):
+                        cpid = line.strip()
+                        if cpid.isdigit() and cpid != str(my_pid):
+                            child_pids.append(cpid)
                 except Exception:
                     pass
-            # Brief wait for child processes to die
-            time.sleep(0.2)
+            # Kill found children
+            for cpid in child_pids:
+                try:
+                    _sp.run(['taskkill', '/F', '/T', '/PID', cpid],
+                            capture_output=True, timeout=3, creationflags=0x08000000)
+                except Exception:
+                    pass
+            if child_pids:
+                time.sleep(0.2)
+            _flog.info(f"Killed {len(child_pids)} child processes")
         else:
             try:
                 import signal as _sig
@@ -1897,7 +2072,6 @@ def _main_inner(page: ft.Page):
             except Exception:
                 pass
         # Normal exit → PyInstaller atexit cleanup runs → _MEI folder deleted
-        # Set a hard deadline: if sys.exit doesn't work in 2s, force os._exit
         _deadline = threading.Timer(2.0, lambda: os._exit(0))
         _deadline.daemon = True; _deadline.start()
         sys.exit(0)

@@ -409,43 +409,51 @@ def test_reorder():
         return [t for t in tests if t.get("page_id") == pid]
 
     def do_reorder(tests, cur_pid, old, new):
+        """Reproduce on_test_reorder: pop(old) → insert(new) in page scope, rebuild global."""
         page_tests = tests_for_page(tests, cur_pid)
-        adj_new = new - 1 if new > old else new
-        if old == adj_new: return
+        if old == new: return
         old_tc = page_tests[old]
-        new_tc = page_tests[adj_new] if adj_new < len(page_tests) else None
-        tests.remove(old_tc)
-        if new_tc:
-            new_gi = tests.index(new_tc)
-            if adj_new > old:
-                tests.insert(new_gi + 1, old_tc)
+        new_order = list(page_tests)
+        new_order.pop(old)
+        new_order.insert(new, old_tc)
+        result = []
+        page_inserted = False
+        for t in tests:
+            if t.get("page_id") == cur_pid:
+                if not page_inserted:
+                    result.extend(new_order)
+                    page_inserted = True
             else:
-                tests.insert(new_gi, old_tc)
-        else:
-            last_idx = -1
-            for i, t in enumerate(tests):
-                if t.get("page_id") == cur_pid: last_idx = i
-            tests.insert(last_idx + 1 if last_idx >= 0 else len(tests), old_tc)
+                result.append(t)
+        if not page_inserted:
+            result.extend(new_order)
+        tests[:] = result
 
     pid = "p_1"
 
-    # 末尾→先頭
+    # 末尾→先頭: pop(2) → insert(0)
     ts = [{"name": n, "page_id": pid} for n in ["A", "B", "C"]]
     do_reorder(ts, pid, 2, 0)
     assert [t['name'] for t in tests_for_page(ts, pid)] == ['C', 'A', 'B']
     print("  [OK] 末尾→先頭 (2->0)")
 
-    # 先頭→2番目の後ろ
+    # 先頭→中間: pop(0) → insert(1)  [B,C] → insert(1,A) → [B,A,C]
+    ts = [{"name": n, "page_id": pid} for n in ["A", "B", "C"]]
+    do_reorder(ts, pid, 0, 1)
+    assert [t['name'] for t in tests_for_page(ts, pid)] == ['B', 'A', 'C']
+    print("  [OK] 先頭→中間 (0->1)")
+
+    # 先頭→末尾: pop(0) → insert(2)  [B,C] → insert(2,A) → [B,C,A]
     ts = [{"name": n, "page_id": pid} for n in ["A", "B", "C"]]
     do_reorder(ts, pid, 0, 2)
-    assert [t['name'] for t in tests_for_page(ts, pid)] == ['B', 'A', 'C']
-    print("  [OK] 先頭→中間 (0->2)")
-
-    # 先頭→末尾
-    ts = [{"name": n, "page_id": pid} for n in ["A", "B", "C"]]
-    do_reorder(ts, pid, 0, 3)
     assert [t['name'] for t in tests_for_page(ts, pid)] == ['B', 'C', 'A']
-    print("  [OK] 先頭→末尾 (0->3)")
+    print("  [OK] 先頭→末尾 (0->2)")
+
+    # 中間→先頭: pop(1) → insert(0)
+    ts = [{"name": n, "page_id": pid} for n in ["A", "B", "C"]]
+    do_reorder(ts, pid, 1, 0)
+    assert [t['name'] for t in tests_for_page(ts, pid)] == ['B', 'A', 'C']
+    print("  [OK] 中間→先頭 (1->0)")
 
     # マルチページ: 他ページに影響なし
     ts = [{"name": "X", "page_id": "p_2"},
@@ -453,10 +461,381 @@ def test_reorder():
           {"name": "B", "page_id": pid},
           {"name": "Y", "page_id": "p_2"},
           {"name": "C", "page_id": pid}]
-    do_reorder(ts, pid, 2, 0)
+    do_reorder(ts, pid, 2, 0)  # C→before A
     assert [t['name'] for t in tests_for_page(ts, pid)] == ['C', 'A', 'B']
     assert [t['name'] for t in tests_for_page(ts, "p_2")] == ['X', 'Y']
     print("  [OK] マルチページ時の独立性")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト10: パターン並び替え (フラットリスト)
+# ---------------------------------------------------------------------------
+
+def test_pattern_reorder():
+    print("=== テスト10: パターン並び替え ===")
+
+    def do_reorder(pats, old, new):
+        """Reproduce on_pat_reorder: pop(old) → insert(new)"""
+        if old == new: return pats
+        item = pats.pop(old)
+        pats.insert(new, item)
+        return pats
+
+    # 下に1つ移動: pop(1)→insert(2)  [A,C,D]→insert(2,B)=[A,C,B,D]
+    p = ["A", "B", "C", "D"]
+    do_reorder(p, 1, 2)
+    assert p == ["A", "C", "B", "D"], f"Got {p}"
+    print("  [OK] 下に1つ移動 (1->2)")
+
+    # 上に1つ移動: pop(2)→insert(1)  [A,B,D]→insert(1,C)=[A,C,B,D]
+    p = ["A", "B", "C", "D"]
+    do_reorder(p, 2, 1)
+    assert p == ["A", "C", "B", "D"], f"Got {p}"
+    print("  [OK] 上に1つ移動 (2->1)")
+
+    # 先頭→末尾: pop(0)→insert(3)  [B,C,D]→insert(3,A)=[B,C,D,A]
+    p = ["A", "B", "C", "D"]
+    do_reorder(p, 0, 3)
+    assert p == ["B", "C", "D", "A"], f"Got {p}"
+    print("  [OK] 先頭→末尾 (0->3)")
+
+    # 末尾→先頭: pop(3)→insert(0)  [A,B,C]→insert(0,D)=[D,A,B,C]
+    p = ["A", "B", "C", "D"]
+    do_reorder(p, 3, 0)
+    assert p == ["D", "A", "B", "C"], f"Got {p}"
+    print("  [OK] 末尾→先頭 (3->0)")
+
+    # ノーオプ (same index)
+    p = ["A", "B", "C"]
+    p_copy = list(p)
+    do_reorder(p, 1, 1)
+    assert p == p_copy, f"Got {p}"
+    print("  [OK] ノーオプ (1->1)")
+
+    # 2つ下: pop(0)→insert(2)  [B,C,D,E]→insert(2,A)=[B,C,A,D,E]
+    p = ["A", "B", "C", "D", "E"]
+    do_reorder(p, 0, 2)
+    assert p == ["B", "C", "A", "D", "E"], f"Got {p}"
+    print("  [OK] 2つ下 (0->2)")
+
+    # 中間→先頭: pop(2)→insert(0)  [A,B,D,E]→insert(0,C)=[C,A,B,D,E]
+    p = ["A", "B", "C", "D", "E"]
+    do_reorder(p, 2, 0)
+    assert p == ["C", "A", "B", "D", "E"], f"Got {p}"
+    print("  [OK] 中間→先頭 (2->0)")
+
+    # dict形式でのテスト (パターンセット実データ形式)
+    pats = [
+        {"label": "未入力", "value": ""},
+        {"label": "全角SP", "value": "\u3000"},
+        {"label": "半角SP", "value": " "},
+        {"label": "絵文字", "value": "🦐"},
+    ]
+    item = pats.pop(3)
+    pats.insert(0, item)
+    assert pats[0]["label"] == "絵文字"
+    assert pats[1]["label"] == "未入力"
+    print("  [OK] dict形式パターン移動")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト11: dedup (二重発火防止)
+# ---------------------------------------------------------------------------
+
+def test_dedup():
+    print("=== テスト11: dedup (二重発火防止) ===")
+    import time as _time
+
+    # Reproduce dedup logic
+    _dedup = {}
+    def is_dup(handler, old, new):
+        now = _time.time()
+        prev = _dedup.get(handler)
+        if prev and now - prev < 0.5: return True
+        _dedup[handler] = now; return False
+
+    # 1回目は通す
+    assert is_dup("pat", 1, 3) == False
+    print("  [OK] 1回目は通過")
+
+    # 即座の2回目はブロック (同じインデックスでも違うインデックスでも)
+    assert is_dup("pat", 1, 3) == True
+    print("  [OK] 2回目即座ブロック (同インデックス)")
+
+    assert is_dup("pat", 1, 2) == True
+    print("  [OK] 2回目即座ブロック (違うインデックス)")
+
+    # 別ハンドラーは独立
+    assert is_dup("step", 0, 1) == False
+    print("  [OK] 別ハンドラーは独立")
+
+    # 時間経過後は通す
+    _dedup["pat"] = _time.time() - 1.0  # 1秒前に設定
+    assert is_dup("pat", 2, 0) == False
+    print("  [OK] 0.5秒後は通過")
+
+    # 二重発火シミュレーション: 1回目は正しく移動、2回目はブロック
+    pats = ["A", "B", "C", "D"]
+    _dedup2 = {}
+    def is_dup2(handler):
+        now = _time.time()
+        prev = _dedup2.get(handler)
+        if prev and now - prev < 0.5: return True
+        _dedup2[handler] = now; return False
+
+    def sim_reorder(pats, old, new):
+        if is_dup2("pat"): return  # blocked
+        adj_new = new - 1 if new > old else new
+        if old == adj_new: return
+        pats.insert(adj_new, pats.pop(old))
+
+    # Flet fires twice: move B(1) after C
+    sim_reorder(pats, 1, 3)  # 1st fire: OK
+    sim_reorder(pats, 1, 2)  # 2nd fire: different indices, but dedup blocks
+    assert pats == ["A", "C", "B", "D"], f"Got {pats}"
+    print("  [OK] 二重発火シミュレーション (2回目ブロック)")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト12: 出力フォルダ構造
+# ---------------------------------------------------------------------------
+
+def test_output_structure():
+    print("=== テスト12: 出力フォルダ構造 ===")
+    import tempfile, shutil
+    from y_shot import _safe_filename
+
+    # ルートフォルダ名 (タイムスタンプのみ)
+    ts = "20260326120000"
+    dir_name = ts
+    assert dir_name == "20260326120000"
+    print(f"  [OK] ルートフォルダ名: {dir_name}")
+
+    # ページごとサブフォルダ名
+    pg_num = "1"; pg_name = "初期状態"
+    pg_dir_name = f"{pg_num}_{_safe_filename(pg_name, 30)}"
+    assert pg_dir_name == "1_初期状態"
+    print(f"  [OK] ページサブフォルダ名: {pg_dir_name}")
+
+    # ファイル名にテスト番号・テスト名を含む
+    tc_number = "1-2"; tc_name = "姓いろんな入力"
+    safe_number = _safe_filename(tc_number, 10)
+    safe_tc = _safe_filename(tc_name, 20)
+    fn = f"002_{safe_number}_{safe_tc}_p01_未入力_ss1.png"
+    assert fn == "002_1-2_姓いろんな入力_p01_未入力_ss1.png"
+    print(f"  [OK] ファイル名: {fn}")
+
+    # 【】がファイル名に使えることを確認
+    assert _safe_filename("【2_ページ名】", 40) == "【2_ページ名】"
+    print("  [OK] 【】はファイル名セーフ")
+
+    # ディレクトリ構造シミュレーション (ページごとサブフォルダ)
+    tmpdir = tempfile.mkdtemp()
+    try:
+        outdir = os.path.join(tmpdir, dir_name)
+        os.makedirs(outdir)
+        # ページごとサブフォルダ
+        pd1 = os.path.join(outdir, "1_初期状態")
+        pd2 = os.path.join(outdir, "2_入力画面_2")
+        os.makedirs(pd1); os.makedirs(pd2)
+        # ページ1のテスト群
+        open(os.path.join(pd1, "001_1-1_初期状態確認_p01_single_ss1.png"), "w").close()
+        open(os.path.join(pd1, "002_1-2_姓いろんな入力_p01_未入力_ss1.png"), "w").close()
+        open(os.path.join(pd1, "003_1-2_姓いろんな入力_p02_全角SP_ss1.png"), "w").close()
+        # ページ2のテスト群
+        open(os.path.join(pd2, "004_2-1_確認画面チェック_p01_single_ss1.png"), "w").close()
+        # Walk and collect
+        all_pngs = []
+        for root, dirs, files in os.walk(outdir):
+            dirs.sort()
+            for fn in sorted(files):
+                if fn.endswith(".png"):
+                    rel = os.path.relpath(os.path.join(root, fn), outdir).replace("\\", "/")
+                    all_pngs.append(rel)
+        assert len(all_pngs) == 4
+        assert all_pngs[0].startswith("1_初期状態/")
+        assert all_pngs[2].startswith("1_初期状態/")  # same page
+        assert all_pngs[3].startswith("2_入力画面_2/")
+        # ファイル名にテスト番号が含まれている
+        assert "1-2_姓いろんな入力" in all_pngs[1]
+        print(f"  [OK] os.walk で4件収集、ページ別サブフォルダ")
+
+        # page_dirs lookup simulation
+        pages = [
+            {"_id": "p1", "number": "1", "name": "初期状態"},
+            {"_id": "p2", "number": "2", "name": "入力画面_2"},
+        ]
+        page_dirs = {}
+        for pg in pages:
+            pg_dir = os.path.join(outdir, f"{pg['number']}_{_safe_filename(pg['name'], 30)}")
+            page_dirs[pg["_id"]] = pg_dir
+        tc = {"page_id": "p1"}
+        assert page_dirs.get(tc["page_id"]) == pd1
+        tc2 = {"page_id": "p2"}
+        assert page_dirs.get(tc2["page_id"]) == pd2
+        tc_no_page = {"page_id": "unknown"}
+        assert page_dirs.get(tc_no_page["page_id"], outdir) == outdir  # fallback to root
+        print("  [OK] page_dirs lookup + fallback")
+    finally:
+        shutil.rmtree(tmpdir)
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト13: 半角数値境界値生成
+# ---------------------------------------------------------------------------
+
+def test_numeric_generation():
+    print("=== テスト13: 半角数値境界値生成 ===")
+
+    DIGITS = "1234567890"
+    def _make_num(length):
+        if length <= 0: return ""
+        return (DIGITS * (length // 10 + 1))[:length]
+
+    # 基本
+    assert _make_num(10) == "1234567890"
+    print("  [OK] 10桁 = 1234567890")
+
+    assert _make_num(3) == "123"
+    print("  [OK] 3桁 = 123")
+
+    assert _make_num(15) == "123456789012345"
+    print("  [OK] 15桁 = 繰り返し")
+
+    assert _make_num(1) == "1"
+    print("  [OK] 1桁 = 1")
+
+    assert _make_num(0) == ""
+    print("  [OK] 0桁 = 空文字")
+
+    # 長い値
+    v = _make_num(1000)
+    assert len(v) == 1000
+    assert v[:10] == "1234567890"
+    assert all(c.isdigit() for c in v)
+    print("  [OK] 1000桁 = 正しい長さ + 半角数値のみ")
+
+    # 境界値セット生成
+    n = 50
+    ps = []
+    if n > 1: ps.append({"label": f"数値max-1({n-1}桁)", "value": _make_num(n - 1)})
+    ps.append({"label": f"数値max({n}桁)", "value": _make_num(n)})
+    ps.append({"label": f"数値max+1({n+1}桁)", "value": _make_num(n + 1)})
+    assert len(ps) == 3
+    assert len(ps[0]["value"]) == 49
+    assert len(ps[1]["value"]) == 50
+    assert len(ps[2]["value"]) == 51
+    print("  [OK] 境界値セット (49, 50, 51桁)")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト14: ソース保存と正規化
+# ---------------------------------------------------------------------------
+
+def test_source_normalization():
+    print("=== テスト14: ソース正規化 ===")
+    from y_shot import _normalize_source
+
+    # CSRF token normalization
+    html = '<input type="hidden" name="_token" value="abc123XYZ">'
+    normalized = _normalize_source(html)
+    assert "abc123XYZ" not in normalized
+    assert "__NORMALIZED__" in normalized
+    print("  [OK] CSRFトークン除去")
+
+    # PHPSESSID
+    html = '<input name="PHPSESSID" value="sess_abc123">'
+    normalized = _normalize_source(html)
+    assert "sess_abc123" not in normalized
+    print("  [OK] PHPSESSID除去")
+
+    # Meta CSRF token
+    html = '<meta name="csrf-token" content="long-random-token-here">'
+    normalized = _normalize_source(html)
+    assert "long-random-token-here" not in normalized
+    print("  [OK] meta csrf-token除去")
+
+    # Datetime normalization
+    html = '<span>更新日: 2026-03-26 14:30:00</span>'
+    normalized = _normalize_source(html)
+    assert "2026-03-26 14:30:00" not in normalized
+    assert "__DATETIME__" in normalized
+    print("  [OK] 日時フォーマット正規化")
+
+    html2 = '<span>2026/03/26 14:30</span>'
+    normalized2 = _normalize_source(html2)
+    assert "2026/03/26 14:30" not in normalized2
+    print("  [OK] 日時フォーマット(スラッシュ)正規化")
+
+    # Unix timestamp
+    html = '<div data-ts="1711468200123">'
+    normalized = _normalize_source(html)
+    assert "1711468200123" not in normalized
+    assert "__TIMESTAMP__" in normalized
+    print("  [OK] Unixタイムスタンプ除去")
+
+    # Cache buster
+    html = '<link href="/style.css?v=abc123">'
+    normalized = _normalize_source(html)
+    assert "abc123" not in normalized
+    assert "__CACHE__" in normalized
+    print("  [OK] キャッシュバスター正規化")
+
+    # Nonce
+    html = '<script nonce="dGVzdDEyMw==">'
+    normalized = _normalize_source(html)
+    assert "dGVzdDEyMw==" not in normalized
+    assert "__NONCE__" in normalized
+    print("  [OK] nonce除去")
+
+    # Normal content preserved
+    html = '<div class="main"><h1>ユーザー登録</h1><p>入力してください</p></div>'
+    normalized = _normalize_source(html)
+    assert normalized == html
+    print("  [OK] 通常コンテンツは変更なし")
+
+    # _source directory structure test
+    import tempfile, shutil
+    tmpdir = tempfile.mkdtemp()
+    try:
+        outdir = os.path.join(tmpdir, "20260326120000")
+        os.makedirs(outdir)
+        source_root = os.path.join(outdir, "_source")
+        os.makedirs(source_root)
+        os.makedirs(os.path.join(outdir, "1_初期状態"))
+        os.makedirs(os.path.join(source_root, "1_初期状態"))
+        open(os.path.join(outdir, "1_初期状態", "001_ss1.png"), "w").close()
+        with open(os.path.join(source_root, "1_初期状態", "001_ss1_raw.html"), "w") as f:
+            f.write("<html>raw</html>")
+        with open(os.path.join(source_root, "1_初期状態", "001_ss1_dom.html"), "w") as f:
+            f.write("<html>dom</html>")
+        # Report walk skips _source/
+        all_pngs = []
+        for root, dirs, files in os.walk(outdir):
+            dirs[:] = [d for d in sorted(dirs) if not d.startswith("_")]
+            for fn in sorted(files):
+                if fn.endswith(".png"):
+                    all_pngs.append(fn)
+        assert len(all_pngs) == 1
+        print("  [OK] レポートwalkは_source/をスキップ")
+        # _source/ has matching files
+        src_files = os.listdir(os.path.join(source_root, "1_初期状態"))
+        assert len(src_files) == 2
+        assert any("_raw.html" in f for f in src_files)
+        assert any("_dom.html" in f for f in src_files)
+        print("  [OK] _source/にraw+domの2ファイル保存")
+    finally:
+        shutil.rmtree(tmpdir)
 
     print("  全てパス\n")
 
@@ -475,6 +854,11 @@ if __name__ == "__main__":
     test_utils()
     test_start_num()
     test_reorder()
+    test_pattern_reorder()
+    test_dedup()
+    test_output_structure()
+    test_numeric_generation()
+    test_source_normalization()
 
     print("=" * 40)
     print("全テスト完了 - すべてパス")

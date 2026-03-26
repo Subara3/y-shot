@@ -8,7 +8,7 @@ y-shot: Web Screenshot Automation Tool  v1.7 (Flet)
            fullshot (CDP full-page capture)
 """
 
-import csv, os, sys, json, threading, time, logging
+import csv, os, sys, json, threading, time, logging, traceback, copy
 from datetime import datetime
 from urllib.parse import urlparse, urlunparse
 import flet as ft
@@ -442,9 +442,17 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
+        from selenium.webdriver.support.ui import Select as SeleniumSelect
+        from selenium.webdriver.common.keys import Keys
     except ImportError:
         log_cb("[ERROR] selenium が見つかりません。"); done_cb(); return
+    import base64 as _b64
+    try:
+        from PIL import Image as _PILImage
+    except ImportError:
+        _PILImage = None
     driver = None
+    outdir = None
     try:
         opts = webdriver.ChromeOptions()
         if config.get("headless") == "1":
@@ -546,7 +554,6 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                 log_cb(f"  S{si} クリア: {sel}")
                             elif input_mode == "append":
                                 # Append to existing value (click end, then type)
-                                from selenium.webdriver.common.keys import Keys
                                 e.click()
                                 e.send_keys(Keys.END)
                                 e.send_keys(iv)
@@ -570,7 +577,6 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         sel = step.get("selector","")
                         sv = step.get("value","").replace("{パターン}",value).replace("{pattern}",value)
                         try:
-                            from selenium.webdriver.support.ui import Select as SeleniumSelect
                             el = WebDriverWait(driver,10).until(EC.presence_of_element_located((By.CSS_SELECTOR,sel)))
                             dd = SeleniumSelect(el)
                             try: dd.select_by_value(sv)
@@ -612,14 +618,13 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                 time.sleep(0.3)
                                 r = driver.execute_script("var r=arguments[0].getBoundingClientRect();return{x:r.x,y:r.y,w:r.width,h:r.height};",tgt)
                                 driver.save_screenshot(fp)
-                                from PIL import Image; img = Image.open(fp)
+                                img = _PILImage.open(fp)
                                 d = driver.execute_script("return window.devicePixelRatio||1;")
                                 x1,y1 = max(0,int(r["x"]*d)-mg), max(0,int(r["y"]*d)-mg)
                                 x2,y2 = min(img.width,int((r["x"]+r["w"])*d)+mg), min(img.height,int((r["y"]+r["h"])*d)+mg)
                                 if x2>x1 and y2>y1: img.crop((x1,y1,x2,y2)).save(fp)
                             elif mode == "fullshot":
                                 # CDP full-page screenshot (captures entire scrollable page)
-                                import base64 as _b64
                                 try:
                                     metrics = driver.execute_cdp_cmd('Page.getLayoutMetrics', {})
                                     # Chrome 120+: cssContentSize, older: contentSize
@@ -679,7 +684,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
             if driver_ref is not None:
                 try: driver_ref.remove(driver)
                 except ValueError: pass
-        done_cb(outdir if 'outdir' in dir() else None)
+        done_cb(outdir)
 
 # ===================================================================
 # Path helpers
@@ -768,7 +773,6 @@ def main(page: ft.Page):
     try:
         _main_inner(page)
     except Exception as _fatal:
-        import traceback
         tb = traceback.format_exc()
         _flog.error(f"FATAL in main: {_fatal}\n{tb}")
         # Show error in page if possible
@@ -902,7 +906,6 @@ def _main_inner(page: ft.Page):
         try: page.update()
         except Exception: pass
     def _log_error(context, exc):
-        import traceback
         _flog.error(f"{context}: {exc}\n{traceback.format_exc()}")
         log(f"[ERROR] {context}: {exc}")
     def snack(msg, color=ft.Colors.GREEN_700):
@@ -1204,8 +1207,7 @@ def _main_inner(page: ft.Page):
 
     def copy_test(idx):
         if 0 <= idx < len(state["tests"]):
-            import copy as _copy
-            tc = _copy.deepcopy(state["tests"][idx])
+            tc = copy.deepcopy(state["tests"][idx])
             tc["name"] += " (コピー)"; tc["_id"] = _new_tc_id(); tc.pop("_sub_number", None)
             state["tests"].insert(idx + 1, tc); auto_number_tests()
             state["selected_test"] = idx + 1
@@ -1581,30 +1583,28 @@ def _main_inner(page: ft.Page):
             elems = state["selector_bank"][clean]; state["browser_elements"] = list(elems)
             filter_el_table(); snack(f"バンク {len(elems)} 要素")
         else: snack("未保存URL", ft.Colors.ORANGE_600)
-    def on_el_click(idx):
-        state["selected_el"] = idx
-        el = state["browser_elements"][idx] if idx < len(state["browser_elements"]) else None
-        # Update row highlight (need to map idx to visible row)
-        for ri, row in enumerate(el_table.rows):
-            row.selected = False
-        # Find which row corresponds to this element index
+    def _el_visible_row_index(target_idx):
+        """Map a browser_elements index to the corresponding visible row index in el_table."""
         query = (el_search.value or "").strip().lower()
         show_hidden = el_show_hidden.value
         row_idx = 0
         for i, el_item in enumerate(state["browser_elements"]):
-            is_visible = el_item.get("visible", True)
-            if not is_visible and not show_hidden: continue
+            if not el_item.get("visible", True) and not show_hidden: continue
             if query:
-                searchable = " ".join([
-                    el_item.get("tag", ""), el_item.get("type", ""), el_item.get("id", ""),
-                    el_item.get("name", ""), el_item.get("hint", ""), el_item.get("selector", "")
-                ]).lower()
+                searchable = " ".join([el_item.get(k, "") for k in ("tag","type","id","name","hint","selector")]).lower()
                 if query not in searchable: continue
-            if i == idx:
-                if row_idx < len(el_table.rows):
-                    el_table.rows[row_idx].selected = True
-                break
+            if i == target_idx: return row_idx
             row_idx += 1
+        return -1
+
+    def on_el_click(idx):
+        state["selected_el"] = idx
+        el = state["browser_elements"][idx] if idx < len(state["browser_elements"]) else None
+        for ri, row in enumerate(el_table.rows):
+            row.selected = False
+        vis_row = _el_visible_row_index(idx)
+        if 0 <= vis_row < len(el_table.rows):
+            el_table.rows[vis_row].selected = True
         if el and state["browser_driver"]:
             try: state["browser_driver"].execute_script(HIGHLIGHT_JS, el["selector"])
             except Exception: pass
@@ -1683,7 +1683,10 @@ def _main_inner(page: ft.Page):
     def close_br(e):
         close_browser(); el_table.rows.clear(); state["browser_elements"].clear()
         el_status.value = "閉じた"; page.update()
-    def sync_url(e): browser_url.value = state["config"].get("url",""); page.update()
+    def sync_url(e):
+        pg = cur_page()
+        browser_url.value = pg.get("url", "") if pg else ""
+        page.update()
 
     # ================================================================
     # Tab 2: Pattern Sets
@@ -2126,7 +2129,7 @@ def _main_inner(page: ft.Page):
             ft.Row([browser_url, browser_wait], spacing=4),
             ft.Row([browser_url_dd, ft.OutlinedButton("保存済みを読込", on_click=load_bank)], spacing=4),
             ft.Row([load_btn, ft.OutlinedButton("閉じる", on_click=close_br),
-                    ft.TextButton("設定URLを使う", icon=ft.Icons.SYNC, on_click=sync_url)], spacing=4, wrap=True),
+                    ft.TextButton("ページURLを使う", icon=ft.Icons.SYNC, on_click=sync_url)], spacing=4, wrap=True),
             ft.Row([el_search, el_show_hidden], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             el_status,
             ft.Container(ft.Column([el_table], scroll=ft.ScrollMode.AUTO),

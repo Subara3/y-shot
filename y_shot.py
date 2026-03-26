@@ -1991,7 +1991,6 @@ def _main_inner(page: ft.Page):
     # ── Settings / Info / Run ──
     def show_settings(e):
         c = state["config"]
-        uf = ft.TextField(label="デフォルトURL（ページ未設定時に使用）", value=c.get("url",""), width=450)
         auf = ft.TextField(label="Basic認証ID", value=c.get("basic_auth_user",""), width=210)
         apf = ft.TextField(label="パスワード", value=c.get("basic_auth_pass",""), password=True, width=210)
         of = ft.TextField(label="出力フォルダ", value=c.get("output_dir", os.path.join(get_app_dir(), "screenshots")), width=450)
@@ -1999,14 +1998,14 @@ def _main_inner(page: ft.Page):
         ss = ft.Checkbox(label="HTMLソース保存 (diff比較用)", value=c.get("save_source")=="1")
         def on_ok(e):
             try:
-                state["config"].update({"url":uf.value,"basic_auth_user":auf.value,"basic_auth_pass":apf.value,
+                state["config"].update({"basic_auth_user":auf.value,"basic_auth_pass":apf.value,
                     "output_dir":of.value,"headless":"1" if hl.value else "0",
                     "save_source":"1" if ss.value else "0"})
                 save_config(state["config"]); snack("設定保存")
                 refresh_test_list(False); page.update(); close_dlg(dlg)
             except Exception as x: _log_error("show_settings", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("設定"),
-            content=ft.Column([uf, ft.Row([auf, apf], spacing=10), of, hl, ss], tight=True, spacing=12, width=500),
+            content=ft.Column([ft.Row([auf, apf], spacing=10), of, hl, ss], tight=True, spacing=12, width=500),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
@@ -2021,12 +2020,10 @@ def _main_inner(page: ft.Page):
     def _do_run(test_cases_to_run, run_label=""):
         c = state["config"]
         # URL check: global, page, or test-level URL must exist somewhere
-        has_any_url = bool(c.get("url","").strip())
-        if not has_any_url:
-            has_any_url = any(p.get("url","").strip() for p in state["pages"])
+        has_any_url = any(p.get("url","").strip() for p in state["pages"])
         if not has_any_url:
             has_any_url = any(t.get("url","").strip() for t in test_cases_to_run)
-        if not has_any_url: snack("URL未設定（全体/ページ/テストいずれかに設定してください）", ft.Colors.RED_600); return
+        if not has_any_url: snack("URL未設定（ページまたはテストケースに設定してください）", ft.Colors.RED_600); return
         if not test_cases_to_run: snack("テストケース0件", ft.Colors.RED_600); return
         close_browser()
         stop_ev = threading.Event(); state["stop_event"] = stop_ev

@@ -453,8 +453,20 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         driver = webdriver.Chrome(options=opts); driver.set_window_size(1280, 900)
         if driver_ref is not None: driver_ref.append(driver)
         ba = config.get("basic_auth_user","").strip()
-        base = build_auth_url(config["url"], ba, config.get("basic_auth_pass",""))
+        global_url = config.get("url", "")
         if ba: log_cb("[INFO] Basic認証を設定")
+        # Build page URL lookup: page_id -> url
+        _page_urls = {}
+        for pg in (pages or []):
+            pu = pg.get("url", "").strip()
+            if pu: _page_urls[pg["_id"]] = pu
+        def _resolve_url(tc):
+            """Resolve start URL: test URL > page URL > global URL."""
+            tc_url = tc.get("url", "").strip()
+            if tc_url: return tc_url
+            pg_url = _page_urls.get(tc.get("page_id", ""), "")
+            if pg_url: return pg_url
+            return global_url
         outdir_base = config.get("output_dir", os.path.join(get_app_dir(), "screenshots"))
         ts = datetime.now().strftime("%Y%m%d%H%M%S")
         outdir = os.path.join(outdir_base, ts)
@@ -507,7 +519,11 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                     log_cb("[中断] ユーザーにより中断されました"); break
                 label, value = pat.get("label",f"p{pi:03d}"), pat.get("value","")
                 log_cb(f"--- [{pi}/{len(pats)}] {label} ({len(value)}文字) ---")
-                driver.get(base)
+                tc_start_url = _resolve_url(tc)
+                if not tc_start_url:
+                    log_cb(f"  [WARN] URL未設定 - スキップ"); continue
+                tc_base = build_auth_url(tc_start_url, ba, config.get("basic_auth_pass","")) if ba else tc_start_url
+                driver.get(tc_base)
                 try: WebDriverWait(driver, 15).until(lambda d: d.execute_script("return document.readyState") == "complete")
                 except Exception: pass
                 sc = 0
@@ -878,12 +894,16 @@ def _main_inner(page: ft.Page):
                 if "-" in num:
                     try: tc["_sub_number"] = int(num.split("-", 1)[1])
                     except (ValueError, IndexError): pass
+        _global_url = state["config"].get("url", "")
         for pg in state["pages"]:
             # Migration: start_num (v1.7 early) -> start_number
             if "start_num" in pg and "start_number" not in pg:
                 pg["start_number"] = pg.pop("start_num")
             elif "start_number" not in pg:
                 pg["start_number"] = 1
+            # Migration v1.8: copy global URL to pages that don't have one
+            if "url" not in pg and _global_url:
+                pg["url"] = _global_url
         auto_number_tests()
         state["selected_page"] = state["pages"][0]["_id"]
 
@@ -970,7 +990,9 @@ def _main_inner(page: ft.Page):
         pg = cur_page()
         if pg:
             n_tests = len(tests_for_page(pg["_id"]))
-            page_info_label.value = f"{n_tests}件 | 開始No.{pg.get('start_number', 1)}"
+            pg_url = pg.get("url","")
+            url_hint = pg_url[:40] + "..." if len(pg_url) > 40 else pg_url
+            page_info_label.value = f"{n_tests}件 | {url_hint}" if url_hint else f"{n_tests}件"
         else:
             page_info_label.value = ""
         if update: page.update()
@@ -984,7 +1006,8 @@ def _main_inner(page: ft.Page):
 
     def add_page(e):
         next_num = str(len(state["pages"]) + 1)
-        nf = ft.TextField(label="ページ名", width=300, value=f"ページ{next_num}")
+        nf = ft.TextField(label="ページ名", width=350, value=f"ページ{next_num}")
+        url_f = ft.TextField(label="起点URL", width=450, hint_text="空欄なら全体設定のURLを使用")
         numf = ft.TextField(label="ページ番号", width=100, value=next_num)
         startf = ft.TextField(label="テスト開始番号", width=100, value="1", hint_text="この番号から連番")
         def on_ok(e):
@@ -996,7 +1019,8 @@ def _main_inner(page: ft.Page):
                     snack(f"番号 {num} は既に使用されています", ft.Colors.RED_600); return
                 try: start = int(startf.value.strip() or "1")
                 except ValueError: snack("開始番号は整数で", ft.Colors.RED_600); return
-                new_pg = {"_id": _new_page_id(), "name": name, "number": num, "start_number": start}
+                new_pg = {"_id": _new_page_id(), "name": name, "number": num, "start_number": start,
+                          "url": url_f.value.strip()}
                 state["pages"].append(new_pg)
                 state["selected_page"] = new_pg["_id"]
                 auto_number_tests()
@@ -1004,14 +1028,15 @@ def _main_inner(page: ft.Page):
                 page.update(); close_dlg(dlg)
             except Exception as x: _log_error("add_page", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("ページ追加"),
-            content=ft.Column([nf, ft.Row([numf, startf], spacing=10)], tight=True, spacing=10, width=350),
+            content=ft.Column([nf, url_f, ft.Row([numf, startf], spacing=10)], tight=True, spacing=10, width=500),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
     def edit_page(e):
         pg = cur_page()
         if not pg: snack("ページを選択してください", ft.Colors.ORANGE_600); return
-        nf = ft.TextField(label="ページ名", width=300, value=pg["name"])
+        nf = ft.TextField(label="ページ名", width=350, value=pg["name"])
+        url_f = ft.TextField(label="起点URL", width=450, value=pg.get("url",""), hint_text="空欄なら全体設定のURLを使用")
         numf = ft.TextField(label="ページ番号", width=100, value=pg["number"])
         startf = ft.TextField(label="テスト開始番号", width=100, value=str(pg.get("start_number", 1)))
         def on_ok(e):
@@ -1024,12 +1049,13 @@ def _main_inner(page: ft.Page):
                 try: start = int(startf.value.strip() or "1")
                 except ValueError: snack("開始番号は整数で", ft.Colors.RED_600); return
                 pg["name"] = name; pg["number"] = num; pg["start_number"] = start
+                pg["url"] = url_f.value.strip()
                 auto_number_tests()
                 refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
                 page.update(); close_dlg(dlg)
             except Exception as x: _log_error("edit_page", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("ページ編集"),
-            content=ft.Column([nf, ft.Row([numf, startf], spacing=10)], tight=True, spacing=10, width=350),
+            content=ft.Column([nf, url_f, ft.Row([numf, startf], spacing=10)], tight=True, spacing=10, width=500),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
@@ -1257,10 +1283,13 @@ def _main_inner(page: ft.Page):
         pf = ft.Dropdown(label="パターンセット", width=350, value=tc.get("pattern") or "なし", options=pat_opts)
         page_opts = [ft.dropdown.Option(key=pg2["_id"], text=f"{pg2['number']} {pg2['name']}") for pg2 in state["pages"]]
         page_dd_edit = ft.Dropdown(label="ページ", width=350, value=tc.get("page_id", ""), options=page_opts)
+        tc_url_f = ft.TextField(label="開始URL（空欄でページURLを使用）", width=450, value=tc.get("url",""),
+                                hint_text="個別URLが必要な場合のみ")
         def on_ok(e):
             try:
                 tc["name"] = nf.value
                 tc["pattern"] = None if pf.value == "なし" else pf.value
+                tc["url"] = tc_url_f.value.strip()
                 new_pid = page_dd_edit.value
                 if new_pid and new_pid != tc.get("page_id"):
                     tc["page_id"] = new_pid; state["selected_page"] = new_pid
@@ -1281,7 +1310,7 @@ def _main_inner(page: ft.Page):
                        spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Text("枝番を指定すると、以降のテストも自動で連番になります。空欄で自動。",
                          size=11, color=ft.Colors.GREY_500),
-                page_dd_edit, pf], tight=True, spacing=10, width=400),
+                page_dd_edit, tc_url_f, pf], tight=True, spacing=10, width=500),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
@@ -1962,7 +1991,7 @@ def _main_inner(page: ft.Page):
     # ── Settings / Info / Run ──
     def show_settings(e):
         c = state["config"]
-        uf = ft.TextField(label="対象URL", value=c.get("url",""), width=450)
+        uf = ft.TextField(label="デフォルトURL（ページ未設定時に使用）", value=c.get("url",""), width=450)
         auf = ft.TextField(label="Basic認証ID", value=c.get("basic_auth_user",""), width=210)
         apf = ft.TextField(label="パスワード", value=c.get("basic_auth_pass",""), password=True, width=210)
         of = ft.TextField(label="出力フォルダ", value=c.get("output_dir", os.path.join(get_app_dir(), "screenshots")), width=450)
@@ -1991,7 +2020,13 @@ def _main_inner(page: ft.Page):
 
     def _do_run(test_cases_to_run, run_label=""):
         c = state["config"]
-        if not c.get("url"): snack("URL未設定", ft.Colors.RED_600); return
+        # URL check: global, page, or test-level URL must exist somewhere
+        has_any_url = bool(c.get("url","").strip())
+        if not has_any_url:
+            has_any_url = any(p.get("url","").strip() for p in state["pages"])
+        if not has_any_url:
+            has_any_url = any(t.get("url","").strip() for t in test_cases_to_run)
+        if not has_any_url: snack("URL未設定（全体/ページ/テストいずれかに設定してください）", ft.Colors.RED_600); return
         if not test_cases_to_run: snack("テストケース0件", ft.Colors.RED_600); return
         close_browser()
         stop_ev = threading.Event(); state["stop_event"] = stop_ev

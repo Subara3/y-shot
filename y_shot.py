@@ -1763,6 +1763,9 @@ def _main_inner(page: ft.Page):
                                 pn = pat_select.value
                                 if not pn or pn not in state["pattern_sets"]:
                                     snack("パターンセットを選択", ft.Colors.RED_700); return
+                                existing = tc.get("pattern")
+                                if existing and existing != pn:
+                                    snack(f"このテストには既に「{existing}」が設定されています（1テスト1パターン）", ft.Colors.RED_700); return
                                 step["value"] = "{パターン}"; tc["pattern"] = pn
                     elif t == "選択":
                         if val_mode.value == "手入力": step["value"] = val_field.value
@@ -1770,6 +1773,9 @@ def _main_inner(page: ft.Page):
                             pn = pat_select.value
                             if not pn or pn not in state["pattern_sets"]:
                                 snack("パターンセットを選択", ft.Colors.RED_700); return
+                            existing = tc.get("pattern")
+                            if existing and existing != pn:
+                                snack(f"このテストには既に「{existing}」が設定されています（1テスト1パターン）", ft.Colors.RED_700); return
                             step["value"] = "{パターン}"; tc["pattern"] = pn
                 elif t == "戻る":
                     try: step["seconds"] = str(float(sec_field.value))

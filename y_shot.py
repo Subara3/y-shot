@@ -75,6 +75,18 @@ def collect_elements_python(driver, include_hidden=False):
             if not hint and tag == "a":
                 href = el.get_attribute("href") or ""
                 if href: hint = href.split("?")[0][-50:]
+            if (not hint or hint == (el.get_attribute("value") or "")) and tag == "input" and etype in ("checkbox", "radio"):
+                try:
+                    label_text = driver.execute_script(
+                        "var e=arguments[0];"
+                        "var p=e.closest('label');"
+                        "if(p){var c=p.textContent.trim();if(c)return c;}"
+                        "var id=e.id;"
+                        "if(id){var l=document.querySelector('label[for=\"'+id+'\"]');"
+                        "if(l)return l.textContent.trim();}"
+                        "return '';", el) or ""
+                    if label_text: hint = label_text[:50]
+                except Exception: pass
             entry = {"selector": sel, "tag": tag, "type": etype, "name": ename, "id": eid, "hint": hint, "visible": visible, "hidden_reason": ""}
             if not visible:
                 hidden_els.append((len(results), el))

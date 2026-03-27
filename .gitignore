@@ -8,6 +8,9 @@ y_shot_selectors.json
 y_shot_steps.json
 y_shot_pages.json
 
+# プロジェクトファイル (環境固有情報を含む)
+*.yshot.json
+
 # スクリーンショット出力
 screenshots/
 

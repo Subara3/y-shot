@@ -17,6 +17,12 @@ APP_NAME = "y-shot"
 APP_VERSION = "2.1"
 APP_AUTHOR = "Yuri Norimatsu"
 
+# ── Constants ──
+LOG_MAX_LINES = 400
+SAVE_DELAY_SEC = 2.0
+BANK_MAX_URLS = 50
+WIN_CREATE_NO_WINDOW = 0x08000000  # subprocess: hide console window on Windows
+
 # ── File logger (log/YYYYMMDD.log, append) ──
 def _setup_file_logger():
     _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)) if not getattr(sys, 'frozen', False)
@@ -1144,7 +1150,7 @@ def _main_inner(page: ft.Page):
             with _save_lock:
                 try: save_all()
                 except Exception: pass
-        _save_timer[0] = threading.Timer(2.0, do_save)
+        _save_timer[0] = threading.Timer(SAVE_DELAY_SEC, do_save)
         _save_timer[0].daemon = True; _save_timer[0].start()
 
     def log(msg):
@@ -1154,7 +1160,7 @@ def _main_inner(page: ft.Page):
         elif "[WARN]" in msg: color = ft.Colors.ORANGE_700
         else: color = ft.Colors.GREY_700
         log_list.controls.append(ft.Text(f"[{ts}] {msg}", size=11, selectable=True, font_family="Consolas", color=color))
-        if len(log_list.controls) > 400: log_list.controls.pop(0)
+        if len(log_list.controls) > LOG_MAX_LINES: log_list.controls.pop(0)
         try: page.update()
         except Exception: pass
     def _log_error(context, exc):
@@ -1237,8 +1243,7 @@ def _main_inner(page: ft.Page):
         # Auto-sync browser URL to selected page
         pg = cur_page()
         if pg and pg.get("url", ""):
-            try: browser_url.value = pg["url"]
-            except NameError: pass
+            browser_url.value = pg["url"]
         page.update()
 
     def add_page(e):
@@ -1910,12 +1915,11 @@ def _main_inner(page: ft.Page):
             bank = state["selector_bank"]
             bank[url.split("?")[0]] = [el for el in elems if el.get("visible", True)]
             # A4: LRU limit — keep only newest 50 URLs
-            _BANK_MAX = 50
-            if len(bank) > _BANK_MAX:
+            if len(bank) > BANK_MAX_URLS:
                 keys = list(bank.keys())
-                for old_key in keys[:len(keys) - _BANK_MAX]:
+                for old_key in keys[:len(keys) - BANK_MAX_URLS]:
                     del bank[old_key]
-        filter_el_table(); update_url_dd()
+        filter_el_table(); schedule_save()
         # Debug: report checkbox/radio hint coverage
         cb_radio = [e for e in elems if e.get("type", "").lower() in ("checkbox", "radio")]
         cb_with_hint = [e for e in cb_radio if e.get("hint", "") and e["hint"] != e.get("type", "")]
@@ -1930,8 +1934,10 @@ def _main_inner(page: ft.Page):
             log(f"[ERROR] DOM再取得失敗: {x}")
         finally: _el_loading_end()
     def on_el_sort_change(key):
-        el_sort_dd.data = key
-        filter_el_table()
+        try:
+            el_sort_dd.data = key
+            filter_el_table()
+        except Exception as x: _log_error("on_el_sort_change", x)
 
     def filter_el_table(update=True):
         """Filter and display elements based on search text, hidden visibility, and sort."""
@@ -1942,9 +1948,7 @@ def _main_inner(page: ft.Page):
         total_count = len(state["browser_elements"])
         hidden_count = sum(1 for el in state["browser_elements"] if not el.get("visible", True))
         # Build sorted index
-        sort_key = "dom"
-        try: sort_key = el_sort_dd.data or "dom"
-        except NameError: pass
+        sort_key = el_sort_dd.data or "dom"
         indexed_els = list(enumerate(state["browser_elements"]))
         if sort_key == "tag":
             indexed_els.sort(key=lambda x: (x[1].get("tag",""), x[1].get("type","")))
@@ -1996,10 +2000,6 @@ def _main_inner(page: ft.Page):
         if update:
             try: page.update()
             except Exception: pass
-    def _update_bank_urls():
-        """No-op: bank URLs are read directly from state on dialog open."""
-        pass
-    update_url_dd = _update_bank_urls  # keep existing call sites working
     def show_bank_dlg(e):
         """Show saved selector bank history in a dialog."""
         bank = state["selector_bank"]
@@ -2111,10 +2111,11 @@ def _main_inner(page: ft.Page):
             actions=[ft.TextButton("閉じる", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg, modal=False)
     def on_el_search_change(e):
-        """Re-filter table when search text changes."""
-        filter_el_table()
+        try: filter_el_table()
+        except Exception as x: _log_error("on_el_search_change", x)
     def on_show_hidden_change(e):
-        filter_el_table()
+        try: filter_el_table()
+        except Exception as x: _log_error("on_show_hidden_change", x)
     def quick_add(stype):
         tc = cur_test()
         if not tc: snack("テストケースを選択", ft.Colors.ORANGE_700); return
@@ -3050,7 +3051,7 @@ def _main_inner(page: ft.Page):
             try:
                 result = _sp.run(
                     ['wmic', 'process', 'where', f'ParentProcessId={my_pid}', 'get', 'ProcessId'],
-                    capture_output=True, text=True, timeout=3, creationflags=0x08000000)
+                    capture_output=True, text=True, timeout=3, creationflags=WIN_CREATE_NO_WINDOW)
                 for line in result.stdout.strip().split('\n'):
                     cpid = line.strip()
                     if cpid.isdigit() and cpid != str(my_pid):
@@ -3062,7 +3063,7 @@ def _main_inner(page: ft.Page):
                 try:
                     ps_cmd = f"Get-CimInstance Win32_Process -Filter 'ParentProcessId={my_pid}' | Select-Object -ExpandProperty ProcessId"
                     result = _sp.run(['powershell', '-NoProfile', '-Command', ps_cmd],
-                        capture_output=True, text=True, timeout=5, creationflags=0x08000000)
+                        capture_output=True, text=True, timeout=5, creationflags=WIN_CREATE_NO_WINDOW)
                     for line in result.stdout.strip().split('\n'):
                         cpid = line.strip()
                         if cpid.isdigit() and cpid != str(my_pid):
@@ -3073,7 +3074,7 @@ def _main_inner(page: ft.Page):
             for cpid in child_pids:
                 try:
                     _sp.run(['taskkill', '/F', '/T', '/PID', cpid],
-                            capture_output=True, timeout=3, creationflags=0x08000000)
+                            capture_output=True, timeout=3, creationflags=WIN_CREATE_NO_WINDOW)
                 except Exception:
                     pass
             if child_pids:

@@ -158,13 +158,13 @@ def _build_selector(driver, el, tag, eid, ename):
         try:
             if len(driver.find_elements(By.CSS_SELECTOR, s)) == 1: return s
         except Exception: pass
-        # checkbox/radio: disambiguate by value (allow small duplicates e.g. PC/SP dual forms)
+        # checkbox/radio: disambiguate by value (type+name+value is semantically unique)
         if etype in ("checkbox", "radio"):
             val = el.get_attribute("value") or ""
             if val:
                 s = f'{tag}[type="{etype}"][name="{safe_name}"][value="{_css_escape_attr(val)}"]'
                 try:
-                    if len(driver.find_elements(By.CSS_SELECTOR, s)) <= 3: return s
+                    if driver.find_elements(By.CSS_SELECTOR, s): return s
                 except Exception: pass
     classes = (el.get_attribute("class") or "").strip()
     if classes:

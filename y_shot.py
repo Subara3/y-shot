@@ -776,10 +776,13 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         sc += 1; gss += 1; mode = step.get("mode","fullpage"); sel = step.get("selector","")
                         if tc_outdir is None: tc_outdir = _ensure_page_dir(tc_pid)
                         safe_tc = _safe_filename(tc_name, 20)
-                        safe_label = _safe_filename(label, 30)
                         safe_number = _safe_filename(tc_number, 10) if tc_number else ""
                         num_prefix = f"{safe_number}_" if safe_number else ""
-                        fn = f"{gss:03d}_{num_prefix}{safe_tc}_p{pi:02d}_{safe_label}_ss{sc}.png"
+                        if len(pats) > 1:
+                            safe_label = _safe_filename(label, 30)
+                            fn = f"{gss:03d}_{num_prefix}{safe_tc}_{safe_label}_ss{sc}.png"
+                        else:
+                            fn = f"{gss:03d}_{num_prefix}{safe_tc}_ss{sc}.png"
                         fp = os.path.join(tc_outdir, fn)
                         try:
                             if mode == "element" and sel:

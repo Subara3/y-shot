@@ -1928,20 +1928,29 @@ def _main_inner(page: ft.Page):
         if update:
             try: page.update()
             except Exception: pass
-    def update_url_dd():
-        ex = {o.key for o in browser_url_dd.options}
-        for u in state["selector_bank"]:
-            if u not in ex: browser_url_dd.options.append(ft.dropdown.Option(u))
-        page.update()
-    def on_url_dd_sel(e): browser_url.value = browser_url_dd.value; page.update()
-    def load_bank(e):
-        url = browser_url_dd.value or browser_url.value
-        if not url: return
-        clean = url.split("?")[0]
-        if clean in state["selector_bank"]:
-            elems = state["selector_bank"][clean]; state["browser_elements"] = list(elems)
-            filter_el_table(); snack(f"バンク {len(elems)} 要素")
-        else: snack("未保存URL", ft.Colors.ORANGE_600)
+    def _update_bank_urls():
+        """No-op: bank URLs are read directly from state on dialog open."""
+        pass
+    update_url_dd = _update_bank_urls  # keep existing call sites working
+    def show_bank_dlg(e):
+        """Show saved selector bank history in a dialog."""
+        bank = state["selector_bank"]
+        if not bank: snack("保存済みURLなし", ft.Colors.ORANGE_600); return
+        def on_select(url):
+            clean = url.split("?")[0]
+            if clean in bank:
+                state["browser_elements"] = list(bank[clean])
+                browser_url.value = url
+                filter_el_table(); snack(f"バンク {len(bank[clean])} 要素")
+            close_dlg(dlg)
+        items = ft.Column([
+            ft.TextButton(u, on_click=lambda e, u=u: on_select(u), tooltip=f"{len(bank[u])} 要素")
+            for u in bank.keys()
+        ], spacing=2, scroll=ft.ScrollMode.AUTO, height=300, width=450)
+        dlg = ft.AlertDialog(title=ft.Text("保存済みURL"),
+            content=items,
+            actions=[ft.TextButton("閉じる", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg, modal=False)
     def _el_visible_row_index(target_idx):
         """Map a browser_elements index to the corresponding visible row index in el_table."""
         query = (el_search.value or "").strip().lower()
@@ -1984,16 +1993,6 @@ def _main_inner(page: ft.Page):
         """Re-filter table when search text changes."""
         filter_el_table()
     def on_show_hidden_change(e):
-        """Toggle hidden element visibility and re-filter."""
-        el_show_hidden.value = not el_show_hidden.value
-        if el_show_hidden.value:
-            el_show_hidden.icon = ft.Icons.VISIBILITY
-            el_show_hidden.icon_color = ft.Colors.BLUE_600
-            el_show_hidden.tooltip = "非表示要素を隠す"
-        else:
-            el_show_hidden.icon = ft.Icons.VISIBILITY_OFF
-            el_show_hidden.icon_color = ft.Colors.GREY_400
-            el_show_hidden.tooltip = "非表示要素を表示"
         filter_el_table()
     def quick_add(stype):
         tc = cur_test()
@@ -2662,18 +2661,14 @@ def _main_inner(page: ft.Page):
         _init_pg = cur_page()
         if _init_pg: _init_browser_url = _init_pg.get("url", "")
     browser_url = ft.TextField(label="URL", expand=True, dense=True, value=_init_browser_url)
-    browser_url_dd = ft.Dropdown(label="履歴", expand=True, dense=True,
-        options=[ft.dropdown.Option(u) for u in state["selector_bank"].keys()], on_select=on_url_dd_sel)
     browser_wait = ft.TextField(label="秒", width=55, dense=True, value=cfg.get("browser_wait","3.0"))
     load_btn = ft.Button("読込", icon=ft.Icons.DOWNLOAD, on_click=load_page_click)
     el_loading = ft.ProgressRing(width=14, height=14, stroke_width=2, visible=False)
     el_status = ft.Text("未読込", size=11, color=ft.Colors.GREY_500)
     el_search = ft.TextField(label="検索", expand=True, dense=True, hint_text="セレクタ/id/name/ヒント",
                              on_change=on_el_search_change, prefix_icon=ft.Icons.SEARCH)
-    el_show_hidden = ft.IconButton(ft.Icons.VISIBILITY_OFF, tooltip="非表示要素を表示", icon_size=18,
-                                    icon_color=ft.Colors.GREY_400, on_click=on_show_hidden_change)
-    el_show_hidden.value = False  # track toggle state
-    el_sort_dd = ft.Dropdown(label="並び", width=100, dense=True, value="dom",
+    el_show_hidden = ft.Checkbox(label="非表示", value=False, on_change=on_show_hidden_change)
+    el_sort_dd = ft.Dropdown(width=95, dense=True, value="dom",
         options=[ft.dropdown.Option(key="dom", text="DOM順"),
                  ft.dropdown.Option(key="tag", text="タグ別"),
                  ft.dropdown.Option(key="type", text="type別"),
@@ -2782,8 +2777,8 @@ def _main_inner(page: ft.Page):
         ], expand=3, spacing=6),
         ft.Container(ft.Column([
             ft.Text("要素ブラウザ", weight=ft.FontWeight.BOLD, size=13),
-            ft.Row([browser_url, browser_wait], spacing=4),
-            ft.Row([browser_url_dd, ft.OutlinedButton("読込", on_click=load_bank)], spacing=4),
+            ft.Row([browser_url, browser_wait,
+                    ft.IconButton(ft.Icons.HISTORY, tooltip="保存済みURL", icon_size=18, on_click=show_bank_dlg)], spacing=4),
             ft.Row([load_btn, ft.OutlinedButton("DOM再取得", icon=ft.Icons.REFRESH, on_click=reload_dom_click),
                     ft.OutlinedButton("閉じる", on_click=close_br)], spacing=4, wrap=True),
             ft.Row([el_search, el_sort_dd, el_show_hidden], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),

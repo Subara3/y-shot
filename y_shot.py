@@ -68,7 +68,13 @@ def collect_elements_python(driver, include_hidden=False):
             sel = _build_selector(driver, el, tag, eid, ename)
             if sel in seen: continue; seen.add(sel)
             hint = (el.get_attribute("placeholder") or el.get_attribute("alt") or
-                    (el.text or "").strip()[:50] or (el.get_attribute("value") or "")[:30])
+                    el.get_attribute("title") or
+                    (el.text or "").strip()[:50] or
+                    (el.get_attribute("textContent") or "").strip()[:50] or
+                    (el.get_attribute("value") or "")[:30])
+            if not hint and tag == "a":
+                href = el.get_attribute("href") or ""
+                if href: hint = href.split("?")[0][-50:]
             entry = {"selector": sel, "tag": tag, "type": etype, "name": ename, "id": eid, "hint": hint, "visible": visible, "hidden_reason": ""}
             if not visible:
                 hidden_els.append((len(results), el))

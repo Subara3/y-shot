@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bodyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF6B35"/>
+      <stop offset="100%" stop-color="#D32F2F"/>
+    </linearGradient>
+    <linearGradient id="tailGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF8A65"/>
+      <stop offset="100%" stop-color="#E64A19"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background circle -->
+  <circle cx="256" cy="256" r="240" fill="#1A1A2E" />
+  <circle cx="256" cy="256" r="220" fill="none" stroke="#FF6B35" stroke-width="3" opacity="0.3" />
+
+  <!-- Shrimp body — geometric curved segments -->
+  <!-- Main body arc (6 segments) -->
+  <path d="M 310 150
+           Q 340 170, 335 200
+           Q 330 230, 300 250
+           Q 270 270, 240 285
+           Q 210 300, 185 310
+           Q 160 320, 145 325"
+        fill="none" stroke="url(#bodyGrad)" stroke-width="52" stroke-linecap="round" />
+
+  <!-- Body segment lines (geometric cuts) -->
+  <line x1="332" y1="185" x2="300" y2="205" stroke="#1A1A2E" stroke-width="3" opacity="0.6" />
+  <line x1="322" y1="220" x2="288" y2="235" stroke="#1A1A2E" stroke-width="3" opacity="0.6" />
+  <line x1="300" y1="248" x2="265" y2="260" stroke="#1A1A2E" stroke-width="3" opacity="0.6" />
+  <line x1="270" y1="272" x2="238" y2="282" stroke="#1A1A2E" stroke-width="3" opacity="0.6" />
+  <line x1="237" y1="290" x2="208" y2="300" stroke="#1A1A2E" stroke-width="3" opacity="0.6" />
+
+  <!-- Head — angular geometric shape -->
+  <path d="M 310 150
+           Q 330 130, 340 115
+           L 355 105
+           Q 365 115, 355 135
+           Q 345 150, 335 160
+           Q 325 165, 310 155"
+        fill="url(#bodyGrad)" stroke="none" />
+
+  <!-- Eye -->
+  <circle cx="340" cy="125" r="8" fill="#FFFFFF" />
+  <circle cx="342" cy="123" r="4" fill="#1A1A2E" />
+
+  <!-- Antenna 1 — geometric line -->
+  <line x1="350" y1="108" x2="390" y2="65" stroke="#FF8A65" stroke-width="4" stroke-linecap="round" />
+  <circle cx="390" cy="65" r="5" fill="#FF8A65" />
+
+  <!-- Antenna 2 -->
+  <line x1="355" y1="105" x2="405" y2="85" stroke="#FF8A65" stroke-width="3" stroke-linecap="round" />
+  <circle cx="405" cy="85" r="4" fill="#FF8A65" />
+
+  <!-- Tail fan — geometric angular -->
+  <path d="M 145 325 L 105 340 L 95 370 L 115 355 Z" fill="url(#tailGrad)" />
+  <path d="M 145 325 L 120 350 L 115 385 L 135 365 Z" fill="url(#tailGrad)" opacity="0.85" />
+  <path d="M 145 325 L 140 360 L 145 395 L 155 370 Z" fill="url(#tailGrad)" opacity="0.7" />
+
+  <!-- Legs — small geometric lines -->
+  <line x1="300" y1="250" x2="310" y2="290" stroke="#FF8A65" stroke-width="3" stroke-linecap="round" />
+  <line x1="275" y1="265" x2="282" y2="305" stroke="#FF8A65" stroke-width="3" stroke-linecap="round" />
+  <line x1="250" y1="280" x2="255" y2="318" stroke="#FF8A65" stroke-width="3" stroke-linecap="round" />
+  <line x1="222" y1="292" x2="225" y2="328" stroke="#FF8A65" stroke-width="3" stroke-linecap="round" />
+
+  <!-- Geometric accent — hexagonal highlight -->
+  <polygon points="180,180 200,170 210,185 200,200 180,200 170,185"
+           fill="#FF6B35" opacity="0.15" />
+  <polygon points="130,260 145,252 153,264 145,276 130,276 122,264"
+           fill="#FF6B35" opacity="0.1" />
+</svg>

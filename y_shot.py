@@ -53,6 +53,8 @@ def collect_elements_python(driver, include_hidden=False):
            "[type='image'], img[onclick], [onclick], li[id], span[id], div[onclick]")
     try: elements = driver.find_elements(By.CSS_SELECTOR, css)
     except Exception: return results
+    # Pass 1: collect basic info
+    hidden_els = []  # (index_in_results, selenium_element)
     for el in elements:
         try:
             visible = el.is_displayed()
@@ -67,21 +69,34 @@ def collect_elements_python(driver, include_hidden=False):
             if sel in seen: continue; seen.add(sel)
             hint = (el.get_attribute("placeholder") or el.get_attribute("alt") or
                     (el.text or "").strip()[:50] or (el.get_attribute("value") or "")[:30])
-            hidden_reason = ""
+            entry = {"selector": sel, "tag": tag, "type": etype, "name": ename, "id": eid, "hint": hint, "visible": visible, "hidden_reason": ""}
             if not visible:
-                try:
-                    hidden_reason = driver.execute_script(
-                        "var e=arguments[0],s=window.getComputedStyle(e);"
-                        "if(s.display==='none')return 'display:none';"
-                        "if(s.visibility==='hidden')return 'visibility:hidden';"
-                        "if(parseFloat(s.opacity)===0)return 'opacity:0';"
-                        "var r=e.getBoundingClientRect();"
-                        "if(r.width===0&&r.height===0)return 'size:0';"
-                        "if(r.bottom<0||r.right<0)return 'off-viewport';"
-                        "return 'other';", el) or "other"
-                except Exception: hidden_reason = "unknown"
-            results.append({"selector": sel, "tag": tag, "type": etype, "name": ename, "id": eid, "hint": hint, "visible": visible, "hidden_reason": hidden_reason})
+                hidden_els.append((len(results), el))
+            results.append(entry)
         except Exception: continue
+    # Pass 2: batch JS for hidden reasons (single call instead of per-element)
+    if hidden_els:
+        batch_els = [el for _, el in hidden_els]
+        try:
+            reasons = driver.execute_script(
+                "var results=[];"
+                "for(var i=0;i<arguments.length;i++){"
+                "  var e=arguments[i];"
+                "  try{var s=window.getComputedStyle(e);"
+                "  if(s.display==='none'){results.push('display:none');continue;}"
+                "  if(s.visibility==='hidden'){results.push('visibility:hidden');continue;}"
+                "  if(parseFloat(s.opacity)===0){results.push('opacity:0');continue;}"
+                "  var r=e.getBoundingClientRect();"
+                "  if(r.width===0&&r.height===0){results.push('size:0');continue;}"
+                "  if(r.bottom<0||r.right<0){results.push('off-viewport');continue;}"
+                "  results.push('other');}catch(x){results.push('unknown');}"
+                "}return results;", *batch_els) or []
+            for j, (idx, _) in enumerate(hidden_els):
+                if j < len(reasons):
+                    results[idx]["hidden_reason"] = reasons[j]
+        except Exception:
+            for idx, _ in hidden_els:
+                results[idx]["hidden_reason"] = "unknown"
     return results
 
 def _css_escape_attr(val):
@@ -233,10 +248,13 @@ def collect_element_options(driver, el_info):
 HIGHLIGHT_JS = ("(function(s){try{"
     "var p=document.getElementById('__yshot_hl');if(p)p.remove();"
     "if(window.__yshot_scroll_rm){window.removeEventListener('scroll',window.__yshot_scroll_rm,true);}"
-    "var e=document.querySelector(s);if(!e)return;"
+    "var all=document.querySelectorAll(s);"
+    "if(!all.length)return JSON.stringify({found:0});"
+    "var e=all[0];"
     "e.scrollIntoView({block:'center',behavior:'instant'});"
     "var r=e.getBoundingClientRect(),h=document.createElement('div');h.id='__yshot_hl';"
-    "h.style.cssText='position:fixed;border:3px solid #FF4444;background:rgba(255,68,68,0.15);"
+    "var color=all.length===1?'#FF4444':'#FF8800';"
+    "h.style.cssText='position:fixed;border:3px solid '+color+';background:rgba(255,68,68,0.15);"
     "z-index:2147483647;pointer-events:none;border-radius:3px;';"
     "h.style.top=r.top-3+'px';h.style.left=r.left-3+'px';"
     "h.style.width=r.width+6+'px';h.style.height=r.height+6+'px';"
@@ -247,7 +265,8 @@ HIGHLIGHT_JS = ("(function(s){try{"
     "window.removeEventListener('scroll',window.__yshot_scroll_rm,true);};"
     "window.addEventListener('scroll',window.__yshot_scroll_rm,true);"
     "},600);"
-    "}catch(x){}})(arguments[0]);")
+    "return JSON.stringify({found:all.length,tag:e.tagName,id:e.id||'',name:e.getAttribute('name')||''});"
+    "}catch(x){return JSON.stringify({found:0,error:x.message});}})(arguments[0]);")
 
 JS_SET_VALUE = (
     "(function(el,val){"
@@ -296,13 +315,15 @@ def build_auth_url(url, user, password):
     if p.port: nl += f":{p.port}"
     return urlunparse(p._replace(netloc=nl))
 
-STEP_TYPES = ["入力", "クリック", "選択", "待機", "要素待機", "スクショ", "戻る", "ナビゲーション", "見出し", "コメント"]
+STEP_TYPES = ["入力", "クリック", "選択", "待機", "要素待機", "スクロール", "スクショ", "戻る", "ナビゲーション", "見出し", "コメント"]
 STEP_ICONS = {"入力": ft.Icons.EDIT, "クリック": ft.Icons.MOUSE,
               "選択": ft.Icons.ARROW_DROP_DOWN_CIRCLE,
               "待機": ft.Icons.HOURGLASS_BOTTOM, "要素待機": ft.Icons.VISIBILITY,
+              "スクロール": ft.Icons.SWAP_VERT,
               "スクショ": ft.Icons.CAMERA_ALT,
               "戻る": ft.Icons.ARROW_BACK, "ナビゲーション": ft.Icons.OPEN_IN_BROWSER,
               "見出し": ft.Icons.TITLE, "コメント": ft.Icons.COMMENT}
+SCROLL_MODES = [("element", "要素へスクロール"), ("pixel", "ピクセル指定"), ("top", "先頭に戻る")]
 INPUT_MODES = [("overwrite", "上書き"), ("append", "追記"), ("clear", "クリアのみ")]
 
 def step_short(step):
@@ -331,6 +352,13 @@ def step_short(step):
         url = step.get("url","")
         return url[:40]+"..." if len(url) > 40 else url
     if t == "待機": return f"{step.get('seconds','1.0')}秒"
+    if t == "スクロール":
+        sm = step.get("scroll_mode", "element")
+        if sm == "top": return "先頭に戻る"
+        if sm == "pixel": return f"↓{step.get('scroll_px','0')}px"
+        sel = step.get("selector","")
+        if len(sel) > 25: sel = sel[:22]+"..."
+        return f"→ {sel}"
     if t == "要素待機":
         sel = step.get("selector",""); timeout = step.get("seconds","10")
         if len(sel) > 25: sel = sel[:22]+"..."
@@ -339,7 +367,7 @@ def step_short(step):
         m = step.get("mode","fullpage")
         if m == "fullpage": return "表示範囲"
         if m == "fullshot": return "ページ全体(縦長)"
-        if m == "margin": return f"要素+{step.get('margin_px','200')}px"
+        if m == "margin": return f"要素+{step.get('margin_px','500')}px"
         return "要素のみ"
     return str(step)
 
@@ -369,10 +397,10 @@ def _normalize_source(html):
         html = pattern.sub(repl, html)
     return html
 
-def _generate_report(outdir, log_cb):
+def _generate_report(outdir, log_cb, pages=None):
     """Generate an HTML report. Walks subdirectories for PNGs."""
     try:
-        all_pngs = []  # (relative_path, display_name)
+        all_pngs = []
         for root, dirs, files in os.walk(outdir):
             dirs[:] = [d for d in sorted(dirs) if not d.startswith("_")]
             for fn in sorted(files):
@@ -380,21 +408,39 @@ def _generate_report(outdir, log_cb):
                     rel = os.path.relpath(os.path.join(root, fn), outdir).replace("\\", "/")
                     all_pngs.append(rel)
         if not all_pngs: return
+        # Collect page URLs
+        url_lines = ""
+        if pages:
+            urls = [f'<li><strong>{pg.get("number","")}.{pg.get("name","")}</strong>: <a href="{pg.get("url","")}">{pg.get("url","")}</a></li>'
+                    for pg in pages if pg.get("url","")]
+            if urls: url_lines = '<h2>対象URL</h2><ul>' + ''.join(urls) + '</ul>'
         html = ['<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8">',
                 '<title>y-shot レポート</title>',
                 '<style>body{font-family:sans-serif;max-width:1200px;margin:0 auto;padding:20px;background:#f8f9fa}',
                 'h1{color:#333}h2{color:#555;margin-top:32px;border-bottom:2px solid #ddd;padding-bottom:4px}',
                 '.card{background:#fff;border-radius:8px;box-shadow:0 1px 4px rgba(0,0,0,.1);margin:16px 0;padding:16px}',
                 '.card img{max-width:100%;border:1px solid #ddd;border-radius:4px}',
-                '.card .name{font-weight:bold;color:#555;margin-bottom:8px;font-size:14px}</style></head><body>',
-                f'<h1>y-shot レポート</h1><p>{os.path.basename(outdir)} — {len(all_pngs)} 枚</p>']
+                '.card .name{font-weight:bold;color:#555;margin-bottom:8px;font-size:14px}',
+                '.card .meta{font-size:12px;color:#888;margin-bottom:6px}</style></head><body>',
+                f'<h1>y-shot レポート</h1><p>{os.path.basename(outdir)} — {len(all_pngs)} 枚</p>',
+                url_lines]
         cur_dir = None
         for rel in all_pngs:
             d = os.path.dirname(rel)
             if d != cur_dir:
                 cur_dir = d
                 if d: html.append(f'<h2>{d}</h2>')
-            html.append(f'<div class="card"><div class="name">{rel}</div><img src="{rel}" loading="lazy"></div>')
+            # A5: Parse filename for metadata
+            fn_base = os.path.splitext(os.path.basename(rel))[0]
+            parts = fn_base.split('_')
+            meta = ""
+            if len(parts) >= 4:
+                # Format: 001_番号_テスト名_p01_パターン_ss1
+                tc_num = parts[1] if len(parts) > 1 else ""
+                tc_name = parts[2] if len(parts) > 2 else ""
+                pat_label = parts[4] if len(parts) > 4 else ""
+                meta = f'<div class="meta">{tc_num} {tc_name} — {pat_label}</div>'
+            html.append(f'<div class="card">{meta}<div class="name">{rel}</div><img src="{rel}" loading="lazy"></div>')
         html.append('</body></html>')
         rp = os.path.join(outdir, "report.html")
         with open(rp, "w", encoding="utf-8") as f: f.write("\n".join(html))
@@ -425,6 +471,24 @@ def _generate_excel_report(outdir, log_cb, pages=None, test_cases=None, run_labe
         wb = Workbook()
         MAX_IMG_WIDTH = 800
 
+        # Write URL summary on a cover sheet
+        ws_cover = wb.active; ws_cover.title = "概要"
+        ws_cover.column_dimensions["A"].width = 20; ws_cover.column_dimensions["B"].width = 80
+        ws_cover.cell(row=1, column=1, value="y-shot レポート").font = ws_cover.cell(row=1, column=1).font.copy(bold=True, size=14)
+        ws_cover.cell(row=2, column=1, value="実行日時"); ws_cover.cell(row=2, column=2, value=os.path.basename(outdir))
+        ws_cover.cell(row=3, column=1, value="スクショ数"); ws_cover.cell(row=3, column=2, value=len(all_pngs))
+        if run_label: ws_cover.cell(row=4, column=1, value="実行ラベル"); ws_cover.cell(row=4, column=2, value=run_label)
+        row = 6
+        ws_cover.cell(row=row, column=1, value="対象URL").font = ws_cover.cell(row=row, column=1).font.copy(bold=True, size=12)
+        row += 1
+        if pages:
+            for pg in pages:
+                url = pg.get("url", "")
+                if url:
+                    ws_cover.cell(row=row, column=1, value=f"{pg.get('number','')}.{pg.get('name','')}")
+                    ws_cover.cell(row=row, column=2, value=url)
+                    row += 1
+
         def _write_sheet(ws, png_list):
             ws.column_dimensions["A"].width = 60; ws.column_dimensions["B"].width = 5
             current_row = 1
@@ -447,20 +511,15 @@ def _generate_excel_report(outdir, log_cb, pages=None, test_cases=None, run_labe
             groups.setdefault(key, []).append(item)
 
         if len(groups) > 1 or (len(groups) == 1 and "root" not in groups):
-            first_sheet = True
             for folder_name, pngs in groups.items():
                 sheet_name = folder_name[:31] if folder_name != "root" else "エビデンス"
-                # Avoid duplicate sheet names (Excel limitation)
                 _base, _n = sheet_name, 2
                 while sheet_name in [s.title for s in wb.worksheets]:
                     sheet_name = f"{_base[:28]}({_n})"; _n += 1
-                if first_sheet:
-                    ws = wb.active; ws.title = sheet_name; first_sheet = False
-                else:
-                    ws = wb.create_sheet(title=sheet_name)
+                ws = wb.create_sheet(title=sheet_name)
                 _write_sheet(ws, pngs)
         else:
-            ws = wb.active; ws.title = "エビデンス"
+            ws = wb.create_sheet(title="エビデンス")
             _write_sheet(ws, all_pngs)
 
         xp = os.path.join(outdir, "evidence.xlsx")
@@ -487,13 +546,24 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
     outdir = None
     try:
         opts = webdriver.ChromeOptions()
+        opts.add_argument("--ignore-certificate-errors")
+        opts.add_argument("--allow-insecure-localhost")
+        opts.add_argument("--disable-features=HttpsUpgrades")
         if config.get("headless") == "1":
             opts.add_argument("--headless=new")
             log_cb("[INFO] ヘッドレスモード")
         driver = webdriver.Chrome(options=opts); driver.set_window_size(1280, 900)
         if driver_ref is not None: driver_ref.append(driver)
         ba = config.get("basic_auth_user","").strip()
-        if ba: log_cb("[INFO] Basic認証を設定")
+        if ba:
+            import base64 as _b64_auth
+            _auth_token = _b64_auth.b64encode(f"{ba}:{config.get('basic_auth_pass','')}".encode()).decode()
+            try:
+                driver.execute_cdp_cmd("Network.enable", {})
+                driver.execute_cdp_cmd("Network.setExtraHTTPHeaders", {"headers": {"Authorization": f"Basic {_auth_token}"}})
+            except Exception:
+                pass  # Fallback: URL embedding will still be tried
+            log_cb("[INFO] Basic認証を設定 (CDP)")
         # Build page URL lookup: page_id -> url
         _page_urls = {}
         for pg in (pages or []):
@@ -515,24 +585,34 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
             total_pats += len(pattern_sets.get(pn, [])) if pn else 1
         done_pats = 0
 
-        # Build page lookup and create per-page subfolders
-        page_dirs = {}  # page_id -> directory path
-        save_source = config.get("save_source") == "1"
+        # Build page lookup — folders are created lazily on first use
+        page_dirs = {}  # page_id -> directory path (resolved, but not yet on disk)
+        save_source = config.get("save_source", "1") == "1"
         source_dirs = {}  # page_id -> _source subdirectory path
         source_root = os.path.join(outdir, "_source")
-        if save_source:
-            os.makedirs(source_root, exist_ok=True)
+        _needed_page_ids = set(tc.get("page_id", "") for tc in test_cases)
+        _page_dir_paths = {}  # page_id -> planned path (not yet created)
         if pages:
             for pg in pages:
+                if pg["_id"] not in _needed_page_ids: continue
                 pg_num = pg.get("number", "0")
                 pg_name = _safe_filename(pg.get("name", ""), 30)
-                pg_dir = os.path.join(outdir, f"{pg_num}_{pg_name}")
-                os.makedirs(pg_dir, exist_ok=True)
-                page_dirs[pg["_id"]] = pg_dir
+                _page_dir_paths[pg["_id"]] = os.path.join(outdir, f"{pg_num}_{pg_name}")
+        def _ensure_page_dir(pid):
+            """Create page output directory on first use and return its path."""
+            if pid in page_dirs:
+                return page_dirs[pid]
+            planned = _page_dir_paths.get(pid)
+            if planned:
+                os.makedirs(planned, exist_ok=True)
+                page_dirs[pid] = planned
                 if save_source:
-                    src_dir = os.path.join(source_root, f"{pg_num}_{pg_name}")
+                    os.makedirs(source_root, exist_ok=True)
+                    src_dir = os.path.join(source_root, os.path.basename(planned))
                     os.makedirs(src_dir, exist_ok=True)
-                    source_dirs[pg["_id"]] = src_dir
+                    source_dirs[pid] = src_dir
+                return planned
+            return outdir
 
         for tc_idx, tc in enumerate(test_cases, 1):
             if stop_event and stop_event.is_set():
@@ -544,9 +624,8 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
             pats = pattern_sets.get(pat_name, []) if pat_name else []
             if not pats:
                 pats = [{"label": "single", "value": ""}]
-            # Determine output directory: page subfolder or root
             tc_pid = tc.get("page_id")
-            tc_outdir = page_dirs.get(tc_pid, outdir)
+            tc_outdir = None  # resolved lazily on first screenshot
             log_cb(f"\n{'='*50}")
             log_cb(f"テストケース: {tc_number} {tc_name} ({len(pats)} パターン)")
             log_cb(f"{'='*50}")
@@ -564,8 +643,12 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                 try: WebDriverWait(driver, 15).until(lambda d: d.execute_script("return document.readyState") == "complete")
                 except Exception: pass
                 sc = 0
+                _step_failed = False
                 for si, step in enumerate(steps, 1):
                     if stop_event and stop_event.is_set(): break
+                    if _step_failed and step.get("type") != "スクショ":
+                        # Skip remaining steps after failure (except screenshots for evidence)
+                        continue
                     st = step["type"]
                     if st in ("見出し","コメント"):
                         if st == "見出し": log_cb(f"  ## {step.get('text','')}")
@@ -611,7 +694,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                 else:
                                     e.clear(); e.send_keys(iv)
                                 log_cb(f"  S{si} 入力: {sel}")
-                        except Exception as x: log_cb(f"  S{si} [WARN] 入力失敗: {x}")
+                        except Exception as x:
+                            log_cb(f"  S{si} [WARN] 入力失敗: {x}")
+                            _step_failed = True
                     elif st == "クリック":
                         sel = step.get("selector","").replace("{パターン}",value).replace("{pattern}",value)
                         try:
@@ -619,7 +704,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", _el)
                             _el.click()
                             log_cb(f"  S{si} クリック: {sel}")
-                        except Exception as x: log_cb(f"  S{si} [WARN] クリック失敗: {x}")
+                        except Exception as x:
+                            log_cb(f"  S{si} [WARN] クリック失敗: {x}")
+                            _step_failed = True
                     elif st == "選択":
                         sel = step.get("selector","")
                         sv = step.get("value","").replace("{パターン}",value).replace("{pattern}",value)
@@ -630,7 +717,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             try: dd.select_by_value(sv)
                             except Exception: dd.select_by_visible_text(sv)
                             log_cb(f"  S{si} 選択: {sel} -> {sv}")
-                        except Exception as x: log_cb(f"  S{si} [WARN] 選択失敗: {x}")
+                        except Exception as x:
+                            log_cb(f"  S{si} [WARN] 選択失敗: {x}")
+                            _step_failed = True
                     elif st == "戻る":
                         try:
                             driver.back()
@@ -646,6 +735,23 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             except Exception: pass
                             log_cb(f"  S{si} ナビ: {nav_url[:60]}")
                         except Exception as x: log_cb(f"  S{si} [WARN] ナビゲーション失敗: {x}")
+                    elif st == "スクロール":
+                        sm = step.get("scroll_mode", "element")
+                        try:
+                            if sm == "top":
+                                driver.execute_script("window.scrollTo(0,0);")
+                                log_cb(f"  S{si} スクロール: 先頭")
+                            elif sm == "pixel":
+                                px = int(step.get("scroll_px", "0"))
+                                driver.execute_script(f"window.scrollTo(0,{px});")
+                                log_cb(f"  S{si} スクロール: {px}px")
+                            else:
+                                sel = step.get("selector","")
+                                el = WebDriverWait(driver,10).until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+                                driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", el)
+                                log_cb(f"  S{si} スクロール: {sel}")
+                            time.sleep(0.3)
+                        except Exception as x: log_cb(f"  S{si} [WARN] スクロール失敗: {x}")
                     elif st == "待機":
                         s = float(step.get("seconds","1.0")); time.sleep(s); log_cb(f"  S{si} 待機: {s}秒")
                     elif st == "要素待機":
@@ -657,7 +763,18 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         except Exception as x:
                             log_cb(f"  S{si} [WARN] 要素待機タイムアウト({timeout}秒): {sel}")
                     elif st == "スクショ":
+                        # Flash effect (brief white overlay before capture)
+                        try:
+                            driver.execute_script(
+                                "var f=document.createElement('div');f.id='__yshot_flash';"
+                                "f.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;"
+                                "background:white;opacity:0.7;z-index:2147483647;pointer-events:none;';"
+                                "document.body.appendChild(f);"
+                                "setTimeout(function(){var x=document.getElementById('__yshot_flash');if(x)x.remove();},150);")
+                            time.sleep(0.2)
+                        except Exception: pass
                         sc += 1; gss += 1; mode = step.get("mode","fullpage"); sel = step.get("selector","")
+                        if tc_outdir is None: tc_outdir = _ensure_page_dir(tc_pid)
                         safe_tc = _safe_filename(tc_name, 20)
                         safe_label = _safe_filename(label, 30)
                         safe_number = _safe_filename(tc_number, 10) if tc_number else ""
@@ -668,7 +785,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             if mode == "element" and sel:
                                 driver.find_element(By.CSS_SELECTOR, sel).screenshot(fp)
                             elif mode == "margin" and sel:
-                                mg = int(step.get("margin_px",200))
+                                mg = int(step.get("margin_px",500))
                                 tgt = driver.find_element(By.CSS_SELECTOR, sel)
                                 driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});",tgt)
                                 time.sleep(0.3)
@@ -701,7 +818,10 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                     try:
                                         total_h = driver.execute_script("return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);")
                                         total_w = driver.execute_script("return Math.max(document.body.scrollWidth, document.documentElement.scrollWidth);")
-                                        driver.set_window_size(max(total_w, 1280), min(total_h, 16384))
+                                        actual_h = min(total_h, 16384)
+                                        if total_h > 16384:
+                                            log_cb(f"  S{si} [WARN] ページ高さ{total_h}px > 上限16384px。画像が切れます")
+                                        driver.set_window_size(max(total_w, 1280), actual_h)
                                         time.sleep(0.5)
                                         driver.save_screenshot(fp)
                                     finally:
@@ -730,8 +850,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
             log_cb(f"\n[中断完了] -> {outdir}")
         else:
             log_cb(f"\n[全完了] {len(test_cases)} テスト -> {outdir}")
-        _generate_report(outdir, log_cb)
-        _generate_excel_report(outdir, log_cb, pages=pages, test_cases=test_cases, run_label=run_label)
+        _used_pages = [pg for pg in (pages or []) if pg["_id"] in page_dirs]
+        _generate_report(outdir, log_cb, pages=_used_pages)
+        _generate_excel_report(outdir, log_cb, pages=_used_pages, test_cases=test_cases, run_label=run_label)
     except Exception as x:
         log_cb(f"[ERROR] {x}"); outdir = None
     finally:
@@ -781,30 +902,44 @@ def save_config(data):
     import configparser; c = configparser.ConfigParser()
     c["settings"] = {k: str(v) for k,v in data.items()}
     with open(_data_path(CONFIG_FILE), "w", encoding="utf-8") as f: c.write(f)
+def _safe_json_save(filepath, data):
+    """Atomic JSON save: write to .tmp, backup old file, then rename."""
+    tmp = filepath + ".tmp"
+    bak = filepath + ".backup"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    if os.path.isfile(filepath):
+        try: os.replace(filepath, bak)
+        except Exception: pass
+    os.replace(tmp, filepath)
+
+def _safe_json_load(filepath, default):
+    """Load JSON with backup recovery on corruption."""
+    for p in [filepath, filepath + ".backup"]:
+        if os.path.isfile(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, Exception):
+                continue
+    return default
+
 def load_tests():
-    p = _data_path(TESTS_FILE)
-    if not os.path.isfile(p): return []
-    with open(p, "r", encoding="utf-8") as f: return json.load(f)
+    return _safe_json_load(_data_path(TESTS_FILE), [])
 def save_tests(tests):
-    with open(_data_path(TESTS_FILE), "w", encoding="utf-8") as f: json.dump(tests, f, ensure_ascii=False, indent=2)
+    _safe_json_save(_data_path(TESTS_FILE), tests)
 def load_pattern_sets():
-    p = _data_path(PATTERNS_FILE)
-    if not os.path.isfile(p): return {}
-    with open(p, "r", encoding="utf-8") as f: return json.load(f)
+    return _safe_json_load(_data_path(PATTERNS_FILE), {})
 def save_pattern_sets(ps):
-    with open(_data_path(PATTERNS_FILE), "w", encoding="utf-8") as f: json.dump(ps, f, ensure_ascii=False, indent=2)
+    _safe_json_save(_data_path(PATTERNS_FILE), ps)
 def load_selector_bank():
-    p = _data_path(SELECTOR_BANK_FILE)
-    if not os.path.isfile(p): return {}
-    with open(p, "r", encoding="utf-8") as f: return json.load(f)
+    return _safe_json_load(_data_path(SELECTOR_BANK_FILE), {})
 def save_selector_bank(bank):
-    with open(_data_path(SELECTOR_BANK_FILE), "w", encoding="utf-8") as f: json.dump(bank, f, ensure_ascii=False, indent=2)
+    _safe_json_save(_data_path(SELECTOR_BANK_FILE), bank)
 def load_pages():
-    p = _data_path(PAGES_FILE)
-    if not os.path.isfile(p): return []
-    with open(p, "r", encoding="utf-8") as f: return json.load(f)
+    return _safe_json_load(_data_path(PAGES_FILE), [])
 def save_pages(pages):
-    with open(_data_path(PAGES_FILE), "w", encoding="utf-8") as f: json.dump(pages, f, ensure_ascii=False, indent=2)
+    _safe_json_save(_data_path(PAGES_FILE), pages)
 def get_templates_dir():
     user_dir = os.path.join(get_app_dir(), "templates")
     bundle_dir = os.path.join(get_bundle_dir(), "templates")
@@ -848,6 +983,12 @@ def main(page: ft.Page):
 def _main_inner(page: ft.Page):
     page.title = f"{APP_NAME} - Web Screenshot Tool"
     page.window.width = 1500; page.window.height = 900
+    # Set window icon to ebi
+    _icon_path = os.path.join(get_bundle_dir(), "assets", "shot_icon.ico")
+    if not os.path.isfile(_icon_path): _icon_path = os.path.join(get_app_dir(), "assets", "shot_icon.ico")
+    if os.path.isfile(_icon_path):
+        try: page.window.icon = _icon_path
+        except Exception: pass
     page.theme_mode = ft.ThemeMode.LIGHT
     page.theme = ft.Theme(color_scheme_seed=ft.Colors.BLUE)
 
@@ -1415,12 +1556,12 @@ def _main_inner(page: ft.Page):
                 if hidden: continue
                 step_reorder.controls.append(ft.Container(ft.Row([
                     ft.Icon(STEP_ICONS.get(t, ft.Icons.HELP), color=ft.Colors.BLUE_600, size=16),
-                    ft.Text(t, size=11, color=ft.Colors.GREY_500, width=40),
-                    ft.Text(step_short(s), size=12, expand=True),
+                    ft.Text(t, size=10, color=ft.Colors.GREY_500, width=38),
+                    ft.Text(step_short(s), size=11, expand=True, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, tooltip=step_short(s)),
                     ft.IconButton(ft.Icons.EDIT, icon_size=14, on_click=lambda e, idx=i: show_step_dlg(idx)),
                     ft.IconButton(ft.Icons.DELETE, icon_size=14, on_click=lambda e, idx=i: del_step(idx)),
                 ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-                    padding=ft.Padding(8,2,36,2), key=key, height=30))
+                    padding=ft.Padding(8,2,36,2), key=key, height=28))
         schedule_save()
         if update: page.update()
 
@@ -1511,13 +1652,24 @@ def _main_inner(page: ft.Page):
         ]
         mode_dd = ft.Dropdown(label="スクショ範囲", width=220, value=init.get("mode","fullpage"),
             options=[ft.dropdown.Option(key=k, text=t) for k, t in _SS_MODES])
-        margin_f = ft.TextField(label="マージン(px)", width=120, value=init.get("margin_px","200"))
+        margin_f = ft.TextField(label="マージン(px)", width=120, value=init.get("margin_px","500"))
         text_f = ft.TextField(label="テキスト", width=450, value=init.get("text",""), multiline=True, min_lines=1, max_lines=3)
+        # Scroll controls
+        scroll_mode_dd = ft.Dropdown(label="スクロール方法", width=220, value=init.get("scroll_mode","element"),
+            options=[ft.dropdown.Option(key=k, text=t) for k, t in SCROLL_MODES])
+        scroll_px_f = ft.TextField(label="位置(px)", width=120, value=init.get("scroll_px","0"), hint_text="上端からのpx")
+        # Groups must be defined BEFORE upd() references them
+        input_group = ft.Column([sel_field, input_mode_dd, val_mode, val_field], spacing=8, tight=True)
+        nav_group = ft.Column([nav_url_f], spacing=8, tight=True)
+        time_group = ft.Column([sec_field], spacing=8, tight=True)
+        ss_group = ft.Column([ft.Row([mode_dd, margin_f], spacing=8)], spacing=8, tight=True)
+        scroll_group = ft.Column([ft.Row([scroll_mode_dd, scroll_px_f], spacing=8)], spacing=8, tight=True)
+        text_group = ft.Column([text_f], spacing=8, tight=True)
         def upd(e=None):
             try:
                 t = type_dd.value
                 is_input = (t == "入力")
-                needs_sel = t in ("入力","クリック","選択","要素待機") or (t=="スクショ" and mode_dd.value in ("element","margin"))
+                needs_sel = t in ("入力","クリック","選択","要素待機") or (t=="スクショ" and mode_dd.value in ("element","margin")) or (t=="スクロール" and scroll_mode_dd.value=="element")
                 sel_field.visible = needs_sel
                 input_mode_dd.visible = is_input
                 val_mode.visible = is_input or t == "選択"
@@ -1526,6 +1678,8 @@ def _main_inner(page: ft.Page):
                     val_mode.visible = False; val_field.visible = False
                 nav_url_f.visible = (t == "ナビゲーション")
                 sec_field.visible = t in ("待機", "戻る", "要素待機"); mode_dd.visible = (t=="スクショ")
+                scroll_mode_dd.visible = (t == "スクロール")
+                scroll_px_f.visible = (t == "スクロール" and scroll_mode_dd.value == "pixel")
                 if t == "要素待機": sec_field.label = "タイムアウト(秒)"
                 else: sec_field.label = "秒数"
                 margin_f.visible = (t=="スクショ" and mode_dd.value=="margin")
@@ -1537,11 +1691,12 @@ def _main_inner(page: ft.Page):
                 nav_group.visible = (t == "ナビゲーション")
                 time_group.visible = t in ("待機", "戻る", "要素待機")
                 ss_group.visible = (t == "スクショ")
+                scroll_group.visible = (t == "スクロール")
                 text_group.visible = t in ("見出し","コメント")
                 try: page.update()
                 except Exception: pass
             except Exception as x: _log_error("show_step_dlg.upd", x)
-        type_dd.on_select = upd; mode_dd.on_select = upd; val_mode.on_select = upd; input_mode_dd.on_select = upd
+        type_dd.on_select = upd; mode_dd.on_select = upd; val_mode.on_select = upd; input_mode_dd.on_select = upd; scroll_mode_dd.on_select = upd
         # 初期表示を正しく設定
         upd()
         def on_ok(e):
@@ -1582,6 +1737,15 @@ def _main_inner(page: ft.Page):
                     step["selector"] = s
                     try: step["seconds"] = str(float(sec_field.value or "10"))
                     except Exception: snack("秒数を正しく", ft.Colors.RED_700); return
+                elif t == "スクロール":
+                    step["scroll_mode"] = scroll_mode_dd.value
+                    if scroll_mode_dd.value == "element":
+                        s = sel_field.value if hasattr(sel_field,'value') else ""
+                        if not s: snack("セレクタを入力", ft.Colors.RED_700); return
+                        step["selector"] = s
+                    elif scroll_mode_dd.value == "pixel":
+                        try: step["scroll_px"] = str(int(scroll_px_f.value or "0"))
+                        except Exception: snack("整数で入力", ft.Colors.RED_700); return
                 elif t == "スクショ":
                     step["mode"] = mode_dd.value
                     s = sel_field.value if hasattr(sel_field,'value') else ""
@@ -1594,14 +1758,8 @@ def _main_inner(page: ft.Page):
                 else: tc["steps"].append(step)
                 refresh_steps(False); refresh_test_list(); close_dlg(dlg)
             except Exception as x: _log_error("show_step_dlg.on_ok", x); close_dlg(dlg)
-        # Group related fields
-        input_group = ft.Column([sel_field, input_mode_dd, val_mode, val_field], spacing=8, tight=True)
-        nav_group = ft.Column([nav_url_f], spacing=8, tight=True)
-        time_group = ft.Column([sec_field], spacing=8, tight=True)
-        ss_group = ft.Column([ft.Row([mode_dd, margin_f], spacing=8)], spacing=8, tight=True)
-        text_group = ft.Column([text_f], spacing=8, tight=True)
         dlg = ft.AlertDialog(title=ft.Text("ステップ編集" if idx is not None else "ステップ追加"),
-            content=ft.Column([type_dd, text_group, input_group, nav_group, time_group, ss_group],
+            content=ft.Column([type_dd, text_group, input_group, nav_group, time_group, scroll_group, ss_group],
                 tight=True, spacing=12, scroll=ft.ScrollMode.AUTO, width=500),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
@@ -1616,8 +1774,19 @@ def _main_inner(page: ft.Page):
         try:
             from selenium import webdriver
             if state["browser_driver"] is None:
-                state["browser_driver"] = webdriver.Chrome(); state["browser_driver"].set_window_size(1280,900)
+                _br_opts = webdriver.ChromeOptions()
+                _br_opts.add_argument("--ignore-certificate-errors")
+                _br_opts.add_argument("--allow-insecure-localhost")
+                _br_opts.add_argument("--disable-features=HttpsUpgrades")
+                state["browser_driver"] = webdriver.Chrome(options=_br_opts); state["browser_driver"].set_window_size(1280,900)
             ba = state["config"].get("basic_auth_user","").strip()
+            if ba:
+                import base64 as _b64_ba
+                _auth_tok = _b64_ba.b64encode(f"{ba}:{state['config'].get('basic_auth_pass','')}".encode()).decode()
+                try:
+                    state["browser_driver"].execute_cdp_cmd("Network.enable", {})
+                    state["browser_driver"].execute_cdp_cmd("Network.setExtraHTTPHeaders", {"headers": {"Authorization": f"Basic {_auth_tok}"}})
+                except Exception: pass
             lu = build_auth_url(url, ba, state["config"].get("basic_auth_pass","")) if ba else url
             state["browser_driver"].get(lu)
             try: w = float(browser_wait.value)
@@ -1656,7 +1825,14 @@ def _main_inner(page: ft.Page):
         except Exception: pass
         state["browser_elements"] = list(elems)
         if url:
-            state["selector_bank"][url.split("?")[0]] = [el for el in elems if el.get("visible", True)]
+            bank = state["selector_bank"]
+            bank[url.split("?")[0]] = [el for el in elems if el.get("visible", True)]
+            # A4: LRU limit — keep only newest 50 URLs
+            _BANK_MAX = 50
+            if len(bank) > _BANK_MAX:
+                keys = list(bank.keys())
+                for old_key in keys[:len(keys) - _BANK_MAX]:
+                    del bank[old_key]
         filter_el_table(); update_url_dd()
         log(f"[要素] DOM再取得 {len(elems)} 要素")
     def reload_dom_click(e):
@@ -1769,8 +1945,23 @@ def _main_inner(page: ft.Page):
         if 0 <= vis_row < len(el_table.rows):
             el_table.rows[vis_row].selected = True
         if el and state["browser_driver"]:
-            try: state["browser_driver"].execute_script(HIGHLIGHT_JS, el["selector"])
-            except Exception: pass
+            try:
+                result_json = state["browser_driver"].execute_script(HIGHLIGHT_JS, el["selector"])
+                if result_json:
+                    import json as _json
+                    info = _json.loads(result_json)
+                    found = info.get("found", 0)
+                    if found == 0:
+                        el_status.value = f"セレクタ不一致: {el['selector']}"
+                    elif found > 1:
+                        el_status.value = f"セレクタ {found}件一致（曖昧）: {el['selector']}"
+                    else:
+                        el_status.value = f"一致: {el['selector']} ({info.get('tag','')})"
+            except Exception:
+                pass
+        # Also update selector test field with the selected selector
+        try: sel_test_field.value = el["selector"] if el else ""
+        except Exception: pass
         page.update()
     def on_el_search_change(e):
         """Re-filter table when search text changes."""
@@ -2490,21 +2681,42 @@ def _main_inner(page: ft.Page):
     open_folder_btn = ft.Button("出力フォルダを開く", icon=ft.Icons.FOLDER_OPEN,
                                 on_click=open_folder_click, height=42, visible=False)
 
-    # ── Layout: Tab 1 ──
+    # ── Layout: Tab 1 (collapsible test list) ──
+    _tc_panel_collapsed = [False]
+    tc_panel_full = ft.Column([
+        ft.Row([page_dd,
+                ft.IconButton(ft.Icons.ADD, tooltip="ページ追加", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=add_page),
+                ft.IconButton(ft.Icons.EDIT, tooltip="ページ編集", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=edit_page),
+                ft.IconButton(ft.Icons.DELETE, tooltip="ページ削除", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=del_page),
+               ], spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        page_info_label,
+        ft.Divider(height=1),
+        ft.Row([ft.Text("テストケース", weight=ft.FontWeight.BOLD, size=13),
+                ft.IconButton(ft.Icons.ADD, tooltip="テスト追加", icon_size=16, on_click=add_test)],
+               alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+        test_list,
+    ], spacing=4)
+    tc_panel_mini = ft.Column([
+        ft.Text("TC", size=10, color=ft.Colors.GREY_500, text_align=ft.TextAlign.CENTER),
+    ], spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER, visible=False)
+    def toggle_tc_panel(e):
+        _tc_panel_collapsed[0] = not _tc_panel_collapsed[0]
+        collapsed = _tc_panel_collapsed[0]
+        tc_panel_full.visible = not collapsed
+        tc_panel_mini.visible = collapsed
+        tc_panel_container.width = 40 if collapsed else 320
+        tc_collapse_btn.icon = ft.Icons.CHEVRON_RIGHT if collapsed else ft.Icons.CHEVRON_LEFT
+        tc_collapse_btn.tooltip = "テスト一覧を展開" if collapsed else "テスト一覧を折りたたむ"
+        page.update()
+    tc_collapse_btn = ft.IconButton(ft.Icons.CHEVRON_LEFT, icon_size=16, tooltip="テスト一覧を折りたたむ",
+                                     on_click=toggle_tc_panel, icon_color=ft.Colors.GREY_500, style=ft.ButtonStyle(padding=2))
+    tc_panel_container = ft.Container(ft.Column([
+        ft.Row([tc_collapse_btn], alignment=ft.MainAxisAlignment.END),
+        tc_panel_full, tc_panel_mini,
+    ], spacing=0), width=320, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8)
+
     tc_content = ft.Row([
-        ft.Container(ft.Column([
-            ft.Row([page_dd,
-                    ft.IconButton(ft.Icons.ADD, tooltip="ページ追加", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=add_page),
-                    ft.IconButton(ft.Icons.EDIT, tooltip="ページ編集", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=edit_page),
-                    ft.IconButton(ft.Icons.DELETE, tooltip="ページ削除", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=del_page),
-                   ], spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            page_info_label,
-            ft.Divider(height=1),
-            ft.Row([ft.Text("テストケース", weight=ft.FontWeight.BOLD, size=13),
-                    ft.IconButton(ft.Icons.ADD, tooltip="テスト追加", icon_size=16, on_click=add_test)],
-                   alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-            test_list,
-        ], spacing=4), width=320, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
+        tc_panel_container,
         ft.Column([
             ft.Container(ft.Column([
                 ft.Row([tc_header, ft.IconButton(ft.Icons.EDIT, icon_size=16, tooltip="テスト設定", on_click=edit_test_name)],

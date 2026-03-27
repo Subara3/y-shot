@@ -1332,8 +1332,16 @@ def _main_inner(page: ft.Page):
         pg = None
         for p in state["pages"]:
             if p["_id"] == pid: pg = p; break
+        tcs = tests_for_page(pid)
+        if not tcs: snack("テストケース0件", ft.Colors.RED_700); return
         label = f"【{pg['number']}_{pg['name']}】" if pg else ""
-        _do_run(tests_for_page(pid), label)
+        n_pats = sum(len(state["pattern_sets"].get(tc.get("pattern","") or "", [])) or 1 for tc in tcs)
+        def on_yes(e):
+            close_dlg(dlg); _do_run(tcs, label)
+        dlg = ft.AlertDialog(title=ft.Text("ページテスト実行"),
+            content=ft.Text(f"「{pg['name'] if pg else ''}」の {len(tcs)} テスト（{n_pats}パターン）を実行しますか？"),
+            actions=[ft.TextButton("実行", on_click=on_yes), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg)
 
     # ================================================================
     # Tab 1: Test Cases (1-column ReorderableListView)
@@ -2751,7 +2759,7 @@ def _main_inner(page: ft.Page):
             if not tc_url and not _page_url_map.get(tc.get("page_id",""), ""):
                 no_url_tests.append(tc)
         if len(no_url_tests) == len(test_cases_to_run):
-            snack("URL未設定（ページまたはテストケースに設定してください）", ft.Colors.RED_700); return
+            snack("起点URLが未設定です（ページ編集またはテスト設定でURLを入力してください）", ft.Colors.RED_700); return
         if no_url_tests:
             names = "\n".join(f"  - {tc.get('number','')} {tc.get('name','')}" for tc in no_url_tests[:10])
             if len(no_url_tests) > 10: names += f"\n  ... 他 {len(no_url_tests)-10} 件"
@@ -2797,7 +2805,15 @@ def _main_inner(page: ft.Page):
                         state["test_drivers"], list(state["pages"]), run_label)
 
     def run_click(e):
-        _do_run(state["tests"], "【全テスト】")
+        tcs = state["tests"]
+        if not tcs: snack("テストケース0件", ft.Colors.RED_700); return
+        n_pats = sum(len(state["pattern_sets"].get(tc.get("pattern","") or "", [])) or 1 for tc in tcs)
+        def on_yes(e):
+            close_dlg(dlg); _do_run(tcs, "【全テスト】")
+        dlg = ft.AlertDialog(title=ft.Text("全テスト実行"),
+            content=ft.Text(f"全 {len(tcs)} テスト（{n_pats}パターン）を実行しますか？"),
+            actions=[ft.TextButton("実行", on_click=on_yes), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg)
     def run_single(idx):
         if 0 <= idx < len(state["tests"]):
             tc = state["tests"][idx]

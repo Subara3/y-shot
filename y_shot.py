@@ -1897,6 +1897,7 @@ def _main_inner(page: ft.Page):
             row_color = ft.Colors.ORANGE_50 if not is_visible else None
             reason = el.get("hidden_reason", "")
             vis_indicator = "" if is_visible else f" [{reason}]" if reason else " [hidden]"
+            is_selected = (i == state["selected_el"])
             el_table.rows.append(ft.DataRow(
                 cells=[ft.DataCell(ft.Text(el["tag"],size=11)),
                        ft.DataCell(ft.Text(el.get("type",""),size=11)),
@@ -1905,6 +1906,7 @@ def _main_inner(page: ft.Page):
                                            color=ft.Colors.ORANGE_700 if not is_visible else None)),
                        ft.DataCell(ft.Text(el["selector"],size=10,color=ft.Colors.GREY_600))],
                 on_select_change=lambda e, idx=i: on_el_click(idx),
+                selected=is_selected,
                 color=row_color))
         status_parts = [f"{visible_count}/{total_count} 要素"]
         if hidden_count > 0:
@@ -2640,10 +2642,10 @@ def _main_inner(page: ft.Page):
     load_btn = ft.Button("読込", icon=ft.Icons.DOWNLOAD, on_click=load_page_click)
     el_loading = ft.ProgressRing(width=14, height=14, stroke_width=2, visible=False)
     el_status = ft.Text("未読込", size=11, color=ft.Colors.GREY_500)
-    el_search = ft.TextField(label="検索", width=250, dense=True, hint_text="セレクタ/id/name/ヒント",
+    el_search = ft.TextField(label="検索", expand=True, dense=True, hint_text="セレクタ/id/name/ヒント",
                              on_change=on_el_search_change, prefix_icon=ft.Icons.SEARCH)
     el_show_hidden = ft.Checkbox(label="非表示要素も表示", value=False, on_change=on_show_hidden_change)
-    el_sort_dd = ft.Dropdown(label="並び替え", width=120, dense=True, value="dom",
+    el_sort_dd = ft.Dropdown(label="並び", width=100, dense=True, value="dom",
         options=[ft.dropdown.Option(key="dom", text="DOM順"),
                  ft.dropdown.Option(key="tag", text="タグ別"),
                  ft.dropdown.Option(key="type", text="type別"),
@@ -2758,8 +2760,7 @@ def _main_inner(page: ft.Page):
             ft.Row([load_btn, ft.OutlinedButton("DOM再取得", icon=ft.Icons.REFRESH, on_click=reload_dom_click),
                     ft.OutlinedButton("閉じる", on_click=close_br),
                     ft.TextButton("ページURLを使う", icon=ft.Icons.SYNC, on_click=sync_url)], spacing=4, wrap=True),
-            ft.Row([el_search, el_sort_dd], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ft.Row([el_show_hidden], spacing=4),
+            ft.Row([el_search, el_sort_dd, el_show_hidden], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Row([sel_test_field, ft.OutlinedButton("テスト", icon=ft.Icons.PLAY_ARROW, on_click=test_selector_click)], spacing=4),
             ft.Row([el_loading, el_status], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Container(ft.Column([el_table], scroll=ft.ScrollMode.AUTO),
@@ -2770,7 +2771,7 @@ def _main_inner(page: ft.Page):
                     ft.Button("選択", icon=ft.Icons.ARROW_DROP_DOWN_CIRCLE, on_click=lambda e: quick_add("選択"))], spacing=4),
             ft.Row([ft.Button("全パターン", icon=ft.Icons.LIST, on_click=quick_add_all_options),
                     ft.Button("値取込", icon=ft.Icons.SAVE, on_click=capture_form)], spacing=4),
-        ], spacing=4), width=500, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
+        ], spacing=4), expand=2, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
     ], spacing=8, expand=True, vertical_alignment=ft.CrossAxisAlignment.START)
 
     # ── Layout: Tab 2 ──

@@ -2601,17 +2601,46 @@ def _main_inner(page: ft.Page):
         mode_dd = ft.Dropdown(label="インポート方法", width=250, value="replace",
             options=[ft.dropdown.Option(key="replace", text="置換（現在のデータを上書き）"),
                      ft.dropdown.Option(key="merge", text="マージ（現在のデータに追加）")])
-        file_list_col = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, height=150)
+        preview_text = ft.Text("", size=11, color=ft.Colors.GREY_600)
+        file_list_col = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, height=120)
+
+        def _set_path(p):
+            path_field.value = p
+            # Highlight selected file
+            for ctrl in file_list_col.controls:
+                if isinstance(ctrl, ft.Container):
+                    is_sel = (ctrl.data == p)
+                    ctrl.bgcolor = ft.Colors.BLUE_50 if is_sel else None
+                    ctrl.border = ft.Border.all(1, ft.Colors.BLUE_300) if is_sel else ft.Border.all(1, ft.Colors.GREY_200)
+            # Preview
+            try:
+                with open(p, "r", encoding="utf-8") as pf:
+                    pd = json.load(pf)
+                n_pages = len(pd.get("pages", []))
+                n_tests = len(pd.get("tests", []))
+                n_pats = len(pd.get("pattern_sets", {}))
+                ver = pd.get("version", "?")
+                urls = [pg.get("url","") for pg in pd.get("pages",[]) if pg.get("url","")]
+                url_hint = urls[0][:40] + "..." if urls and len(urls[0]) > 40 else (urls[0] if urls else "URL未設定")
+                preview_text.value = f"v{ver} | {n_pages}ページ, {n_tests}テスト, {n_pats}パターン | {url_hint}"
+            except Exception:
+                preview_text.value = "プレビュー読込失敗"
+            page.update()
+
         if found_files:
             for fp in found_files[:10]:
                 fn = os.path.basename(fp)
                 file_list_col.controls.append(
-                    ft.TextButton(fn, on_click=lambda e, p=fp: _set_path(p), tooltip=fp))
+                    ft.Container(
+                        ft.Text(fn, size=12),
+                        padding=ft.Padding(10, 6, 10, 6), border_radius=4,
+                        border=ft.Border.all(1, ft.Colors.GREY_200),
+                        on_click=lambda e, p=fp: _set_path(p), data=fp, ink=True))
         else:
             file_list_col.controls.append(ft.Text("検出されたプロジェクトファイルなし", size=11, color=ft.Colors.GREY_500))
 
-        def _set_path(p):
-            path_field.value = p; page.update()
+        # Auto-preview first file
+        if found_files: _set_path(found_files[0])
 
         def on_ok(e):
             try:
@@ -2695,7 +2724,7 @@ def _main_inner(page: ft.Page):
                 _log_error("import_project", x); snack(f"インポート失敗: {x}", ft.Colors.RED_600)
 
         dlg = ft.AlertDialog(title=ft.Text("プロジェクトインポート"),
-            content=ft.Column([path_field, mode_dd,
+            content=ft.Column([path_field, preview_text, mode_dd,
                 ft.Text("検出されたファイル:", size=11, weight=ft.FontWeight.BOLD),
                 file_list_col], tight=True, spacing=10, width=500),
             actions=[ft.TextButton("インポート", on_click=on_ok),

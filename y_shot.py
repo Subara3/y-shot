@@ -2646,16 +2646,23 @@ def _main_inner(page: ft.Page):
                             tc["page_id"] = page_id_map[old_pid]
                     state["pages"].extend(imp_pages)
                     state["tests"].extend(imp_tests)
+                    pat_name_map = {}  # old_name -> new_name (only for renamed sets)
                     for k, v in imp_pats.items():
                         if k in state["pattern_sets"]:
-                            # Avoid overwrite: rename
                             new_k = f"{k}_imported"
                             n = 2
                             while new_k in state["pattern_sets"]:
                                 new_k = f"{k}_imported_{n}"; n += 1
                             state["pattern_sets"][new_k] = v
+                            pat_name_map[k] = new_k
                         else:
                             state["pattern_sets"][k] = v
+                    # Remap pattern references in imported tests
+                    if pat_name_map:
+                        for tc in imp_tests:
+                            old_pat = tc.get("pattern")
+                            if old_pat in pat_name_map:
+                                tc["pattern"] = pat_name_map[old_pat]
 
                 # Re-init ID counters
                 _max_id = 0

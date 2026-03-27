@@ -313,6 +313,18 @@ def build_auth_url(url, user, password):
     if p.port: nl += f":{p.port}"
     return urlunparse(p._replace(netloc=nl))
 
+def setup_basic_auth(driver, config):
+    """Configure CDP-based Basic Auth headers on a WebDriver instance."""
+    import base64 as _b64
+    ba = config.get("basic_auth_user", "").strip()
+    if not ba: return
+    token = _b64.b64encode(f"{ba}:{config.get('basic_auth_pass', '')}".encode()).decode()
+    try:
+        driver.execute_cdp_cmd("Network.enable", {})
+        driver.execute_cdp_cmd("Network.setExtraHTTPHeaders", {"headers": {"Authorization": f"Basic {token}"}})
+    except Exception:
+        pass
+
 STEP_TYPES = ["入力", "クリック", "選択", "待機", "要素待機", "スクロール", "スクショ", "戻る", "ナビゲーション", "見出し", "コメント"]
 STEP_ICONS = {"入力": ft.Icons.EDIT, "クリック": ft.Icons.MOUSE,
               "選択": ft.Icons.ARROW_DROP_DOWN_CIRCLE,
@@ -369,7 +381,6 @@ def step_short(step):
         return "要素のみ"
     return str(step)
 
-step_display = step_short
 
 # Pre-compiled regexes for _normalize_source (avoid re-compiling on every screenshot)
 _NS_PATTERNS = None
@@ -554,13 +565,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         if driver_ref is not None: driver_ref.append(driver)
         ba = config.get("basic_auth_user","").strip()
         if ba:
-            import base64 as _b64_auth
-            _auth_token = _b64_auth.b64encode(f"{ba}:{config.get('basic_auth_pass','')}".encode()).decode()
-            try:
-                driver.execute_cdp_cmd("Network.enable", {})
-                driver.execute_cdp_cmd("Network.setExtraHTTPHeaders", {"headers": {"Authorization": f"Basic {_auth_token}"}})
-            except Exception:
-                pass  # Fallback: URL embedding will still be tried
+            setup_basic_auth(driver, config)
             log_cb("[INFO] Basic認証を設定 (CDP)")
         # Build page URL lookup: page_id -> url
         _page_urls = {}
@@ -1133,13 +1138,7 @@ def _main_inner(page: ft.Page):
         try: d.open = False; d.update()
         except Exception: pass
     def save_all():
-        c = dict(state["config"])
-        try:
-            c["browser_url"] = browser_url.value or ""
-            c["browser_wait"] = browser_wait.value or "3.0"
-        except NameError:
-            pass  # Widgets not yet created (early exit)
-        save_config(c); save_tests(state["tests"])
+        save_config(state["config"]); save_tests(state["tests"])
         save_pattern_sets(state["pattern_sets"]); save_selector_bank(state["selector_bank"])
         save_pages(state["pages"])
     def close_browser():
@@ -1795,12 +1794,7 @@ def _main_inner(page: ft.Page):
                 state["browser_driver"] = webdriver.Chrome(options=_br_opts); state["browser_driver"].set_window_size(1280,900)
             ba = state["config"].get("basic_auth_user","").strip()
             if ba:
-                import base64 as _b64_ba
-                _auth_tok = _b64_ba.b64encode(f"{ba}:{state['config'].get('basic_auth_pass','')}".encode()).decode()
-                try:
-                    state["browser_driver"].execute_cdp_cmd("Network.enable", {})
-                    state["browser_driver"].execute_cdp_cmd("Network.setExtraHTTPHeaders", {"headers": {"Authorization": f"Basic {_auth_tok}"}})
-                except Exception: pass
+                setup_basic_auth(state["browser_driver"], state["config"])
             el_status.value = "ページ読込中..."; page.update()
             lu = build_auth_url(url, ba, state["config"].get("basic_auth_pass","")) if ba else url
             state["browser_driver"].get(lu)
@@ -1920,12 +1914,6 @@ def _main_inner(page: ft.Page):
         if update:
             try: page.update()
             except Exception: pass
-    def update_el_table(elems, url):
-        """Legacy wrapper: store elements and apply filter."""
-        state["browser_elements"] = list(elems)
-        filter_el_table(False)
-        log(f"[要素] {url} -> {len(elems)}")
-        page.update()
     def update_url_dd():
         ex = {o.key for o in browser_url_dd.options}
         for u in state["selector_bank"]:
@@ -2097,10 +2085,6 @@ def _main_inner(page: ft.Page):
     def close_br(e):
         close_browser(); el_table.rows.clear(); state["browser_elements"].clear()
         el_status.value = "未読込"; el_status.color = ft.Colors.GREY_500; page.update()
-    def sync_url(e):
-        pg = cur_page()
-        browser_url.value = pg.get("url", "") if pg else ""
-        page.update()
 
     # ================================================================
     # Tab 2: Pattern Sets

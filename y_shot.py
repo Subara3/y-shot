@@ -1673,13 +1673,12 @@ def _main_inner(page: ft.Page):
             ft.TextField(label="セレクタ", width=450, value=init.get("selector",""))
         init_val = init.get("value","")
         pat_names = pat_set_names()
-        val_mode_opts = [ft.dropdown.Option("手入力")] + [ft.dropdown.Option(f"パターン: {n}") for n in pat_names]
-        init_val_mode = "手入力"
-        if init_val == "{パターン}" and tc.get("pattern"):
-            init_val_mode = f"パターン: {tc['pattern']}"
-        elif init_val == "{パターン}" and pat_names:
-            init_val_mode = f"パターン: {pat_names[0]}"
-        val_mode = ft.Dropdown(label="値の指定方法", width=450, value=init_val_mode, options=val_mode_opts)
+        init_val_mode = "パターン" if init_val == "{パターン}" else "手入力"
+        val_mode = ft.Dropdown(label="値の指定方法", width=200, value=init_val_mode,
+            options=[ft.dropdown.Option("手入力"), ft.dropdown.Option("パターン")])
+        init_pat_sel = tc.get("pattern", "") if init_val == "{パターン}" else (pat_names[0] if pat_names else "")
+        pat_select = ft.Dropdown(label="パターンセット", width=240, value=init_pat_sel,
+            options=[ft.dropdown.Option(n) for n in pat_names])
         val_field = ft.TextField(label="値 (固定値を直接入力)", width=450,
             value="" if init_val == "{パターン}" else init_val,
             multiline=True, min_lines=2, max_lines=4)
@@ -1706,7 +1705,7 @@ def _main_inner(page: ft.Page):
             options=[ft.dropdown.Option(key=k, text=t) for k, t in SCROLL_MODES])
         scroll_px_f = ft.TextField(label="位置(px)", width=120, value=init.get("scroll_px","0"), hint_text="上端からのpx")
         # Groups must be defined BEFORE upd() references them
-        input_group = ft.Column([sel_field, input_mode_dd, val_mode, val_field], spacing=8, tight=True)
+        input_group = ft.Column([sel_field, input_mode_dd, ft.Row([val_mode, pat_select], spacing=8), val_field], spacing=8, tight=True)
         nav_group = ft.Column([nav_url_f], spacing=8, tight=True)
         time_group = ft.Column([sec_field], spacing=8, tight=True)
         ss_group = ft.Column([ft.Row([mode_dd, margin_f], spacing=8)], spacing=8, tight=True)
@@ -1719,10 +1718,12 @@ def _main_inner(page: ft.Page):
                 needs_sel = t in ("入力","クリック","ホバー","選択","要素待機") or (t=="スクショ" and mode_dd.value in ("element","margin")) or (t=="スクロール" and scroll_mode_dd.value=="element")
                 sel_field.visible = needs_sel
                 input_mode_dd.visible = is_input
-                val_mode.visible = is_input or t == "選択"
-                val_field.visible = (is_input or t == "選択") and val_mode.value == "手入力"
+                _needs_val = is_input or t == "選択"
+                val_mode.visible = _needs_val
+                pat_select.visible = _needs_val and val_mode.value == "パターン"
+                val_field.visible = _needs_val and val_mode.value == "手入力"
                 if is_input and input_mode_dd.value == "clear":
-                    val_mode.visible = False; val_field.visible = False
+                    val_mode.visible = False; pat_select.visible = False; val_field.visible = False
                 nav_url_f.visible = (t == "ナビゲーション")
                 sec_field.visible = t in ("待機", "戻る", "要素待機"); mode_dd.visible = (t=="スクショ")
                 scroll_mode_dd.visible = (t == "スクロール")
@@ -1759,15 +1760,17 @@ def _main_inner(page: ft.Page):
                         if input_mode_dd.value != "clear":
                             if val_mode.value == "手入力": step["value"] = val_field.value
                             else:
-                                step["value"] = "{パターン}"
-                                pn = val_mode.value.replace("パターン: ", "", 1)
-                                if pn in state["pattern_sets"]: tc["pattern"] = pn
+                                pn = pat_select.value
+                                if not pn or pn not in state["pattern_sets"]:
+                                    snack("パターンセットを選択", ft.Colors.RED_700); return
+                                step["value"] = "{パターン}"; tc["pattern"] = pn
                     elif t == "選択":
                         if val_mode.value == "手入力": step["value"] = val_field.value
                         else:
-                            step["value"] = "{パターン}"
-                            pn = val_mode.value.replace("パターン: ", "", 1)
-                            if pn in state["pattern_sets"]: tc["pattern"] = pn
+                            pn = pat_select.value
+                            if not pn or pn not in state["pattern_sets"]:
+                                snack("パターンセットを選択", ft.Colors.RED_700); return
+                            step["value"] = "{パターン}"; tc["pattern"] = pn
                 elif t == "戻る":
                     try: step["seconds"] = str(float(sec_field.value))
                     except Exception: snack("秒数を正しく", ft.Colors.RED_700); return
@@ -2018,6 +2021,59 @@ def _main_inner(page: ft.Page):
             except Exception:
                 pass
         page.update()
+    def show_el_detail(e):
+        """Show all attributes of the selected element in a dialog."""
+        idx = state["selected_el"]
+        if idx < 0 or idx >= len(state["browser_elements"]):
+            snack("要素を選択してください", ft.Colors.ORANGE_700); return
+        el = state["browser_elements"][idx]
+        # Fetch all attributes from live DOM via JS
+        attrs = {}
+        if state["browser_driver"]:
+            try:
+                attrs = state["browser_driver"].execute_script(
+                    "var e=document.querySelector(arguments[0]);"
+                    "if(!e)return {};"
+                    "var r={};"
+                    "for(var i=0;i<e.attributes.length;i++){r[e.attributes[i].name]=e.attributes[i].value;}"
+                    "r['__tagName']=e.tagName.toLowerCase();"
+                    "r['__textContent']=(e.textContent||'').trim().substring(0,200);"
+                    "r['__innerText']=(e.innerText||'').trim().substring(0,200);"
+                    "r['__visible']=e.offsetParent!==null||e.getClientRects().length>0?'true':'false';"
+                    "var cs=window.getComputedStyle(e);"
+                    "r['__display']=cs.display;r['__visibility']=cs.visibility;r['__opacity']=cs.opacity;"
+                    "return r;", el["selector"]) or {}
+            except Exception:
+                pass
+        rows = []
+        # Show stored info first
+        for key in ("selector", "tag", "type", "id", "name", "hint", "visible", "hidden_reason"):
+            val = str(el.get(key, ""))
+            if val: rows.append(ft.DataRow(cells=[
+                ft.DataCell(ft.Text(key, size=11, weight=ft.FontWeight.BOLD, selectable=True)),
+                ft.DataCell(ft.Text(val, size=11, selectable=True))]))
+        # Show live DOM attributes
+        if attrs:
+            rows.append(ft.DataRow(cells=[ft.DataCell(ft.Text("── DOM属性 ──", size=10, color=ft.Colors.BLUE_600)),
+                                          ft.DataCell(ft.Text(""))]))
+            for k, v in sorted(attrs.items()):
+                if k.startswith("__"): continue
+                rows.append(ft.DataRow(cells=[
+                    ft.DataCell(ft.Text(k, size=11, weight=ft.FontWeight.BOLD, selectable=True)),
+                    ft.DataCell(ft.Text(v[:100], size=11, selectable=True))]))
+            rows.append(ft.DataRow(cells=[ft.DataCell(ft.Text("── 計算値 ──", size=10, color=ft.Colors.BLUE_600)),
+                                          ft.DataCell(ft.Text(""))]))
+            for k in ("__tagName", "__visible", "__display", "__visibility", "__opacity", "__textContent", "__innerText"):
+                v = attrs.get(k, "")
+                if v: rows.append(ft.DataRow(cells=[
+                    ft.DataCell(ft.Text(k.lstrip("_"), size=11, weight=ft.FontWeight.BOLD, selectable=True)),
+                    ft.DataCell(ft.Text(v[:100], size=11, selectable=True))]))
+        tbl = ft.DataTable(columns=[ft.DataColumn(ft.Text("属性", size=11)), ft.DataColumn(ft.Text("値", size=11))],
+            rows=rows, column_spacing=12, data_row_min_height=26, heading_row_height=28)
+        dlg = ft.AlertDialog(title=ft.Text(f"要素詳細: {el['selector'][:40]}"),
+            content=ft.Container(ft.Column([tbl], scroll=ft.ScrollMode.AUTO), width=500, height=400),
+            actions=[ft.TextButton("閉じる", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg, modal=False)
     def on_el_search_change(e):
         """Re-filter table when search text changes."""
         filter_el_table()
@@ -2038,7 +2094,7 @@ def _main_inner(page: ft.Page):
         converted = actual_type != stype
         step = {"type": actual_type, "selector": sel}
         if "_frame" in el_info: step["_frame"] = el_info["_frame"]; step["_frame_index"] = el_info.get("_frame_index", 0)
-        if actual_type in ("入力", "選択"): step["value"] = "{パターン}"
+        if actual_type in ("入力", "選択"): step["value"] = ""
         tc["steps"].append(step); refresh_steps(False); refresh_test_list()
         if converted:
             snack(f"要素に合わせて「{actual_type}」に変更: {sel}", ft.Colors.BLUE_600)
@@ -2828,6 +2884,7 @@ def _main_inner(page: ft.Page):
                     ft.IconButton(ft.Icons.SAVE_ALT, tooltip="値取込", icon_size=18, on_click=capture_form),
                     ft.VerticalDivider(width=1),
                     ft.IconButton(ft.Icons.SEARCH, tooltip="セレクタテスト", icon_size=18, on_click=test_selector_dlg),
+                    ft.IconButton(ft.Icons.INFO_OUTLINE, tooltip="要素詳細", icon_size=18, on_click=show_el_detail),
                    ], spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ], spacing=4), expand=2, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
     ], spacing=8, expand=True, vertical_alignment=ft.CrossAxisAlignment.START)

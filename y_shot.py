@@ -140,6 +140,14 @@ def _build_selector(driver, el, tag, eid, ename):
         try:
             if len(driver.find_elements(By.CSS_SELECTOR, s)) == 1: return s
         except Exception: pass
+        # checkbox/radio: disambiguate by value
+        if etype in ("checkbox", "radio"):
+            val = el.get_attribute("value") or ""
+            if val:
+                s = f'{tag}[type="{etype}"][name="{safe_name}"][value="{_css_escape_attr(val)}"]'
+                try:
+                    if len(driver.find_elements(By.CSS_SELECTOR, s)) == 1: return s
+                except Exception: pass
     classes = (el.get_attribute("class") or "").strip()
     if classes:
         safe_classes = [c for c in classes.split()[:3] if _is_safe_class(c)]

@@ -1671,9 +1671,27 @@ def _main_inner(page: ft.Page):
         t0 = init.get("type","入力")
         type_dd = ft.Dropdown(label="種類", width=160, value=t0, options=[ft.dropdown.Option(t) for t in STEP_TYPES])
         all_sels = get_all_selectors()
-        sel_field = ft.Dropdown(label="セレクタ", width=450, value=init.get("selector",""),
-            options=[ft.dropdown.Option(s) for s in all_sels], editable=True) if all_sels else \
-            ft.TextField(label="セレクタ", width=450, value=init.get("selector",""))
+        sel_field = ft.TextField(label="セレクタ", expand=True, value=init.get("selector",""))
+        def _pick_selector(e):
+            if not all_sels: snack("要素を読み込んでください", ft.Colors.ORANGE_700); return
+            def on_sel(s):
+                sel_field.value = s; page.update(); close_dlg(pick_dlg)
+            pick_dlg = ft.AlertDialog(title=ft.Text("セレクタ選択"),
+                content=ft.Column([
+                    ft.TextField(label="絞り込み", dense=True, on_change=lambda e: _filter_pick(e, pick_list, all_sels)),
+                    pick_list := ft.ListView(controls=[
+                        ft.TextButton(s, on_click=lambda e, s=s: on_sel(s), tooltip=s)
+                        for s in all_sels], height=300, spacing=0)
+                ], tight=True, spacing=8, width=500),
+                actions=[ft.TextButton("閉じる", on_click=lambda e: close_dlg(pick_dlg))])
+            open_dlg(pick_dlg, modal=False)
+        def _filter_pick(e, pick_list, all_sels):
+            q = (e.control.value or "").strip().lower()
+            pick_list.controls = [ft.TextButton(s, on_click=lambda e, s=s: (
+                sel_field.__setattr__("value", s), page.update()), tooltip=s)
+                for s in all_sels if not q or q in s.lower()]
+            page.update()
+        sel_pick_btn = ft.IconButton(ft.Icons.LIST, tooltip="一覧から選択", icon_size=18, on_click=_pick_selector)
         init_val = init.get("value","")
         pat_names = pat_set_names()
         init_val_mode = "パターン" if init_val == "{パターン}" else "手入力"
@@ -1708,7 +1726,7 @@ def _main_inner(page: ft.Page):
             options=[ft.dropdown.Option(key=k, text=t) for k, t in SCROLL_MODES])
         scroll_px_f = ft.TextField(label="位置(px)", width=120, value=init.get("scroll_px","0"), hint_text="上端からのpx")
         # Groups must be defined BEFORE upd() references them
-        input_group = ft.Column([sel_field, input_mode_dd, ft.Row([val_mode, pat_select], spacing=8), val_field], spacing=8, tight=True)
+        input_group = ft.Column([ft.Row([sel_field, sel_pick_btn], spacing=4), input_mode_dd, ft.Row([val_mode, pat_select], spacing=8), val_field], spacing=8, tight=True)
         nav_group = ft.Column([nav_url_f], spacing=8, tight=True)
         time_group = ft.Column([sec_field], spacing=8, tight=True)
         ss_group = ft.Column([ft.Row([mode_dd, margin_f], spacing=8)], spacing=8, tight=True)

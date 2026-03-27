@@ -173,7 +173,6 @@ def capture_form_values(driver):
                 "input:not([type]),textarea")
     for el in driver.find_elements(By.CSS_SELECTOR, text_css):
         try:
-            if not el.is_displayed(): continue
             if (el.get_attribute("type") or "text") == "hidden": continue
             val = el.get_attribute("value") or ""
             if not val.strip(): continue
@@ -184,7 +183,6 @@ def capture_form_values(driver):
         except Exception: continue
     for el in driver.find_elements(By.CSS_SELECTOR, "select"):
         try:
-            if not el.is_displayed(): continue
             sel = _build_selector(driver, el, "select", el.get_attribute("id") or "", el.get_attribute("name") or "")
             if sel in seen: continue; seen.add(sel)
             val = el.get_attribute("value") or ""
@@ -1192,6 +1190,11 @@ def _main_inner(page: ft.Page):
                 if tc.get("_id") == remembered_id:
                     state["selected_test"] = i; break
         refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
+        # Auto-sync browser URL to selected page
+        pg = cur_page()
+        if pg and pg.get("url", ""):
+            try: browser_url.value = pg["url"]
+            except NameError: pass
         page.update()
 
     def add_page(e):
@@ -2635,8 +2638,12 @@ def _main_inner(page: ft.Page):
     def on_nav(e): switch_tab(e.control.selected_index)
 
     # ── Build controls ──
-    browser_url = ft.TextField(label="URL", expand=True, dense=True, value=cfg.get("browser_url",""))
-    browser_url_dd = ft.Dropdown(label="履歴", width=200, dense=True,
+    _init_browser_url = cfg.get("browser_url","")
+    if not _init_browser_url:
+        _init_pg = cur_page()
+        if _init_pg: _init_browser_url = _init_pg.get("url", "")
+    browser_url = ft.TextField(label="URL", expand=True, dense=True, value=_init_browser_url)
+    browser_url_dd = ft.Dropdown(label="履歴", expand=True, dense=True,
         options=[ft.dropdown.Option(u) for u in state["selector_bank"].keys()], on_select=on_url_dd_sel)
     browser_wait = ft.TextField(label="秒", width=55, dense=True, value=cfg.get("browser_wait","3.0"))
     load_btn = ft.Button("読込", icon=ft.Icons.DOWNLOAD, on_click=load_page_click)
@@ -2756,10 +2763,9 @@ def _main_inner(page: ft.Page):
         ft.Container(ft.Column([
             ft.Text("要素ブラウザ", weight=ft.FontWeight.BOLD, size=13),
             ft.Row([browser_url, browser_wait], spacing=4),
-            ft.Row([browser_url_dd, ft.OutlinedButton("保存済みを読込", on_click=load_bank)], spacing=4),
+            ft.Row([browser_url_dd, ft.OutlinedButton("読込", on_click=load_bank)], spacing=4),
             ft.Row([load_btn, ft.OutlinedButton("DOM再取得", icon=ft.Icons.REFRESH, on_click=reload_dom_click),
-                    ft.OutlinedButton("閉じる", on_click=close_br),
-                    ft.TextButton("ページURLを使う", icon=ft.Icons.SYNC, on_click=sync_url)], spacing=4, wrap=True),
+                    ft.OutlinedButton("閉じる", on_click=close_br)], spacing=4, wrap=True),
             ft.Row([el_search, el_sort_dd, el_show_hidden], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Row([sel_test_field, ft.OutlinedButton("テスト", icon=ft.Icons.PLAY_ARROW, on_click=test_selector_click)], spacing=4),
             ft.Row([el_loading, el_status], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),

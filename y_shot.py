@@ -2757,10 +2757,10 @@ def _main_inner(page: ft.Page):
     el_sort_dd = ft.PopupMenuButton(
         icon=ft.Icons.SORT, icon_size=18, tooltip="並び替え",
         items=[
-            ft.PopupMenuItem(text="DOM順", on_click=lambda e: on_el_sort_change("dom")),
-            ft.PopupMenuItem(text="タグ別", on_click=lambda e: on_el_sort_change("tag")),
-            ft.PopupMenuItem(text="type別", on_click=lambda e: on_el_sort_change("type")),
-            ft.PopupMenuItem(text="id/name別", on_click=lambda e: on_el_sort_change("id")),
+            ft.PopupMenuItem(content="DOM順", on_click=lambda e: on_el_sort_change("dom")),
+            ft.PopupMenuItem(content="タグ別", on_click=lambda e: on_el_sort_change("tag")),
+            ft.PopupMenuItem(content="type別", on_click=lambda e: on_el_sort_change("type")),
+            ft.PopupMenuItem(content="id/name別", on_click=lambda e: on_el_sort_change("id")),
         ])
     el_sort_dd.data = "dom"
     el_table = ft.DataTable(

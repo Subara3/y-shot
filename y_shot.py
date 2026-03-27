@@ -1768,10 +1768,18 @@ def _main_inner(page: ft.Page):
         open_dlg(dlg)
 
     # ── Element browser ──
+    def _el_loading_start(msg="読込中..."):
+        el_loading.visible = True; load_btn.disabled = True
+        el_status.value = msg; el_status.color = ft.Colors.BLUE_600
+        page.update()
+    def _el_loading_end(msg="", color=ft.Colors.GREY_500):
+        el_loading.visible = False; load_btn.disabled = False
+        if msg: el_status.value = msg; el_status.color = color
+        page.update()
     def load_page_click(e):
         url = browser_url.value
         if not url: snack("URL入力", ft.Colors.RED_700); return
-        load_btn.disabled = True; el_status.value = "読込中..."; page.update()
+        _el_loading_start("ブラウザ起動中...")
         page.run_thread(do_load_page, url)
     def do_load_page(url):
         try:
@@ -1790,11 +1798,13 @@ def _main_inner(page: ft.Page):
                     state["browser_driver"].execute_cdp_cmd("Network.enable", {})
                     state["browser_driver"].execute_cdp_cmd("Network.setExtraHTTPHeaders", {"headers": {"Authorization": f"Basic {_auth_tok}"}})
                 except Exception: pass
+            el_status.value = "ページ読込中..."; page.update()
             lu = build_auth_url(url, ba, state["config"].get("basic_auth_pass","")) if ba else url
             state["browser_driver"].get(lu)
             try: w = float(browser_wait.value)
             except Exception: w = 3.0
             time.sleep(w); log(f"[DEBUG] {state['browser_driver'].title}")
+            el_status.value = "要素を収集中..."; page.update()
             _do_collect_elements(url)
         except Exception as x:
             if state["browser_driver"]:
@@ -1802,7 +1812,7 @@ def _main_inner(page: ft.Page):
                 except Exception:
                     kill_driver(state["browser_driver"]); state["browser_driver"] = None
             log(f"[ERROR] {x}")
-        finally: load_btn.disabled = False; page.update()
+        finally: _el_loading_end()
     def _do_collect_elements(url=None):
         """Collect elements from current DOM state (no page navigation)."""
         drv = state["browser_driver"]
@@ -1841,12 +1851,12 @@ def _main_inner(page: ft.Page):
     def reload_dom_click(e):
         """Re-collect elements from current DOM without navigating."""
         if not state["browser_driver"]: snack("ブラウザ未起動", ft.Colors.ORANGE_700); return
-        el_status.value = "DOM再取得中..."; page.update()
+        _el_loading_start("DOM再取得中...")
         try:
             _do_collect_elements()
         except Exception as x:
             log(f"[ERROR] DOM再取得失敗: {x}")
-        finally: page.update()
+        finally: _el_loading_end()
     def on_el_sort_change(e):
         filter_el_table()
 
@@ -1901,7 +1911,7 @@ def _main_inner(page: ft.Page):
             status_parts.append(f"(非表示: {hidden_count})")
         if query:
             status_parts.append(f"検索: \"{el_search.value}\"")
-        el_status.value = " ".join(status_parts)
+        el_status.value = " ".join(status_parts); el_status.color = ft.Colors.GREY_500
         if update:
             try: page.update()
             except Exception: pass
@@ -2060,7 +2070,7 @@ def _main_inner(page: ft.Page):
             snack(f"セレクタエラー: {x}", ft.Colors.RED_700)
     def close_br(e):
         close_browser(); el_table.rows.clear(); state["browser_elements"].clear()
-        el_status.value = "閉じた"; page.update()
+        el_status.value = "未読込"; el_status.color = ft.Colors.GREY_500; page.update()
     def sync_url(e):
         pg = cur_page()
         browser_url.value = pg.get("url", "") if pg else ""
@@ -2582,8 +2592,9 @@ def _main_inner(page: ft.Page):
         state["running"] = True
         stop_ev = threading.Event(); state["stop_event"] = stop_ev
         run_btn.disabled = True; run_single_btn.disabled = True; run_page_btn.disabled = True
+        run_btn.icon = ft.Icons.HOURGLASS_TOP; run_single_btn.icon = ft.Icons.HOURGLASS_TOP; run_page_btn.icon = ft.Icons.HOURGLASS_TOP
         stop_btn.visible = True; stop_btn.disabled = False; open_folder_btn.visible = False
-        progress.visible = True; progress.value = 0; progress_label.visible = True; progress_label.value = ""
+        run_spinner.visible = True; progress.visible = True; progress.value = 0; progress_label.visible = True; progress_label.value = ""
         nav_bar.selected_index = 0; switch_tab(0); page.update(); save_all()
         def on_progress(current, total, tc_label=""):
             progress.value = current / total if total > 0 else None
@@ -2593,7 +2604,8 @@ def _main_inner(page: ft.Page):
         def on_done(outdir=None):
             state["running"] = False
             run_btn.disabled = False; run_single_btn.disabled = False; run_page_btn.disabled = False
-            stop_btn.visible = False; progress.visible = False; progress_label.visible = False
+            run_btn.icon = ft.Icons.PLAY_ARROW; run_single_btn.icon = ft.Icons.PLAY_ARROW; run_page_btn.icon = ft.Icons.PLAY_ARROW
+            stop_btn.visible = False; run_spinner.visible = False; progress.visible = False; progress_label.visible = False
             state["stop_event"] = None
             if outdir and os.path.isdir(outdir):
                 open_folder_btn.data = outdir; open_folder_btn.visible = True
@@ -2625,7 +2637,8 @@ def _main_inner(page: ft.Page):
     browser_url_dd = ft.Dropdown(label="履歴", width=200, dense=True,
         options=[ft.dropdown.Option(u) for u in state["selector_bank"].keys()], on_select=on_url_dd_sel)
     browser_wait = ft.TextField(label="秒", width=55, dense=True, value=cfg.get("browser_wait","3.0"))
-    load_btn = ft.Button("読込", icon=ft.Icons.REFRESH, on_click=load_page_click)
+    load_btn = ft.Button("読込", icon=ft.Icons.DOWNLOAD, on_click=load_page_click)
+    el_loading = ft.ProgressRing(width=14, height=14, stroke_width=2, visible=False)
     el_status = ft.Text("未読込", size=11, color=ft.Colors.GREY_500)
     el_search = ft.TextField(label="検索", width=250, dense=True, hint_text="セレクタ/id/name/ヒント",
                              on_change=on_el_search_change, prefix_icon=ft.Icons.SEARCH)
@@ -2667,6 +2680,7 @@ def _main_inner(page: ft.Page):
     pat_set_list = ft.ReorderableListView(controls=[], on_reorder=on_pat_set_reorder, spacing=4, expand=True)
     pat_items = ft.ReorderableListView(controls=[], on_reorder=on_pat_reorder, spacing=3, expand=True)
     pat_header = ft.Text("", weight=ft.FontWeight.BOLD, size=15)
+    run_spinner = ft.ProgressRing(width=16, height=16, stroke_width=2, visible=False)
     progress = ft.ProgressBar(visible=False, value=0)
     progress_label = ft.Text("", size=11, color=ft.Colors.GREY_600, visible=False)
     run_single_btn = ft.Button("選択テスト実行", icon=ft.Icons.PLAY_ARROW, bgcolor=ft.Colors.GREEN_600,
@@ -2747,7 +2761,7 @@ def _main_inner(page: ft.Page):
             ft.Row([el_search, el_sort_dd], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Row([el_show_hidden], spacing=4),
             ft.Row([sel_test_field, ft.OutlinedButton("テスト", icon=ft.Icons.PLAY_ARROW, on_click=test_selector_click)], spacing=4),
-            el_status,
+            ft.Row([el_loading, el_status], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Container(ft.Column([el_table], scroll=ft.ScrollMode.AUTO),
                 expand=True, border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4),
             ft.Text("ステップ追加:", size=10, color=ft.Colors.GREY_500),
@@ -2794,7 +2808,7 @@ def _main_inner(page: ft.Page):
                  ft.IconButton(ft.Icons.INFO_OUTLINE, tooltip="情報", on_click=show_info)])
 
     page.add(ft.Column([ft.Stack([tc_content, ps_content], expand=True),
-        ft.Row([progress, progress_label], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        ft.Row([run_spinner, progress, progress_label], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ft.Row([open_folder_btn, stop_btn, run_single_btn, run_page_btn, run_btn],
                alignment=ft.MainAxisAlignment.END, spacing=8)], expand=True, spacing=4))
     page.navigation_bar = nav_bar

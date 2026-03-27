@@ -1895,7 +1895,10 @@ def _main_inner(page: ft.Page):
                 for old_key in keys[:len(keys) - _BANK_MAX]:
                     del bank[old_key]
         filter_el_table(); update_url_dd()
-        log(f"[要素] DOM再取得 {len(elems)} 要素")
+        # Debug: report checkbox/radio hint coverage
+        cb_radio = [e for e in elems if e.get("type", "").lower() in ("checkbox", "radio")]
+        cb_with_hint = [e for e in cb_radio if e.get("hint", "") and e["hint"] != e.get("type", "")]
+        log(f"[要素] DOM再取得 {len(elems)} 要素" + (f" (checkbox/radio: {len(cb_radio)}件, ヒントあり: {len(cb_with_hint)}件)" if cb_radio else ""))
     def reload_dom_click(e):
         """Re-collect elements from current DOM without navigating."""
         if not state["browser_driver"]: snack("ブラウザ未起動", ft.Colors.ORANGE_700); return
@@ -1947,13 +1950,19 @@ def _main_inner(page: ft.Page):
             reason = el.get("hidden_reason", "")
             vis_indicator = "" if is_visible else f" [{reason}]" if reason else " [hidden]"
             is_selected = (i == state["selected_el"])
+            hint_text = el.get("hint", "")
+            hint_display = hint_text[:25] if hint_text else ""
+            if not is_visible: hint_display += " *"
+            hint_tooltip = hint_text + (f"\n{vis_indicator.strip()}" if vis_indicator else "")
+            id_or_name = el.get("id") or el.get("name", "")
+            sel_text = el["selector"]
             el_table.rows.append(ft.DataRow(
                 cells=[ft.DataCell(ft.Text(el["tag"],size=11)),
                        ft.DataCell(ft.Text(el.get("type",""),size=11)),
-                       ft.DataCell(ft.Text(el.get("id") or el.get("name",""),size=11)),
-                       ft.DataCell(ft.Text((el.get("hint","")[:20]) + vis_indicator,size=11,
+                       ft.DataCell(ft.Text(id_or_name,size=11,tooltip=id_or_name)),
+                       ft.DataCell(ft.Text(hint_display,size=11,tooltip=hint_tooltip,
                                            color=ft.Colors.ORANGE_700 if not is_visible else None)),
-                       ft.DataCell(ft.Text(el["selector"],size=10,color=ft.Colors.GREY_600))],
+                       ft.DataCell(ft.Text(sel_text,size=10,color=ft.Colors.GREY_600,tooltip=sel_text))],
                 on_select_change=lambda e, idx=i: on_el_click(idx),
                 selected=is_selected,
                 color=row_color))

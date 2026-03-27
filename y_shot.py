@@ -339,8 +339,9 @@ def setup_basic_auth(driver, config):
     except Exception:
         pass
 
-STEP_TYPES = ["入力", "クリック", "選択", "待機", "要素待機", "スクロール", "スクショ", "戻る", "ナビゲーション", "見出し", "コメント"]
+STEP_TYPES = ["入力", "クリック", "ホバー", "選択", "待機", "要素待機", "スクロール", "スクショ", "戻る", "ナビゲーション", "見出し", "コメント"]
 STEP_ICONS = {"入力": ft.Icons.EDIT, "クリック": ft.Icons.MOUSE,
+              "ホバー": ft.Icons.NEAR_ME,
               "選択": ft.Icons.ARROW_DROP_DOWN_CIRCLE,
               "待機": ft.Icons.HOURGLASS_BOTTOM, "要素待機": ft.Icons.VISIBILITY,
               "スクロール": ft.Icons.SWAP_VERT,
@@ -364,6 +365,9 @@ def step_short(step):
     if t == "クリック":
         sel = step.get("selector","")
         if sel == "{パターン}": return "{パターン} (全パターン)"
+        return sel[:30]+"..." if len(sel) > 30 else sel
+    if t == "ホバー":
+        sel = step.get("selector","")
         return sel[:30]+"..." if len(sel) > 30 else sel
     if t == "選択":
         sel = step.get("selector","")
@@ -723,6 +727,18 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             log_cb(f"  S{si} クリック: {sel}")
                         except Exception as x:
                             log_cb(f"  S{si} [WARN] クリック失敗: {x}")
+                            _step_failed = True
+                    elif st == "ホバー":
+                        sel = step.get("selector","")
+                        try:
+                            from selenium.webdriver.common.action_chains import ActionChains
+                            _el = WebDriverWait(driver,10).until(EC.presence_of_element_located((By.CSS_SELECTOR,sel)))
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", _el)
+                            ActionChains(driver).move_to_element(_el).perform()
+                            time.sleep(0.3)
+                            log_cb(f"  S{si} ホバー: {sel}")
+                        except Exception as x:
+                            log_cb(f"  S{si} [WARN] ホバー失敗: {x}")
                             _step_failed = True
                     elif st == "選択":
                         sel = step.get("selector","")
@@ -1688,7 +1704,7 @@ def _main_inner(page: ft.Page):
             try:
                 t = type_dd.value
                 is_input = (t == "入力")
-                needs_sel = t in ("入力","クリック","選択","要素待機") or (t=="スクショ" and mode_dd.value in ("element","margin")) or (t=="スクロール" and scroll_mode_dd.value=="element")
+                needs_sel = t in ("入力","クリック","ホバー","選択","要素待機") or (t=="スクショ" and mode_dd.value in ("element","margin")) or (t=="スクロール" and scroll_mode_dd.value=="element")
                 sel_field.visible = needs_sel
                 input_mode_dd.visible = is_input
                 val_mode.visible = is_input or t == "選択"
@@ -1722,7 +1738,7 @@ def _main_inner(page: ft.Page):
             try:
                 t = type_dd.value; step = {"type": t}
                 if t in ("見出し","コメント"): step["text"] = text_f.value
-                elif t in ("入力","クリック","選択"):
+                elif t in ("入力","クリック","ホバー","選択"):
                     s = sel_field.value if hasattr(sel_field,'value') else ""
                     if not s: snack("セレクタを入力", ft.Colors.RED_700); return
                     step["selector"] = s
@@ -2002,9 +2018,10 @@ def _main_inner(page: ft.Page):
         el_info = state["browser_elements"][idx]; sel = el_info["selector"]
         tag = el_info.get("tag", ""); etype = el_info.get("type", "").lower()
         actual_type = stype
-        if tag == "select": actual_type = "選択"
-        elif etype in ("radio", "checkbox"): actual_type = "クリック"
-        elif tag in ("button", "a") or etype in ("submit", "button", "reset", "image"): actual_type = "クリック"
+        if stype != "ホバー":
+            if tag == "select": actual_type = "選択"
+            elif etype in ("radio", "checkbox"): actual_type = "クリック"
+            elif tag in ("button", "a") or etype in ("submit", "button", "reset", "image"): actual_type = "クリック"
         converted = actual_type != stype
         step = {"type": actual_type, "selector": sel}
         if "_frame" in el_info: step["_frame"] = el_info["_frame"]; step["_frame_index"] = el_info.get("_frame_index", 0)
@@ -2788,6 +2805,7 @@ def _main_inner(page: ft.Page):
             ft.Row([ft.Text("追加:", size=10, color=ft.Colors.GREY_500),
                     ft.IconButton(ft.Icons.EDIT, tooltip="入力", icon_size=18, on_click=lambda e: quick_add("入力")),
                     ft.IconButton(ft.Icons.MOUSE, tooltip="クリック", icon_size=18, on_click=lambda e: quick_add("クリック")),
+                    ft.IconButton(ft.Icons.NEAR_ME, tooltip="ホバー", icon_size=18, on_click=lambda e: quick_add("ホバー")),
                     ft.IconButton(ft.Icons.ARROW_DROP_DOWN_CIRCLE, tooltip="選択", icon_size=18, on_click=lambda e: quick_add("選択")),
                     ft.VerticalDivider(width=1),
                     ft.IconButton(ft.Icons.LIST, tooltip="全パターン", icon_size=18, on_click=quick_add_all_options),

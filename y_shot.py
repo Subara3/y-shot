@@ -172,7 +172,10 @@ def _build_selector(driver, el, tag, eid, ename):
         if safe_classes:
             cs = tag + "".join(f".{c}" for c in safe_classes[:2])
             try:
-                if len(driver.find_elements(By.CSS_SELECTOR, cs)) == 1: return cs
+                n = len(driver.find_elements(By.CSS_SELECTOR, cs))
+                if n == 1: return cs
+                # Allow small duplicates for multi-class selectors (e.g. PC/SP dual layout)
+                if n <= 3 and len(safe_classes) >= 2: return cs
             except Exception: pass
     try:
         idx = driver.execute_script(

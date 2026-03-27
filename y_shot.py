@@ -14,7 +14,7 @@ from urllib.parse import urlparse, urlunparse
 import flet as ft
 
 APP_NAME = "y-shot"
-APP_VERSION = "1.8"
+APP_VERSION = "2.1"
 APP_AUTHOR = "Yuri Norimatsu"
 
 # ── File logger (log/YYYYMMDD.log, append) ──
@@ -67,7 +67,20 @@ def collect_elements_python(driver, include_hidden=False):
             if sel in seen: continue; seen.add(sel)
             hint = (el.get_attribute("placeholder") or el.get_attribute("alt") or
                     (el.text or "").strip()[:50] or (el.get_attribute("value") or "")[:30])
-            results.append({"selector": sel, "tag": tag, "type": etype, "name": ename, "id": eid, "hint": hint, "visible": visible})
+            hidden_reason = ""
+            if not visible:
+                try:
+                    hidden_reason = driver.execute_script(
+                        "var e=arguments[0],s=window.getComputedStyle(e);"
+                        "if(s.display==='none')return 'display:none';"
+                        "if(s.visibility==='hidden')return 'visibility:hidden';"
+                        "if(parseFloat(s.opacity)===0)return 'opacity:0';"
+                        "var r=e.getBoundingClientRect();"
+                        "if(r.width===0&&r.height===0)return 'size:0';"
+                        "if(r.bottom<0||r.right<0)return 'off-viewport';"
+                        "return 'other';", el) or "other"
+                except Exception: hidden_reason = "unknown"
+            results.append({"selector": sel, "tag": tag, "type": etype, "name": ename, "id": eid, "hint": hint, "visible": visible, "hidden_reason": hidden_reason})
         except Exception: continue
     return results
 
@@ -85,6 +98,20 @@ def _build_selector(driver, el, tag, eid, ename):
         if eid[0].isdigit() or not all(c.isalnum() or c in '-_' for c in eid):
             return f'[id="{_css_escape_attr(eid)}"]'
         return f"#{eid}"
+    # Prefer stable test attributes over name/class
+    for attr in ("data-testid", "data-cy", "data-test"):
+        val = el.get_attribute(attr) or ""
+        if val:
+            s = f'[{attr}="{_css_escape_attr(val)}"]'
+            try:
+                if len(driver.find_elements(By.CSS_SELECTOR, s)) == 1: return s
+            except Exception: pass
+    aria = el.get_attribute("aria-label") or ""
+    if aria:
+        s = f'{tag}[aria-label="{_css_escape_attr(aria)}"]'
+        try:
+            if len(driver.find_elements(By.CSS_SELECTOR, s)) == 1: return s
+        except Exception: pass
     if ename:
         safe_name = _css_escape_attr(ename)
         s = f'{tag}[name="{safe_name}"]'
@@ -269,10 +296,11 @@ def build_auth_url(url, user, password):
     if p.port: nl += f":{p.port}"
     return urlunparse(p._replace(netloc=nl))
 
-STEP_TYPES = ["入力", "クリック", "選択", "待機", "スクショ", "戻る", "ナビゲーション", "見出し", "コメント"]
+STEP_TYPES = ["入力", "クリック", "選択", "待機", "要素待機", "スクショ", "戻る", "ナビゲーション", "見出し", "コメント"]
 STEP_ICONS = {"入力": ft.Icons.EDIT, "クリック": ft.Icons.MOUSE,
               "選択": ft.Icons.ARROW_DROP_DOWN_CIRCLE,
-              "待機": ft.Icons.HOURGLASS_BOTTOM, "スクショ": ft.Icons.CAMERA_ALT,
+              "待機": ft.Icons.HOURGLASS_BOTTOM, "要素待機": ft.Icons.VISIBILITY,
+              "スクショ": ft.Icons.CAMERA_ALT,
               "戻る": ft.Icons.ARROW_BACK, "ナビゲーション": ft.Icons.OPEN_IN_BROWSER,
               "見出し": ft.Icons.TITLE, "コメント": ft.Icons.COMMENT}
 INPUT_MODES = [("overwrite", "上書き"), ("append", "追記"), ("clear", "クリアのみ")]
@@ -303,6 +331,10 @@ def step_short(step):
         url = step.get("url","")
         return url[:40]+"..." if len(url) > 40 else url
     if t == "待機": return f"{step.get('seconds','1.0')}秒"
+    if t == "要素待機":
+        sel = step.get("selector",""); timeout = step.get("seconds","10")
+        if len(sel) > 25: sel = sel[:22]+"..."
+        return f"{sel} (最大{timeout}秒)"
     if t == "スクショ":
         m = step.get("mode","fullpage")
         if m == "fullpage": return "表示範囲"
@@ -538,12 +570,25 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                     if st in ("見出し","コメント"):
                         if st == "見出し": log_cb(f"  ## {step.get('text','')}")
                         continue
+                    # iframe switching
+                    if "_frame" in step:
+                        try:
+                            driver.switch_to.default_content()
+                            fi = step.get("_frame_index", 0)
+                            iframes = driver.find_elements(By.CSS_SELECTOR, "iframe, frame")
+                            if fi < len(iframes): driver.switch_to.frame(iframes[fi])
+                        except Exception as fx: log_cb(f"  S{si} [WARN] iframe切替失敗: {fx}")
+                    elif si > 1:
+                        # Return to default content if previous step was in iframe
+                        try: driver.switch_to.default_content()
+                        except Exception: pass
                     if st == "入力":
                         sel = step.get("selector","")
                         iv = step.get("value","{パターン}").replace("{パターン}",value).replace("{pattern}",value)
                         input_mode = step.get("input_mode", "overwrite")
                         try:
                             e = WebDriverWait(driver,10).until(EC.presence_of_element_located((By.CSS_SELECTOR,sel)))
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", e)
                             etype = (e.get_attribute("type") or "").lower()
                             if input_mode == "clear":
                                 # Clear only — no new value
@@ -570,7 +615,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                     elif st == "クリック":
                         sel = step.get("selector","").replace("{パターン}",value).replace("{pattern}",value)
                         try:
-                            WebDriverWait(driver,10).until(EC.element_to_be_clickable((By.CSS_SELECTOR,sel))).click()
+                            _el = WebDriverWait(driver,10).until(EC.element_to_be_clickable((By.CSS_SELECTOR,sel)))
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", _el)
+                            _el.click()
                             log_cb(f"  S{si} クリック: {sel}")
                         except Exception as x: log_cb(f"  S{si} [WARN] クリック失敗: {x}")
                     elif st == "選択":
@@ -578,6 +625,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         sv = step.get("value","").replace("{パターン}",value).replace("{pattern}",value)
                         try:
                             el = WebDriverWait(driver,10).until(EC.presence_of_element_located((By.CSS_SELECTOR,sel)))
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", el)
                             dd = SeleniumSelect(el)
                             try: dd.select_by_value(sv)
                             except Exception: dd.select_by_visible_text(sv)
@@ -600,6 +648,14 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         except Exception as x: log_cb(f"  S{si} [WARN] ナビゲーション失敗: {x}")
                     elif st == "待機":
                         s = float(step.get("seconds","1.0")); time.sleep(s); log_cb(f"  S{si} 待機: {s}秒")
+                    elif st == "要素待機":
+                        sel = step.get("selector","")
+                        timeout = float(step.get("seconds","10"))
+                        try:
+                            WebDriverWait(driver, timeout).until(EC.visibility_of_element_located((By.CSS_SELECTOR, sel)))
+                            log_cb(f"  S{si} 要素待機OK: {sel}")
+                        except Exception as x:
+                            log_cb(f"  S{si} [WARN] 要素待機タイムアウト({timeout}秒): {sel}")
                     elif st == "スクショ":
                         sc += 1; gss += 1; mode = step.get("mode","fullpage"); sel = step.get("selector","")
                         safe_tc = _safe_filename(tc_name, 20)
@@ -668,7 +724,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         except Exception as x: log_cb(f"  S{si} [WARN] スクショ失敗: {x}")
                 done_pats += 1
                 if progress_cb and total_pats > 0:
-                    progress_cb(done_pats, total_pats)
+                    progress_cb(done_pats, total_pats, f"{tc_number} {tc_name}")
 
         if stop_event and stop_event.is_set():
             log_cb(f"\n[中断完了] -> {outdir}")
@@ -812,7 +868,8 @@ def _main_inner(page: ft.Page):
         "selected_test": -1, "selected_pat_set": None, "selected_el": -1,
         "selected_page": None,
         "collapsed": set(),
-        "stop_event": None, "test_drivers": [],
+        "stop_event": None, "test_drivers": [], "running": False,
+        "selected_test_per_page": {},
         "_tc_id_counter": 0, "_page_id_counter": 0,
     }
     _max_id = 0
@@ -901,13 +958,22 @@ def _main_inner(page: ft.Page):
     def log(msg):
         _flog.info(msg)
         ts = datetime.now().strftime("%H:%M:%S")
-        log_list.controls.append(ft.Text(f"[{ts}] {msg}", size=11, selectable=True, font_family="Consolas"))
+        if "[ERROR]" in msg: color = ft.Colors.RED_600
+        elif "[WARN]" in msg: color = ft.Colors.ORANGE_700
+        else: color = ft.Colors.GREY_700
+        log_list.controls.append(ft.Text(f"[{ts}] {msg}", size=11, selectable=True, font_family="Consolas", color=color))
         if len(log_list.controls) > 400: log_list.controls.pop(0)
         try: page.update()
         except Exception: pass
     def _log_error(context, exc):
         _flog.error(f"{context}: {exc}\n{traceback.format_exc()}")
         log(f"[ERROR] {context}: {exc}")
+    def _guard_running():
+        """Return True and show snack if tests are running (blocks editing)."""
+        if state["running"]:
+            snack("テスト実行中は編集できません", ft.Colors.ORANGE_700)
+            return True
+        return False
     def snack(msg, color=ft.Colors.GREEN_700):
         try:
             sb = ft.SnackBar(ft.Text(msg, color=ft.Colors.WHITE), bgcolor=color)
@@ -974,25 +1040,32 @@ def _main_inner(page: ft.Page):
     def on_page_dd_change(e):
         if not page_dd.value: return
         state["selected_page"] = page_dd.value
+        # Restore remembered test selection for this page
+        remembered_id = state["selected_test_per_page"].get(page_dd.value, "")
         state["selected_test"] = -1
+        if remembered_id:
+            for i, tc in enumerate(state["tests"]):
+                if tc.get("_id") == remembered_id:
+                    state["selected_test"] = i; break
         refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
         page.update()
 
     def add_page(e):
+        if _guard_running(): return
         next_num = str(len(state["pages"]) + 1)
         nf = ft.TextField(label="ページ名", width=350, value=f"ページ{next_num}")
-        url_f = ft.TextField(label="起点URL", width=450, hint_text="空欄なら全体設定のURLを使用")
+        url_f = ft.TextField(label="起点URL", width=450, hint_text="このページの起点URL")
         numf = ft.TextField(label="ページ番号", width=100, value=next_num)
         startf = ft.TextField(label="テスト開始番号", width=100, value="1", hint_text="この番号から連番")
         def on_ok(e):
             try:
                 name = nf.value.strip(); num = numf.value.strip()
-                if not name: snack("名前入力", ft.Colors.RED_600); return
-                if not num: snack("番号入力", ft.Colors.RED_600); return
+                if not name: snack("名前入力", ft.Colors.RED_700); return
+                if not num: snack("番号入力", ft.Colors.RED_700); return
                 if any(p["number"] == num for p in state["pages"]):
-                    snack(f"番号 {num} は既に使用されています", ft.Colors.RED_600); return
+                    snack(f"番号 {num} は既に使用されています", ft.Colors.RED_700); return
                 try: start = int(startf.value.strip() or "1")
-                except ValueError: snack("開始番号は整数で", ft.Colors.RED_600); return
+                except ValueError: snack("開始番号は整数で", ft.Colors.RED_700); return
                 new_pg = {"_id": _new_page_id(), "name": name, "number": num, "start_number": start,
                           "url": url_f.value.strip()}
                 state["pages"].append(new_pg)
@@ -1007,21 +1080,22 @@ def _main_inner(page: ft.Page):
         open_dlg(dlg)
 
     def edit_page(e):
+        if _guard_running(): return
         pg = cur_page()
-        if not pg: snack("ページを選択してください", ft.Colors.ORANGE_600); return
+        if not pg: snack("ページを選択してください", ft.Colors.ORANGE_700); return
         nf = ft.TextField(label="ページ名", width=350, value=pg["name"])
-        url_f = ft.TextField(label="起点URL", width=450, value=pg.get("url",""), hint_text="空欄なら全体設定のURLを使用")
+        url_f = ft.TextField(label="起点URL", width=450, value=pg.get("url",""), hint_text="このページの起点URL")
         numf = ft.TextField(label="ページ番号", width=100, value=pg["number"])
         startf = ft.TextField(label="テスト開始番号", width=100, value=str(pg.get("start_number", 1)))
         def on_ok(e):
             try:
                 name = nf.value.strip(); num = numf.value.strip()
-                if not name: snack("名前入力", ft.Colors.RED_600); return
-                if not num: snack("番号入力", ft.Colors.RED_600); return
+                if not name: snack("名前入力", ft.Colors.RED_700); return
+                if not num: snack("番号入力", ft.Colors.RED_700); return
                 if num != pg["number"] and any(p["number"] == num for p in state["pages"]):
-                    snack(f"番号 {num} は既に使用されています", ft.Colors.RED_600); return
+                    snack(f"番号 {num} は既に使用されています", ft.Colors.RED_700); return
                 try: start = int(startf.value.strip() or "1")
-                except ValueError: snack("開始番号は整数で", ft.Colors.RED_600); return
+                except ValueError: snack("開始番号は整数で", ft.Colors.RED_700); return
                 pg["name"] = name; pg["number"] = num; pg["start_number"] = start
                 pg["url"] = url_f.value.strip()
                 auto_number_tests()
@@ -1034,8 +1108,9 @@ def _main_inner(page: ft.Page):
         open_dlg(dlg)
 
     def del_page(e):
+        if _guard_running(): return
         if len(state["pages"]) <= 1:
-            snack("最後のページは削除できません", ft.Colors.RED_600); return
+            snack("最後のページは削除できません", ft.Colors.RED_700); return
         pg = cur_page()
         if not pg: return
         pid = pg["_id"]; n_tests = len(tests_for_page(pid))
@@ -1122,11 +1197,11 @@ def _main_inner(page: ft.Page):
                 on_click=lambda e, tid=tc_id: select_test(_find_test_idx(tid)),
                 key=tc_id)
             test_list.controls.append(card)
-        has_url = bool(state["config"].get("url","").strip())
+        has_any_url = any(p.get("url","").strip() for p in state["pages"]) or any(t.get("url","").strip() for t in state["tests"])
         has_tests = len(state["tests"]) > 0
-        run_btn.disabled = not (has_url and has_tests)
-        run_single_btn.disabled = not (has_url and has_tests)
-        run_page_btn.disabled = not (has_url and page_tests)
+        run_btn.disabled = not (has_any_url and has_tests)
+        run_single_btn.disabled = not (has_any_url and has_tests)
+        run_page_btn.disabled = not (has_any_url and page_tests)
         schedule_save()
         if update: page.update()
 
@@ -1193,12 +1268,17 @@ def _main_inner(page: ft.Page):
         if idx < 0 or idx >= len(state["tests"]): return
         if idx == state["selected_test"]: return  # already selected
         state["selected_test"] = idx; state["collapsed"] = set()
+        # Remember selection per page
+        tc = state["tests"][idx]
+        pid = tc.get("page_id", "")
+        if pid: state["selected_test_per_page"][pid] = tc.get("_id", "")
         _update_test_highlight()
         refresh_steps(False); page.update()
 
     def add_test(e):
+        if _guard_running(): return
         cur_pid = state["selected_page"]
-        if not cur_pid: snack("ページを選択してください", ft.Colors.ORANGE_600); return
+        if not cur_pid: snack("ページを選択してください", ft.Colors.ORANGE_700); return
         new_tc = {"name": f"テスト{len(tests_for_page(cur_pid))+1}", "pattern": None, "steps": [],
                   "_id": _new_tc_id(), "page_id": cur_pid, "number": ""}
         state["tests"].append(new_tc); auto_number_tests()
@@ -1206,6 +1286,7 @@ def _main_inner(page: ft.Page):
         refresh_page_dd(False); refresh_test_list(False); refresh_steps()
 
     def copy_test(idx):
+        if _guard_running(): return
         if 0 <= idx < len(state["tests"]):
             tc = copy.deepcopy(state["tests"][idx])
             tc["name"] += " (コピー)"; tc["_id"] = _new_tc_id(); tc.pop("_sub_number", None)
@@ -1214,6 +1295,7 @@ def _main_inner(page: ft.Page):
             refresh_page_dd(False); refresh_test_list(False); refresh_steps()
 
     def del_test(idx):
+        if _guard_running(): return
         if not (0 <= idx < len(state["tests"])): return
         tc = state["tests"][idx]; name = tc.get("name", f"テスト{idx+1}")
         pat = tc.get("pattern"); pat_orphan = False
@@ -1239,6 +1321,7 @@ def _main_inner(page: ft.Page):
         open_dlg(dlg)
 
     def edit_test_name(e):
+        if _guard_running(): return
         tc = cur_test()
         if not tc: return
         nf = ft.TextField(label="テスト名", value=tc["name"], width=350)
@@ -1271,7 +1354,7 @@ def _main_inner(page: ft.Page):
                     try:
                         tc["_sub_number"] = int(sub_val)
                     except ValueError:
-                        snack("枝番は整数で入力してください", ft.Colors.RED_600); return
+                        snack("枝番は整数で入力してください", ft.Colors.RED_700); return
                 else:
                     tc.pop("_sub_number", None)
                 auto_number_tests()
@@ -1372,13 +1455,24 @@ def _main_inner(page: ft.Page):
         state["collapsed"].symmetric_difference_update({sid}); refresh_steps()
 
     def del_step(idx):
+        if _guard_running(): return
         tc = cur_test()
-        if tc and 0 <= idx < len(tc["steps"]):
+        if not tc or not (0 <= idx < len(tc["steps"])): return
+        step = tc["steps"][idx]
+        label = step_short(step)
+        if len(label) > 30: label = label[:27] + "..."
+        def on_yes(e):
             tc["steps"].pop(idx)
             state["collapsed"] = {c if c < idx else c-1 for c in state["collapsed"] if c != idx}
-            refresh_steps()
+            refresh_steps(); close_dlg(dlg)
+        dlg = ft.AlertDialog(title=ft.Text("ステップ削除"),
+            content=ft.Text(f"「{step['type']}: {label}」を削除しますか？"),
+            actions=[ft.TextButton("削除", on_click=on_yes, style=ft.ButtonStyle(color=ft.Colors.RED_600)),
+                     ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg)
 
     def show_step_dlg(idx):
+        if _guard_running(): return
         tc = cur_test()
         if not tc: return
         if idx is not None and idx >= len(tc.get("steps", [])): return
@@ -1422,19 +1516,28 @@ def _main_inner(page: ft.Page):
         def upd(e=None):
             try:
                 t = type_dd.value
-                sel_field.visible = t in ("入力","クリック","選択") or (t=="スクショ" and mode_dd.value in ("element","margin"))
                 is_input = (t == "入力")
+                needs_sel = t in ("入力","クリック","選択","要素待機") or (t=="スクショ" and mode_dd.value in ("element","margin"))
+                sel_field.visible = needs_sel
                 input_mode_dd.visible = is_input
                 val_mode.visible = is_input or t == "選択"
                 val_field.visible = (is_input or t == "選択") and val_mode.value == "手入力"
-                # クリアモードでは値入力不要
                 if is_input and input_mode_dd.value == "clear":
                     val_mode.visible = False; val_field.visible = False
                 nav_url_f.visible = (t == "ナビゲーション")
-                sec_field.visible = t in ("待機", "戻る"); mode_dd.visible = (t=="スクショ")
-                margin_f.visible = (t=="スクショ" and mode_dd.value=="margin"); text_f.visible = t in ("見出し","コメント")
+                sec_field.visible = t in ("待機", "戻る", "要素待機"); mode_dd.visible = (t=="スクショ")
+                if t == "要素待機": sec_field.label = "タイムアウト(秒)"
+                else: sec_field.label = "秒数"
+                margin_f.visible = (t=="スクショ" and mode_dd.value=="margin")
+                text_f.visible = t in ("見出し","コメント")
                 if t == "選択": val_mode.label = "選択肢の指定方法"
                 else: val_mode.label = "値の指定方法"
+                # Hide empty groups entirely
+                input_group.visible = needs_sel or is_input or t == "選択"
+                nav_group.visible = (t == "ナビゲーション")
+                time_group.visible = t in ("待機", "戻る", "要素待機")
+                ss_group.visible = (t == "スクショ")
+                text_group.visible = t in ("見出し","コメント")
                 try: page.update()
                 except Exception: pass
             except Exception as x: _log_error("show_step_dlg.upd", x)
@@ -1447,7 +1550,7 @@ def _main_inner(page: ft.Page):
                 if t in ("見出し","コメント"): step["text"] = text_f.value
                 elif t in ("入力","クリック","選択"):
                     s = sel_field.value if hasattr(sel_field,'value') else ""
-                    if not s: snack("セレクタを入力", ft.Colors.RED_600); return
+                    if not s: snack("セレクタを入力", ft.Colors.RED_700); return
                     step["selector"] = s
                     if t == "入力":
                         step["input_mode"] = input_mode_dd.value
@@ -1465,36 +1568,48 @@ def _main_inner(page: ft.Page):
                             if pn in state["pattern_sets"]: tc["pattern"] = pn
                 elif t == "戻る":
                     try: step["seconds"] = str(float(sec_field.value))
-                    except Exception: snack("秒数を正しく", ft.Colors.RED_600); return
+                    except Exception: snack("秒数を正しく", ft.Colors.RED_700); return
                 elif t == "ナビゲーション":
                     url = nav_url_f.value.strip()
-                    if not url: snack("URLを入力", ft.Colors.RED_600); return
+                    if not url: snack("URLを入力", ft.Colors.RED_700); return
                     step["url"] = url
                 elif t == "待機":
                     try: step["seconds"] = str(float(sec_field.value))
-                    except Exception: snack("秒数を正しく", ft.Colors.RED_600); return
+                    except Exception: snack("秒数を正しく", ft.Colors.RED_700); return
+                elif t == "要素待機":
+                    s = sel_field.value if hasattr(sel_field,'value') else ""
+                    if not s: snack("セレクタを入力", ft.Colors.RED_700); return
+                    step["selector"] = s
+                    try: step["seconds"] = str(float(sec_field.value or "10"))
+                    except Exception: snack("秒数を正しく", ft.Colors.RED_700); return
                 elif t == "スクショ":
                     step["mode"] = mode_dd.value
                     s = sel_field.value if hasattr(sel_field,'value') else ""
-                    if mode_dd.value in ("element","margin") and not s: snack("セレクタ必要", ft.Colors.RED_600); return
+                    if mode_dd.value in ("element","margin") and not s: snack("セレクタ必要", ft.Colors.RED_700); return
                     if s: step["selector"] = s
                     if mode_dd.value == "margin":
                         try: step["margin_px"] = str(int(margin_f.value))
-                        except Exception: snack("整数で", ft.Colors.RED_600); return
+                        except Exception: snack("整数で", ft.Colors.RED_700); return
                 if idx is not None: tc["steps"][idx] = step
                 else: tc["steps"].append(step)
                 refresh_steps(False); refresh_test_list(); close_dlg(dlg)
             except Exception as x: _log_error("show_step_dlg.on_ok", x); close_dlg(dlg)
+        # Group related fields
+        input_group = ft.Column([sel_field, input_mode_dd, val_mode, val_field], spacing=8, tight=True)
+        nav_group = ft.Column([nav_url_f], spacing=8, tight=True)
+        time_group = ft.Column([sec_field], spacing=8, tight=True)
+        ss_group = ft.Column([ft.Row([mode_dd, margin_f], spacing=8)], spacing=8, tight=True)
+        text_group = ft.Column([text_f], spacing=8, tight=True)
         dlg = ft.AlertDialog(title=ft.Text("ステップ編集" if idx is not None else "ステップ追加"),
-            content=ft.Column([type_dd, text_f, sel_field, input_mode_dd, val_mode, val_field, nav_url_f, sec_field, mode_dd, margin_f],
-                tight=True, spacing=10, scroll=ft.ScrollMode.AUTO, width=500, height=420),
+            content=ft.Column([type_dd, text_group, input_group, nav_group, time_group, ss_group],
+                tight=True, spacing=12, scroll=ft.ScrollMode.AUTO, width=500),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
     # ── Element browser ──
     def load_page_click(e):
         url = browser_url.value
-        if not url: snack("URL入力", ft.Colors.RED_600); return
+        if not url: snack("URL入力", ft.Colors.RED_700); return
         load_btn.disabled = True; el_status.value = "読込中..."; page.update()
         page.run_thread(do_load_page, url)
     def do_load_page(url):
@@ -1508,11 +1623,7 @@ def _main_inner(page: ft.Page):
             try: w = float(browser_wait.value)
             except Exception: w = 3.0
             time.sleep(w); log(f"[DEBUG] {state['browser_driver'].title}")
-            # Always collect ALL elements (including hidden) for filtering
-            elems = collect_elements_python(state["browser_driver"], include_hidden=True)
-            state["browser_elements"] = list(elems)
-            state["selector_bank"][url.split("?")[0]] = [el for el in elems if el.get("visible", True)]
-            filter_el_table(); update_url_dd()
+            _do_collect_elements(url)
         except Exception as x:
             if state["browser_driver"]:
                 try: state["browser_driver"].title
@@ -1520,15 +1631,66 @@ def _main_inner(page: ft.Page):
                     kill_driver(state["browser_driver"]); state["browser_driver"] = None
             log(f"[ERROR] {x}")
         finally: load_btn.disabled = False; page.update()
+    def _do_collect_elements(url=None):
+        """Collect elements from current DOM state (no page navigation)."""
+        drv = state["browser_driver"]
+        elems = collect_elements_python(drv, include_hidden=True)
+        # Detect iframes and collect their elements too
+        from selenium.webdriver.common.by import By
+        try:
+            iframes = drv.find_elements(By.CSS_SELECTOR, "iframe, frame")
+            for fi, iframe in enumerate(iframes):
+                frame_id = iframe.get_attribute("id") or iframe.get_attribute("name") or f"frame_{fi}"
+                try:
+                    drv.switch_to.frame(iframe)
+                    frame_elems = collect_elements_python(drv, include_hidden=True)
+                    for fe in frame_elems:
+                        fe["hint"] = f"[iframe:{frame_id}] " + fe.get("hint", "")
+                        fe["_frame"] = frame_id
+                        fe["_frame_index"] = fi
+                    elems.extend(frame_elems)
+                    drv.switch_to.default_content()
+                except Exception:
+                    try: drv.switch_to.default_content()
+                    except Exception: pass
+        except Exception: pass
+        state["browser_elements"] = list(elems)
+        if url:
+            state["selector_bank"][url.split("?")[0]] = [el for el in elems if el.get("visible", True)]
+        filter_el_table(); update_url_dd()
+        log(f"[要素] DOM再取得 {len(elems)} 要素")
+    def reload_dom_click(e):
+        """Re-collect elements from current DOM without navigating."""
+        if not state["browser_driver"]: snack("ブラウザ未起動", ft.Colors.ORANGE_700); return
+        el_status.value = "DOM再取得中..."; page.update()
+        try:
+            _do_collect_elements()
+        except Exception as x:
+            log(f"[ERROR] DOM再取得失敗: {x}")
+        finally: page.update()
+    def on_el_sort_change(e):
+        filter_el_table()
+
     def filter_el_table(update=True):
-        """Filter and display elements based on search text and hidden visibility."""
+        """Filter and display elements based on search text, hidden visibility, and sort."""
         el_table.rows.clear()
         query = (el_search.value or "").strip().lower()
         show_hidden = el_show_hidden.value
         visible_count = 0
         total_count = len(state["browser_elements"])
         hidden_count = sum(1 for el in state["browser_elements"] if not el.get("visible", True))
-        for i, el in enumerate(state["browser_elements"]):
+        # Build sorted index
+        sort_key = "dom"
+        try: sort_key = el_sort_dd.value or "dom"
+        except NameError: pass
+        indexed_els = list(enumerate(state["browser_elements"]))
+        if sort_key == "tag":
+            indexed_els.sort(key=lambda x: (x[1].get("tag",""), x[1].get("type","")))
+        elif sort_key == "type":
+            indexed_els.sort(key=lambda x: (x[1].get("type",""), x[1].get("tag","")))
+        elif sort_key == "id":
+            indexed_els.sort(key=lambda x: (x[1].get("id","") or x[1].get("name","") or "zzz"))
+        for i, el in indexed_els:
             is_visible = el.get("visible", True)
             # Filter: hidden visibility
             if not is_visible and not show_hidden:
@@ -1544,7 +1706,8 @@ def _main_inner(page: ft.Page):
             visible_count += 1
             # Row color: dim for hidden elements
             row_color = ft.Colors.ORANGE_50 if not is_visible else None
-            vis_indicator = "" if is_visible else " [hidden]"
+            reason = el.get("hidden_reason", "")
+            vis_indicator = "" if is_visible else f" [{reason}]" if reason else " [hidden]"
             el_table.rows.append(ft.DataRow(
                 cells=[ft.DataCell(ft.Text(el["tag"],size=11)),
                        ft.DataCell(ft.Text(el.get("type",""),size=11)),
@@ -1617,26 +1780,32 @@ def _main_inner(page: ft.Page):
         filter_el_table()
     def quick_add(stype):
         tc = cur_test()
-        if not tc: snack("テストケースを選択", ft.Colors.ORANGE_600); return
+        if not tc: snack("テストケースを選択", ft.Colors.ORANGE_700); return
         idx = state["selected_el"]
-        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素をクリック", ft.Colors.ORANGE_600); return
+        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素をクリック", ft.Colors.ORANGE_700); return
         el_info = state["browser_elements"][idx]; sel = el_info["selector"]
         tag = el_info.get("tag", ""); etype = el_info.get("type", "").lower()
         actual_type = stype
         if tag == "select": actual_type = "選択"
         elif etype in ("radio", "checkbox"): actual_type = "クリック"
         elif tag in ("button", "a") or etype in ("submit", "button", "reset", "image"): actual_type = "クリック"
+        converted = actual_type != stype
         step = {"type": actual_type, "selector": sel}
+        if "_frame" in el_info: step["_frame"] = el_info["_frame"]; step["_frame_index"] = el_info.get("_frame_index", 0)
         if actual_type in ("入力", "選択"): step["value"] = "{パターン}"
-        tc["steps"].append(step); refresh_steps(False); refresh_test_list(); snack(f"{actual_type}: {sel}")
+        tc["steps"].append(step); refresh_steps(False); refresh_test_list()
+        if converted:
+            snack(f"要素に合わせて「{actual_type}」に変更: {sel}", ft.Colors.BLUE_600)
+        else:
+            snack(f"{actual_type}: {sel}")
     def quick_add_all_options(e):
-        if not state["browser_driver"]: snack("ページ読込必要", ft.Colors.ORANGE_600); return
+        if not state["browser_driver"]: snack("ページ読込必要", ft.Colors.ORANGE_700); return
         idx = state["selected_el"]
-        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素をクリック", ft.Colors.ORANGE_600); return
+        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素をクリック", ft.Colors.ORANGE_700); return
         el_info = state["browser_elements"][idx]; tag = el_info.get("tag", ""); etype = el_info.get("type", "").lower()
-        if tag != "select" and etype != "radio": snack("セレクトボックスまたはラジオボタンを選択", ft.Colors.ORANGE_600); return
+        if tag != "select" and etype != "radio": snack("セレクトボックスまたはラジオボタンを選択", ft.Colors.ORANGE_700); return
         step_type, options = collect_element_options(state["browser_driver"], el_info)
-        if not options: snack("選択肢が取得できませんでした", ft.Colors.RED_600); return
+        if not options: snack("選択肢が取得できませんでした", ft.Colors.RED_700); return
         el_type_name = "セレクトボックス" if tag == "select" else "ラジオボタン"
         sel = el_info.get("selector", ""); el_label = el_info.get("name", "") or el_info.get("hint", "") or sel
         if len(el_label) > 25: el_label = el_label[:22] + "..."
@@ -1673,13 +1842,28 @@ def _main_inner(page: ft.Page):
         open_dlg(dlg)
     def capture_form(e):
         tc = cur_test()
-        if not tc: snack("テストケースを選択", ft.Colors.ORANGE_600); return
-        if not state["browser_driver"]: snack("ページ読込必要", ft.Colors.ORANGE_600); return
+        if not tc: snack("テストケースを選択", ft.Colors.ORANGE_700); return
+        if not state["browser_driver"]: snack("ページ読込必要", ft.Colors.ORANGE_700); return
         try:
             fs = capture_form_values(state["browser_driver"])
-            if not fs: snack("フォーム値なし", ft.Colors.ORANGE_600); return
+            if not fs: snack("フォーム値なし", ft.Colors.ORANGE_700); return
             tc["steps"].extend(fs); refresh_steps(False); refresh_test_list(); snack(f"フォーム値 {len(fs)} 件")
         except Exception as x: log(f"[ERROR] {x}")
+    def test_selector_click(e):
+        """Test a CSS selector by highlighting the matched element in the browser."""
+        if not state["browser_driver"]: snack("ブラウザ未起動", ft.Colors.ORANGE_700); return
+        sel_to_test = (sel_test_field.value or "").strip()
+        if not sel_to_test: snack("セレクタを入力してください", ft.Colors.ORANGE_700); return
+        try:
+            from selenium.webdriver.common.by import By
+            matches = state["browser_driver"].find_elements(By.CSS_SELECTOR, sel_to_test)
+            if not matches:
+                snack(f"該当なし: {sel_to_test}", ft.Colors.RED_700)
+            else:
+                state["browser_driver"].execute_script(HIGHLIGHT_JS, sel_to_test)
+                snack(f"一致: {len(matches)} 要素", ft.Colors.GREEN_700 if len(matches) == 1 else ft.Colors.ORANGE_700)
+        except Exception as x:
+            snack(f"セレクタエラー: {x}", ft.Colors.RED_700)
     def close_br(e):
         close_browser(); el_table.rows.clear(); state["browser_elements"].clear()
         el_status.value = "閉じた"; page.update()
@@ -1691,8 +1875,14 @@ def _main_inner(page: ft.Page):
     # ================================================================
     # Tab 2: Pattern Sets
     # ================================================================
+    def on_ps_search_change(e):
+        refresh_pat_set_list()
+
     def refresh_pat_set_list(update=True):
         pat_set_list.controls.clear()
+        ps_query = ""
+        try: ps_query = (ps_search.value or "").strip().lower()
+        except NameError: pass
         if not state["pattern_sets"]:
             pat_set_list.controls.append(ft.Container(
                 ft.Column([ft.Icon(ft.Icons.ADD_CIRCLE_OUTLINE, size=28, color=ft.Colors.GREY_400),
@@ -1700,6 +1890,7 @@ def _main_inner(page: ft.Page):
                     horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=6),
                 padding=ft.Padding(16, 30, 16, 16), key="empty_ps"))
         for name in state["pattern_sets"].keys():
+            if ps_query and ps_query not in name.lower(): continue
             pats = state["pattern_sets"][name]; selected = (state["selected_pat_set"] == name)
             pat_set_list.controls.append(ft.Container(
                 ft.Row([ft.Column([
@@ -1738,12 +1929,13 @@ def _main_inner(page: ft.Page):
         state["selected_pat_set"] = name; refresh_pat_set_list(False); refresh_pats()
 
     def add_pat_set(e):
+        if _guard_running(): return
         nf = ft.TextField(label="パターンセット名", width=300)
         def on_ok(e):
             try:
                 n = nf.value.strip()
-                if not n: snack("名前入力", ft.Colors.RED_600); return
-                if n in state["pattern_sets"]: snack("既に存在", ft.Colors.RED_600); return
+                if not n: snack("名前入力", ft.Colors.RED_700); return
+                if n in state["pattern_sets"]: snack("既に存在", ft.Colors.RED_700); return
                 state["pattern_sets"][n] = []; state["selected_pat_set"] = n
                 refresh_pat_set_list(False); refresh_pats(); close_dlg(dlg)
             except Exception as x: _log_error("add_pat_set", x); close_dlg(dlg)
@@ -1757,8 +1949,8 @@ def _main_inner(page: ft.Page):
         def on_ok(e):
             try:
                 new_name = nf.value.strip()
-                if not new_name: snack("名前入力", ft.Colors.RED_600); return
-                if new_name != old_name and new_name in state["pattern_sets"]: snack("既に存在", ft.Colors.RED_600); return
+                if not new_name: snack("名前入力", ft.Colors.RED_700); return
+                if new_name != old_name and new_name in state["pattern_sets"]: snack("既に存在", ft.Colors.RED_700); return
                 if new_name != old_name:
                     new_ps = {}
                     for k, v in state["pattern_sets"].items(): new_ps[new_name if k == old_name else k] = v
@@ -1773,6 +1965,7 @@ def _main_inner(page: ft.Page):
         open_dlg(dlg)
 
     def del_pat_set(name):
+        if _guard_running(): return
         if name not in state["pattern_sets"]: return
         cnt = len(state["pattern_sets"][name])
         def on_yes(e):
@@ -1828,11 +2021,13 @@ def _main_inner(page: ft.Page):
         if update: page.update()
 
     def add_pat(e):
+        if _guard_running(): return
         name = state["selected_pat_set"]
         if not name: return
         edit_pat(None)
 
     def edit_pat(idx):
+        if _guard_running(): return
         name = state["selected_pat_set"]
         if not name: return
         pats = state["pattern_sets"][name]
@@ -1841,7 +2036,7 @@ def _main_inner(page: ft.Page):
         vf = ft.TextField(label="入力値", width=400, value=init.get("value",""), multiline=True, min_lines=3, max_lines=6)
         def on_ok(e):
             try:
-                if not lf.value: snack("ラベル入力", ft.Colors.RED_600); return
+                if not lf.value: snack("ラベル入力", ft.Colors.RED_700); return
                 p = {"label": lf.value, "value": vf.value}
                 if idx is not None: pats[idx] = p
                 else: pats.append(p)
@@ -1853,40 +2048,68 @@ def _main_inner(page: ft.Page):
         open_dlg(dlg)
 
     def del_pat(idx):
+        if _guard_running(): return
         name = state["selected_pat_set"]
-        if name and name in state["pattern_sets"]:
-            state["pattern_sets"][name].pop(idx); refresh_pats(False); refresh_pat_set_list(False); refresh_test_list()
+        if not name or name not in state["pattern_sets"]: return
+        pats = state["pattern_sets"][name]
+        if not (0 <= idx < len(pats)): return
+        pat = pats[idx]
+        label = pat.get("label", f"パターン{idx+1}")
+        def on_yes(e):
+            pats.pop(idx); refresh_pats(False); refresh_pat_set_list(False); refresh_test_list(); close_dlg(dlg)
+        dlg = ft.AlertDialog(title=ft.Text("パターン削除"),
+            content=ft.Text(f"「{label}」を削除しますか？"),
+            actions=[ft.TextButton("削除", on_click=on_yes, style=ft.ButtonStyle(color=ft.Colors.RED_600)),
+                     ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg)
 
     def export_csv(e):
         name = state["selected_pat_set"]
-        if not name or name not in state["pattern_sets"]: snack("パターンセットを選択", ft.Colors.ORANGE_600); return
+        if not name or name not in state["pattern_sets"]: snack("パターンセットを選択", ft.Colors.ORANGE_700); return
         pats = state["pattern_sets"][name]
-        if not pats: snack("パターンなし", ft.Colors.ORANGE_600); return
+        if not pats: snack("パターンなし", ft.Colors.ORANGE_700); return
         outdir = state["config"].get("output_dir", os.path.join(get_app_dir(), "screenshots"))
         os.makedirs(outdir, exist_ok=True)
         fp = os.path.join(outdir, f"{_safe_filename(name, 50)}.csv")
         save_csv(fp, pats); snack(f"エクスポート: {fp}")
 
     def load_template(e):
-        td = get_templates_dir()
-        if not td: snack("templatesなし", ft.Colors.RED_600); return
         name = state["selected_pat_set"]
-        if not name: snack("パターンセットを選択", ft.Colors.ORANGE_600); return
-        csvs = sorted([f for f in os.listdir(td) if f.lower().endswith(".csv")])
-        if not csvs: snack("CSVなし", ft.Colors.RED_600); return
-        csv_cache = {f: load_csv(os.path.join(td, f)) for f in csvs}
+        if not name: snack("パターンセットを選択", ft.Colors.ORANGE_700); return
+        td = get_templates_dir()
+        csvs = sorted([f for f in os.listdir(td) if f.lower().endswith(".csv")]) if td else []
+        csv_cache = {f: load_csv(os.path.join(td, f)) for f in csvs} if td else {}
         def on_sel(fn):
             try:
                 state["pattern_sets"][name].extend(csv_cache[fn])
                 refresh_pats(False); refresh_pat_set_list(False); refresh_test_list()
                 snack(f"{len(csv_cache[fn])} 件追加"); close_dlg(dlg)
             except Exception as x: _log_error("load_template", x); close_dlg(dlg)
+        def on_import_csv(e):
+            try:
+                fp = csv_path_f.value.strip()
+                if not fp or not os.path.isfile(fp):
+                    snack("ファイルが見つかりません", ft.Colors.RED_700); return
+                rows = load_csv(fp)
+                if not rows: snack("データなし（label,value ヘッダが必要）", ft.Colors.RED_700); return
+                state["pattern_sets"][name].extend(rows)
+                refresh_pats(False); refresh_pat_set_list(False); refresh_test_list()
+                snack(f"{len(rows)} 件インポート"); close_dlg(dlg)
+            except Exception as x: _log_error("import_csv", x); snack(f"インポート失敗: {x}", ft.Colors.RED_600)
+        csv_path_f = ft.TextField(label="CSVファイルパス", width=380, hint_text="label,value 形式のCSV", dense=True)
         cards = [ft.Card(ft.Container(ft.Column([
             ft.Text(os.path.splitext(f)[0], weight=ft.FontWeight.BOLD, size=13),
             ft.Text(f"{len(csv_cache[f])} 件", size=11, color=ft.Colors.GREY_600)], spacing=2),
             padding=12, on_click=lambda e, fn=f: on_sel(fn)), elevation=2) for f in csvs]
-        dlg = ft.AlertDialog(title=ft.Text("テンプレート"),
-            content=ft.Column(cards, spacing=6, scroll=ft.ScrollMode.AUTO, width=380, height=300),
+        content_col = ft.Column(spacing=8, scroll=ft.ScrollMode.AUTO, width=420, tight=True)
+        content_col.controls.append(ft.Text("CSVファイルから直接インポート:", size=12, weight=ft.FontWeight.BOLD))
+        content_col.controls.append(ft.Row([csv_path_f, ft.TextButton("読込", on_click=on_import_csv)], spacing=4))
+        if cards:
+            content_col.controls.append(ft.Divider())
+            content_col.controls.append(ft.Text("テンプレート:", size=12, weight=ft.FontWeight.BOLD))
+            content_col.controls.extend(cards)
+        dlg = ft.AlertDialog(title=ft.Text("テンプレート / CSVインポート"),
+            content=content_col,
             actions=[ft.TextButton("閉じる", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
@@ -1912,7 +2135,7 @@ def _main_inner(page: ft.Page):
         def on_ok(e):
             try:
                 ch = cf.value or "あ"; ml = mf.value.strip()
-                if not ml or not ml.isdigit() or int(ml) < 1: snack("max_lengthを正の整数で", ft.Colors.RED_600); return
+                if not ml or not ml.isdigit() or int(ml) < 1: snack("max_lengthを正の整数で", ft.Colors.RED_700); return
                 n = int(ml)
                 name = _ensure_pat_set(ml)
                 ps = []
@@ -1942,7 +2165,7 @@ def _main_inner(page: ft.Page):
         def on_ok(e):
             try:
                 ml = mf.value.strip()
-                if not ml or not ml.isdigit() or int(ml) < 1: snack("max_lengthを正の整数で", ft.Colors.RED_600); return
+                if not ml or not ml.isdigit() or int(ml) < 1: snack("max_lengthを正の整数で", ft.Colors.RED_700); return
                 n = int(ml)
                 name = _ensure_pat_set(ml)
                 ps = []
@@ -1975,12 +2198,152 @@ def _main_inner(page: ft.Page):
                 state["config"].update({"basic_auth_user":auf.value,"basic_auth_pass":apf.value,
                     "output_dir":of.value,"headless":"1" if hl.value else "0",
                     "save_source":"1" if ss.value else "0"})
+                state["config"].pop("url", None)  # 旧グローバルURL設定を除去
                 save_config(state["config"]); snack("設定保存")
                 refresh_test_list(False); page.update(); close_dlg(dlg)
             except Exception as x: _log_error("show_settings", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("設定"),
             content=ft.Column([ft.Row([auf, apf], spacing=10), of, hl, ss], tight=True, spacing=12, width=500),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg)
+
+    # ── Project Export / Import ──
+    def export_project(e):
+        """Export pages, tests, and pattern sets as a single JSON project file."""
+        try:
+            save_all()
+            project_data = {
+                "app": APP_NAME, "version": APP_VERSION,
+                "pages": state["pages"],
+                "tests": state["tests"],
+                "pattern_sets": state["pattern_sets"],
+            }
+            outdir = state["config"].get("output_dir", os.path.join(get_app_dir(), "screenshots"))
+            os.makedirs(outdir, exist_ok=True)
+            # Build default filename from first page name
+            first_name = state["pages"][0]["name"] if state["pages"] else "project"
+            ts = datetime.now().strftime("%Y%m%d%H%M%S")
+            fp = os.path.join(outdir, f"{_safe_filename(first_name, 30)}_{ts}.yshot.json")
+            with open(fp, "w", encoding="utf-8") as f:
+                json.dump(project_data, f, ensure_ascii=False, indent=2)
+            snack(f"エクスポート: {fp}")
+            log(f"[プロジェクト] エクスポート: {fp}")
+        except Exception as x:
+            _log_error("export_project", x); snack(f"エクスポート失敗: {x}", ft.Colors.RED_600)
+
+    def import_project(e):
+        """Import a .yshot.json project file via file picker dialog."""
+        # Scan for available project files
+        search_dirs = [
+            state["config"].get("output_dir", os.path.join(get_app_dir(), "screenshots")),
+            get_app_dir(),
+        ]
+        found_files = []
+        for d in search_dirs:
+            if not os.path.isdir(d): continue
+            for fn in os.listdir(d):
+                if fn.endswith(".yshot.json"):
+                    fp = os.path.join(d, fn)
+                    found_files.append(fp)
+        found_files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+
+        path_field = ft.TextField(label="ファイルパス", width=450, hint_text=".yshot.json ファイルのパスを入力",
+                                  value=found_files[0] if found_files else "")
+        mode_dd = ft.Dropdown(label="インポート方法", width=250, value="replace",
+            options=[ft.dropdown.Option(key="replace", text="置換（現在のデータを上書き）"),
+                     ft.dropdown.Option(key="merge", text="マージ（現在のデータに追加）")])
+        file_list_col = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, height=150)
+        if found_files:
+            for fp in found_files[:10]:
+                fn = os.path.basename(fp)
+                file_list_col.controls.append(
+                    ft.TextButton(fn, on_click=lambda e, p=fp: _set_path(p), tooltip=fp))
+        else:
+            file_list_col.controls.append(ft.Text("検出されたプロジェクトファイルなし", size=11, color=ft.Colors.GREY_500))
+
+        def _set_path(p):
+            path_field.value = p; page.update()
+
+        def on_ok(e):
+            try:
+                fp = path_field.value.strip()
+                if not fp or not os.path.isfile(fp):
+                    snack("ファイルが見つかりません", ft.Colors.RED_700); return
+                with open(fp, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if "pages" not in data or "tests" not in data:
+                    snack("無効なプロジェクトファイルです", ft.Colors.RED_700); return
+
+                imp_pages = data.get("pages", [])
+                imp_tests = data.get("tests", [])
+                imp_pats = data.get("pattern_sets", {})
+
+                if mode_dd.value == "replace":
+                    state["pages"] = imp_pages
+                    state["tests"] = imp_tests
+                    state["pattern_sets"] = imp_pats
+                else:
+                    # Merge: remap IDs to avoid collision
+                    page_id_map = {}
+                    for pg in imp_pages:
+                        old_id = pg["_id"]
+                        new_id = _new_page_id()
+                        pg["_id"] = new_id
+                        page_id_map[old_id] = new_id
+                    for tc in imp_tests:
+                        tc["_id"] = _new_tc_id()
+                        old_pid = tc.get("page_id", "")
+                        if old_pid in page_id_map:
+                            tc["page_id"] = page_id_map[old_pid]
+                    state["pages"].extend(imp_pages)
+                    state["tests"].extend(imp_tests)
+                    for k, v in imp_pats.items():
+                        if k in state["pattern_sets"]:
+                            # Avoid overwrite: rename
+                            new_k = f"{k}_imported"
+                            n = 2
+                            while new_k in state["pattern_sets"]:
+                                new_k = f"{k}_imported_{n}"; n += 1
+                            state["pattern_sets"][new_k] = v
+                        else:
+                            state["pattern_sets"][k] = v
+
+                # Re-init ID counters
+                _max_id = 0
+                for tc in state["tests"]:
+                    try: _max_id = max(_max_id, int(tc["_id"].split("_", 1)[1]))
+                    except (ValueError, IndexError): pass
+                state["_tc_id_counter"] = _max_id
+                _max_pg = 0
+                for pg in state["pages"]:
+                    try: _max_pg = max(_max_pg, int(pg["_id"].split("_", 1)[1]))
+                    except (ValueError, IndexError): pass
+                state["_page_id_counter"] = _max_pg
+
+                if not state["pages"]:
+                    state["pages"].append({"_id": _new_page_id(), "name": "ページ1", "number": "1", "start_number": 1, "url": ""})
+                state["selected_page"] = state["pages"][0]["_id"]
+                state["selected_test"] = -1
+                state["selected_pat_set"] = None
+                auto_number_tests()
+                save_all()
+                refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
+                refresh_pat_set_list(False); refresh_pats(False); page.update()
+                src_ver = data.get("version", "?")
+                snack(f"インポート完了 ({len(imp_pages)}ページ, {len(imp_tests)}テスト)")
+                log(f"[プロジェクト] インポート: {fp} (v{src_ver}, {mode_dd.value})")
+                close_dlg(dlg)
+            except json.JSONDecodeError:
+                snack("JSONパースエラー", ft.Colors.RED_600)
+            except Exception as x:
+                _log_error("import_project", x); snack(f"インポート失敗: {x}", ft.Colors.RED_600)
+
+        dlg = ft.AlertDialog(title=ft.Text("プロジェクトインポート"),
+            content=ft.Column([path_field, mode_dd,
+                ft.Text("検出されたファイル:", size=11, weight=ft.FontWeight.BOLD),
+                file_list_col], tight=True, spacing=10, width=500),
+            actions=[ft.TextButton("インポート", on_click=on_ok),
+                     ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
     def show_info(e):
@@ -1993,22 +2356,48 @@ def _main_inner(page: ft.Page):
 
     def _do_run(test_cases_to_run, run_label=""):
         c = state["config"]
-        # URL check: global, page, or test-level URL must exist somewhere
-        has_any_url = any(p.get("url","").strip() for p in state["pages"])
-        if not has_any_url:
-            has_any_url = any(t.get("url","").strip() for t in test_cases_to_run)
-        if not has_any_url: snack("URL未設定（ページまたはテストケースに設定してください）", ft.Colors.RED_600); return
-        if not test_cases_to_run: snack("テストケース0件", ft.Colors.RED_600); return
+        if not test_cases_to_run: snack("テストケース0件", ft.Colors.RED_700); return
+        # URL pre-check: resolve URL for each test case and warn about missing ones
+        _page_url_map = {pg["_id"]: pg.get("url","").strip() for pg in state["pages"]}
+        no_url_tests = []
+        for tc in test_cases_to_run:
+            tc_url = tc.get("url","").strip()
+            if not tc_url and not _page_url_map.get(tc.get("page_id",""), ""):
+                no_url_tests.append(tc)
+        if len(no_url_tests) == len(test_cases_to_run):
+            snack("URL未設定（ページまたはテストケースに設定してください）", ft.Colors.RED_700); return
+        if no_url_tests:
+            names = "\n".join(f"  - {tc.get('number','')} {tc.get('name','')}" for tc in no_url_tests[:10])
+            if len(no_url_tests) > 10: names += f"\n  ... 他 {len(no_url_tests)-10} 件"
+            def on_continue(e):
+                close_dlg(warn_dlg)
+                _do_run_execute(test_cases_to_run, run_label)
+            warn_dlg = ft.AlertDialog(title=ft.Text("URL未設定のテストケースがあります"),
+                content=ft.Column([
+                    ft.Text(f"{len(no_url_tests)} 件のテストはURL未設定のためスキップされます:", size=12),
+                    ft.Text(names, size=11, font_family="Consolas"),
+                ], tight=True, spacing=8, width=450),
+                actions=[ft.TextButton("続行", on_click=on_continue),
+                         ft.TextButton("キャンセル", on_click=lambda e: close_dlg(warn_dlg))])
+            open_dlg(warn_dlg); return
+        _do_run_execute(test_cases_to_run, run_label)
+
+    def _do_run_execute(test_cases_to_run, run_label=""):
+        c = state["config"]
         close_browser()
+        state["running"] = True
         stop_ev = threading.Event(); state["stop_event"] = stop_ev
         run_btn.disabled = True; run_single_btn.disabled = True; run_page_btn.disabled = True
         stop_btn.visible = True; stop_btn.disabled = False; open_folder_btn.visible = False
         progress.visible = True; progress.value = 0; progress_label.visible = True; progress_label.value = ""
         nav_bar.selected_index = 0; switch_tab(0); page.update(); save_all()
-        def on_progress(current, total):
+        def on_progress(current, total, tc_label=""):
             progress.value = current / total if total > 0 else None
-            progress_label.value = f"{current}/{total} パターン"; page.update()
+            label = f"{current}/{total} パターン"
+            if tc_label: label += f" — {tc_label}"
+            progress_label.value = label; page.update()
         def on_done(outdir=None):
+            state["running"] = False
             run_btn.disabled = False; run_single_btn.disabled = False; run_page_btn.disabled = False
             stop_btn.visible = False; progress.visible = False; progress_label.visible = False
             state["stop_event"] = None
@@ -2047,6 +2436,13 @@ def _main_inner(page: ft.Page):
     el_search = ft.TextField(label="検索", width=250, dense=True, hint_text="セレクタ/id/name/ヒント",
                              on_change=on_el_search_change, prefix_icon=ft.Icons.SEARCH)
     el_show_hidden = ft.Checkbox(label="非表示要素も表示", value=False, on_change=on_show_hidden_change)
+    el_sort_dd = ft.Dropdown(label="並び替え", width=120, dense=True, value="dom",
+        options=[ft.dropdown.Option(key="dom", text="DOM順"),
+                 ft.dropdown.Option(key="tag", text="タグ別"),
+                 ft.dropdown.Option(key="type", text="type別"),
+                 ft.dropdown.Option(key="id", text="id/name別")],
+        on_select=on_el_sort_change)
+    sel_test_field = ft.TextField(label="セレクタテスト", expand=True, dense=True, hint_text="CSSセレクタを入力して検証")
     el_table = ft.DataTable(
         columns=[ft.DataColumn(ft.Text("タグ",size=11)), ft.DataColumn(ft.Text("type",size=11)),
                  ft.DataColumn(ft.Text("id/name",size=11)), ft.DataColumn(ft.Text("ヒント",size=11)),
@@ -2055,7 +2451,7 @@ def _main_inner(page: ft.Page):
         show_checkbox_column=True)
 
     # Page selector
-    page_dd = ft.Dropdown(label="ページ", width=200, dense=True,
+    page_dd = ft.Dropdown(label="ページ", expand=True, dense=True,
                           options=_page_dd_options(), value=state["selected_page"],
                           on_select=on_page_dd_change)
     page_info_label = ft.Text("", size=10, color=ft.Colors.GREY_500)
@@ -2072,6 +2468,8 @@ def _main_inner(page: ft.Page):
     log_toggle_btn = ft.IconButton(ft.Icons.EXPAND_MORE, icon_size=16, tooltip="ログを拡大", on_click=toggle_log)
     tc_header = ft.Text("", weight=ft.FontWeight.BOLD, size=15)
     tc_pattern_label = ft.Text("", size=11, color=ft.Colors.GREY_600)
+    ps_search = ft.TextField(label="検索", width=250, dense=True, hint_text="パターンセット名",
+                             on_change=on_ps_search_change, prefix_icon=ft.Icons.SEARCH)
     pat_set_list = ft.ReorderableListView(controls=[], on_reorder=on_pat_set_reorder, spacing=4, expand=True)
     pat_items = ft.ReorderableListView(controls=[], on_reorder=on_pat_reorder, spacing=3, expand=True)
     pat_header = ft.Text("", weight=ft.FontWeight.BOLD, size=15)
@@ -2096,9 +2494,9 @@ def _main_inner(page: ft.Page):
     tc_content = ft.Row([
         ft.Container(ft.Column([
             ft.Row([page_dd,
-                    ft.IconButton(ft.Icons.ADD, tooltip="ページ追加", icon_size=18, on_click=add_page),
-                    ft.IconButton(ft.Icons.EDIT, tooltip="ページ編集", icon_size=18, on_click=edit_page),
-                    ft.IconButton(ft.Icons.DELETE, tooltip="ページ削除", icon_size=18, on_click=del_page),
+                    ft.IconButton(ft.Icons.ADD, tooltip="ページ追加", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=add_page),
+                    ft.IconButton(ft.Icons.EDIT, tooltip="ページ編集", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=edit_page),
+                    ft.IconButton(ft.Icons.DELETE, tooltip="ページ削除", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=del_page),
                    ], spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             page_info_label,
             ft.Divider(height=1),
@@ -2128,9 +2526,12 @@ def _main_inner(page: ft.Page):
             ft.Text("要素ブラウザ", weight=ft.FontWeight.BOLD, size=13),
             ft.Row([browser_url, browser_wait], spacing=4),
             ft.Row([browser_url_dd, ft.OutlinedButton("保存済みを読込", on_click=load_bank)], spacing=4),
-            ft.Row([load_btn, ft.OutlinedButton("閉じる", on_click=close_br),
+            ft.Row([load_btn, ft.OutlinedButton("DOM再取得", icon=ft.Icons.REFRESH, on_click=reload_dom_click),
+                    ft.OutlinedButton("閉じる", on_click=close_br),
                     ft.TextButton("ページURLを使う", icon=ft.Icons.SYNC, on_click=sync_url)], spacing=4, wrap=True),
-            ft.Row([el_search, el_show_hidden], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Row([el_search, el_sort_dd], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Row([el_show_hidden], spacing=4),
+            ft.Row([sel_test_field, ft.OutlinedButton("テスト", icon=ft.Icons.PLAY_ARROW, on_click=test_selector_click)], spacing=4),
             el_status,
             ft.Container(ft.Column([el_table], scroll=ft.ScrollMode.AUTO),
                 expand=True, border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4),
@@ -2149,6 +2550,7 @@ def _main_inner(page: ft.Page):
             ft.Row([ft.Text("パターンセット", weight=ft.FontWeight.BOLD, size=14),
                     ft.IconButton(ft.Icons.ADD, tooltip="追加", icon_size=18, on_click=add_pat_set)],
                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+            ps_search,
             pat_set_list,
         ], spacing=4), width=320, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
         ft.Column([
@@ -2171,7 +2573,9 @@ def _main_inner(page: ft.Page):
 
     page.appbar = ft.AppBar(title=ft.Text(APP_NAME, weight=ft.FontWeight.BOLD), center_title=False,
         bgcolor=ft.Colors.BLUE_50,
-        actions=[ft.IconButton(ft.Icons.SETTINGS, tooltip="設定", on_click=show_settings),
+        actions=[ft.IconButton(ft.Icons.FILE_UPLOAD, tooltip="プロジェクトエクスポート", on_click=export_project),
+                 ft.IconButton(ft.Icons.FILE_DOWNLOAD, tooltip="プロジェクトインポート", on_click=import_project),
+                 ft.IconButton(ft.Icons.SETTINGS, tooltip="設定", on_click=show_settings),
                  ft.IconButton(ft.Icons.INFO_OUTLINE, tooltip="情報", on_click=show_info)])
 
     page.add(ft.Column([ft.Stack([tc_content, ps_content], expand=True),
@@ -2179,6 +2583,26 @@ def _main_inner(page: ft.Page):
         ft.Row([open_folder_btn, stop_btn, run_single_btn, run_page_btn, run_btn],
                alignment=ft.MainAxisAlignment.END, spacing=8)], expand=True, spacing=4))
     page.navigation_bar = nav_bar
+
+    # ── Keyboard shortcuts ──
+    def on_keyboard(e: ft.KeyboardEvent):
+        if not _init_done[0]: return
+        key = e.key; ctrl = e.ctrl or e.meta
+        if ctrl and key.lower() == "s":
+            save_all(); snack("保存しました")
+        elif ctrl and key.lower() == "n":
+            if nav_bar.selected_index == 0:
+                add_test(None)
+            else:
+                add_pat_set(None)
+        elif key == "Delete":
+            if nav_bar.selected_index == 0:
+                idx = state["selected_test"]
+                if 0 <= idx < len(state["tests"]): del_test(idx)
+            else:
+                name = state["selected_pat_set"]
+                if name: del_pat_set(name)
+    page.on_keyboard_event = on_keyboard
 
     refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
     refresh_pat_set_list(False); refresh_pats(False)

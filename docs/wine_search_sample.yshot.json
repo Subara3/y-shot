@@ -1,0 +1,113 @@
+{
+  "app": "y-shot",
+  "version": "2.1",
+  "pages": [
+    {
+      "_id": "p_1",
+      "name": "ワイン検索",
+      "number": "1",
+      "start_number": 1,
+      "url": "https://www.seicomart.co.jp/instore/wine_search/result"
+    }
+  ],
+  "tests": [
+    {
+      "_id": "tc_1",
+      "name": "赤ワイン検索",
+      "page_id": "p_1",
+      "number": "1-1",
+      "pattern": null,
+      "url": "",
+      "steps": [
+        {"type": "見出し", "text": "メニューを開いて赤ワインで検索"},
+        {"type": "ホバー", "selector": "a.gnav-menu-lv1__link.js-menu-trigger"},
+        {"type": "待機", "seconds": "1.0"},
+        {"type": "クリック", "selector": "input[type=\"checkbox\"][name=\"type[]\"][value=\"1\"]"},
+        {"type": "クリック", "selector": "input.mm_button[type=\"submit\"]"},
+        {"type": "待機", "seconds": "2.0"},
+        {"type": "スクショ", "mode": "fullpage"}
+      ]
+    },
+    {
+      "_id": "tc_2",
+      "name": "白ワイン検索",
+      "page_id": "p_1",
+      "number": "1-2",
+      "pattern": null,
+      "url": "",
+      "steps": [
+        {"type": "見出し", "text": "メニューを開いて白ワインで検索"},
+        {"type": "ホバー", "selector": "a.gnav-menu-lv1__link.js-menu-trigger"},
+        {"type": "待機", "seconds": "1.0"},
+        {"type": "クリック", "selector": "input[type=\"checkbox\"][name=\"type[]\"][value=\"2\"]"},
+        {"type": "クリック", "selector": "input.mm_button[type=\"submit\"]"},
+        {"type": "待機", "seconds": "2.0"},
+        {"type": "スクショ", "mode": "fullpage"}
+      ]
+    },
+    {
+      "_id": "tc_3",
+      "name": "タイプ別検索（パターン）",
+      "page_id": "p_1",
+      "number": "1-3",
+      "pattern": "ワインタイプ",
+      "url": "",
+      "steps": [
+        {"type": "見出し", "text": "メニューを開いてタイプ別に検索"},
+        {"type": "ホバー", "selector": "a.gnav-menu-lv1__link.js-menu-trigger"},
+        {"type": "待機", "seconds": "1.0"},
+        {"type": "コメント", "text": "パターンのvalueがチェックボックスのセレクタになっている"},
+        {"type": "クリック", "selector": "{パターン}"},
+        {"type": "クリック", "selector": "input.mm_button[type=\"submit\"]"},
+        {"type": "待機", "seconds": "2.0"},
+        {"type": "スクショ", "mode": "fullpage"}
+      ]
+    },
+    {
+      "_id": "tc_4",
+      "name": "価格帯指定検索",
+      "page_id": "p_1",
+      "number": "1-4",
+      "pattern": null,
+      "url": "",
+      "steps": [
+        {"type": "見出し", "text": "メニューを開いて価格帯で検索"},
+        {"type": "ホバー", "selector": "a.gnav-menu-lv1__link.js-menu-trigger"},
+        {"type": "待機", "seconds": "1.0"},
+        {"type": "入力", "selector": "input[name=\"min_price\"]", "value": "500", "input_mode": "overwrite"},
+        {"type": "入力", "selector": "input[name=\"max_price\"]", "value": "1500", "input_mode": "overwrite"},
+        {"type": "クリック", "selector": "input.mm_button[type=\"submit\"]"},
+        {"type": "待機", "seconds": "2.0"},
+        {"type": "スクショ", "mode": "fullpage"}
+      ]
+    },
+    {
+      "_id": "tc_5",
+      "name": "複合条件検索（赤+フランス+1000円以下）",
+      "page_id": "p_1",
+      "number": "1-5",
+      "pattern": null,
+      "url": "",
+      "steps": [
+        {"type": "見出し", "text": "赤ワイン + フランス + 1000円以下"},
+        {"type": "ホバー", "selector": "a.gnav-menu-lv1__link.js-menu-trigger"},
+        {"type": "待機", "seconds": "1.0"},
+        {"type": "クリック", "selector": "input[type=\"checkbox\"][name=\"type[]\"][value=\"1\"]"},
+        {"type": "クリック", "selector": "input[type=\"checkbox\"][name=\"country[]\"][value=\"1\"]"},
+        {"type": "入力", "selector": "input[name=\"max_price\"]", "value": "1000", "input_mode": "overwrite"},
+        {"type": "クリック", "selector": "input.mm_button[type=\"submit\"]"},
+        {"type": "待機", "seconds": "2.0"},
+        {"type": "スクショ", "mode": "fullpage"}
+      ]
+    }
+  ],
+  "pattern_sets": {
+    "ワインタイプ": [
+      {"label": "赤", "value": "input[type=\"checkbox\"][name=\"type[]\"][value=\"1\"]"},
+      {"label": "白", "value": "input[type=\"checkbox\"][name=\"type[]\"][value=\"2\"]"},
+      {"label": "ロゼ", "value": "input[type=\"checkbox\"][name=\"type[]\"][value=\"3\"]"},
+      {"label": "スパークリング", "value": "input[type=\"checkbox\"][name=\"type[]\"][value=\"4\"]"},
+      {"label": "ノンアルコール", "value": "input[type=\"checkbox\"][name=\"type[]\"][value=\"5\"]"}
+    ]
+  }
+}

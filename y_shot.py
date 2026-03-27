@@ -1977,15 +1977,21 @@ def _main_inner(page: ft.Page):
                         el_status.value = f"一致: {el['selector']} ({info.get('tag','')})"
             except Exception:
                 pass
-        # Also update selector test field with the selected selector
-        try: sel_test_field.value = el["selector"] if el else ""
-        except Exception: pass
         page.update()
     def on_el_search_change(e):
         """Re-filter table when search text changes."""
         filter_el_table()
     def on_show_hidden_change(e):
-        """Re-filter table when hidden visibility toggles."""
+        """Toggle hidden element visibility and re-filter."""
+        el_show_hidden.value = not el_show_hidden.value
+        if el_show_hidden.value:
+            el_show_hidden.icon = ft.Icons.VISIBILITY
+            el_show_hidden.icon_color = ft.Colors.BLUE_600
+            el_show_hidden.tooltip = "非表示要素を隠す"
+        else:
+            el_show_hidden.icon = ft.Icons.VISIBILITY_OFF
+            el_show_hidden.icon_color = ft.Colors.GREY_400
+            el_show_hidden.tooltip = "非表示要素を表示"
         filter_el_table()
     def quick_add(stype):
         tc = cur_test()
@@ -2058,21 +2064,36 @@ def _main_inner(page: ft.Page):
             if not fs: snack("フォーム値なし", ft.Colors.ORANGE_700); return
             tc["steps"].extend(fs); refresh_steps(False); refresh_test_list(); snack(f"フォーム値 {len(fs)} 件")
         except Exception as x: log(f"[ERROR] {x}")
-    def test_selector_click(e):
-        """Test a CSS selector by highlighting the matched element in the browser."""
+    def test_selector_dlg(e):
+        """Open a dialog to test CSS selectors by highlighting matches in the browser."""
         if not state["browser_driver"]: snack("ブラウザ未起動", ft.Colors.ORANGE_700); return
-        sel_to_test = (sel_test_field.value or "").strip()
-        if not sel_to_test: snack("セレクタを入力してください", ft.Colors.ORANGE_700); return
-        try:
-            from selenium.webdriver.common.by import By
-            matches = state["browser_driver"].find_elements(By.CSS_SELECTOR, sel_to_test)
-            if not matches:
-                snack(f"該当なし: {sel_to_test}", ft.Colors.RED_700)
-            else:
-                state["browser_driver"].execute_script(HIGHLIGHT_JS, sel_to_test)
-                snack(f"一致: {len(matches)} 要素", ft.Colors.GREEN_700 if len(matches) == 1 else ft.Colors.ORANGE_700)
-        except Exception as x:
-            snack(f"セレクタエラー: {x}", ft.Colors.RED_700)
+        # Pre-fill with selected element's selector
+        init_sel = ""
+        idx = state["selected_el"]
+        if 0 <= idx < len(state["browser_elements"]):
+            init_sel = state["browser_elements"][idx].get("selector", "")
+        tf = ft.TextField(label="CSSセレクタ", width=420, value=init_sel, autofocus=True)
+        result_text = ft.Text("", size=12)
+        def do_test(e):
+            sel_val = (tf.value or "").strip()
+            if not sel_val: result_text.value = "セレクタを入力"; result_text.color = ft.Colors.RED_700; page.update(); return
+            try:
+                from selenium.webdriver.common.by import By
+                matches = state["browser_driver"].find_elements(By.CSS_SELECTOR, sel_val)
+                if not matches:
+                    result_text.value = f"該当なし"; result_text.color = ft.Colors.RED_700
+                else:
+                    state["browser_driver"].execute_script(HIGHLIGHT_JS, sel_val)
+                    result_text.value = f"一致: {len(matches)} 要素"
+                    result_text.color = ft.Colors.GREEN_700 if len(matches) == 1 else ft.Colors.ORANGE_700
+            except Exception as x:
+                result_text.value = f"エラー: {x}"; result_text.color = ft.Colors.RED_700
+            page.update()
+        dlg = ft.AlertDialog(title=ft.Text("セレクタテスト"),
+            content=ft.Column([tf, ft.OutlinedButton("テスト", icon=ft.Icons.PLAY_ARROW, on_click=do_test), result_text],
+                tight=True, spacing=10, width=450),
+            actions=[ft.TextButton("閉じる", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg, modal=False)
     def close_br(e):
         close_browser(); el_table.rows.clear(); state["browser_elements"].clear()
         el_status.value = "未読込"; el_status.color = ft.Colors.GREY_500; page.update()
@@ -2651,14 +2672,15 @@ def _main_inner(page: ft.Page):
     el_status = ft.Text("未読込", size=11, color=ft.Colors.GREY_500)
     el_search = ft.TextField(label="検索", expand=True, dense=True, hint_text="セレクタ/id/name/ヒント",
                              on_change=on_el_search_change, prefix_icon=ft.Icons.SEARCH)
-    el_show_hidden = ft.Checkbox(label="非表示要素も表示", value=False, on_change=on_show_hidden_change)
+    el_show_hidden = ft.IconButton(ft.Icons.VISIBILITY_OFF, tooltip="非表示要素を表示", icon_size=18,
+                                    icon_color=ft.Colors.GREY_400, on_click=on_show_hidden_change)
+    el_show_hidden.value = False  # track toggle state
     el_sort_dd = ft.Dropdown(label="並び", width=100, dense=True, value="dom",
         options=[ft.dropdown.Option(key="dom", text="DOM順"),
                  ft.dropdown.Option(key="tag", text="タグ別"),
                  ft.dropdown.Option(key="type", text="type別"),
                  ft.dropdown.Option(key="id", text="id/name別")],
         on_select=on_el_sort_change)
-    sel_test_field = ft.TextField(label="セレクタテスト", expand=True, dense=True, hint_text="CSSセレクタを入力して検証")
     el_table = ft.DataTable(
         columns=[ft.DataColumn(ft.Text("タグ",size=11)), ft.DataColumn(ft.Text("type",size=11)),
                  ft.DataColumn(ft.Text("id/name",size=11)), ft.DataColumn(ft.Text("ヒント",size=11)),
@@ -2767,7 +2789,6 @@ def _main_inner(page: ft.Page):
             ft.Row([load_btn, ft.OutlinedButton("DOM再取得", icon=ft.Icons.REFRESH, on_click=reload_dom_click),
                     ft.OutlinedButton("閉じる", on_click=close_br)], spacing=4, wrap=True),
             ft.Row([el_search, el_sort_dd, el_show_hidden], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ft.Row([sel_test_field, ft.OutlinedButton("テスト", icon=ft.Icons.PLAY_ARROW, on_click=test_selector_click)], spacing=4),
             ft.Row([el_loading, el_status], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Container(ft.Column([el_table], scroll=ft.ScrollMode.AUTO),
                 expand=True, border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4),
@@ -2778,6 +2799,8 @@ def _main_inner(page: ft.Page):
                     ft.VerticalDivider(width=1),
                     ft.IconButton(ft.Icons.LIST, tooltip="全パターン", icon_size=18, on_click=quick_add_all_options),
                     ft.IconButton(ft.Icons.SAVE_ALT, tooltip="値取込", icon_size=18, on_click=capture_form),
+                    ft.VerticalDivider(width=1),
+                    ft.IconButton(ft.Icons.SEARCH, tooltip="セレクタテスト", icon_size=18, on_click=test_selector_dlg),
                    ], spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ], spacing=4), expand=2, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
     ], spacing=8, expand=True, vertical_alignment=ft.CrossAxisAlignment.START)

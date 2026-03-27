@@ -1896,7 +1896,8 @@ def _main_inner(page: ft.Page):
         except Exception as x:
             log(f"[ERROR] DOM再取得失敗: {x}")
         finally: _el_loading_end()
-    def on_el_sort_change(e):
+    def on_el_sort_change(key):
+        el_sort_dd.data = key
         filter_el_table()
 
     def filter_el_table(update=True):
@@ -1909,7 +1910,7 @@ def _main_inner(page: ft.Page):
         hidden_count = sum(1 for el in state["browser_elements"] if not el.get("visible", True))
         # Build sorted index
         sort_key = "dom"
-        try: sort_key = el_sort_dd.value or "dom"
+        try: sort_key = el_sort_dd.data or "dom"
         except NameError: pass
         indexed_els = list(enumerate(state["browser_elements"]))
         if sort_key == "tag":
@@ -2697,12 +2698,15 @@ def _main_inner(page: ft.Page):
     el_search = ft.TextField(label="検索", expand=True, dense=True, hint_text="セレクタ/id/name/ヒント",
                              on_change=on_el_search_change, prefix_icon=ft.Icons.SEARCH)
     el_show_hidden = ft.Checkbox(label="非表示", value=False, on_change=on_show_hidden_change)
-    el_sort_dd = ft.Dropdown(width=95, dense=True, value="dom",
-        options=[ft.dropdown.Option(key="dom", text="DOM順"),
-                 ft.dropdown.Option(key="tag", text="タグ別"),
-                 ft.dropdown.Option(key="type", text="type別"),
-                 ft.dropdown.Option(key="id", text="id/name別")],
-        on_select=on_el_sort_change)
+    el_sort_dd = ft.PopupMenuButton(
+        icon=ft.Icons.SORT, icon_size=18, tooltip="並び替え",
+        items=[
+            ft.PopupMenuItem(text="DOM順", on_click=lambda e: on_el_sort_change("dom")),
+            ft.PopupMenuItem(text="タグ別", on_click=lambda e: on_el_sort_change("tag")),
+            ft.PopupMenuItem(text="type別", on_click=lambda e: on_el_sort_change("type")),
+            ft.PopupMenuItem(text="id/name別", on_click=lambda e: on_el_sort_change("id")),
+        ])
+    el_sort_dd.data = "dom"
     el_table = ft.DataTable(
         columns=[ft.DataColumn(ft.Text("タグ",size=11)), ft.DataColumn(ft.Text("type",size=11)),
                  ft.DataColumn(ft.Text("id/name",size=11)), ft.DataColumn(ft.Text("ヒント",size=11)),

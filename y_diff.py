@@ -959,11 +959,16 @@ def main(page: ft.Page):
 
     # ── Build controls ──
     _recent = _scan_recent_folders()
-    _recent_opts = [ft.dropdown.Option(key=p, text=os.path.basename(p)) for p in _recent]
+    def _fmt_ts(name):
+        """Format '20260327170643' → '03/27 17:06'"""
+        if len(name) == 14 and name.isdigit():
+            return f"{name[4:6]}/{name[6:8]} {name[8:10]}:{name[10:12]}"
+        return name
+    _recent_opts = [ft.dropdown.Option(key=p, text=_fmt_ts(os.path.basename(p))) for p in _recent]
     folder_a_field = ft.TextField(label="パス", expand=True, dense=True, hint_text="y-shot出力フォルダのパスを貼り付け", on_submit=lambda e: _apply_folder('A'))
     folder_b_field = ft.TextField(label="パス", expand=True, dense=True, hint_text="y-shot出力フォルダのパスを貼り付け", on_submit=lambda e: _apply_folder('B'))
-    recent_dd_a = ft.Dropdown(label="履歴", width=160, dense=True, options=list(_recent_opts), on_select=lambda e: _on_recent_select('A', e))
-    recent_dd_b = ft.Dropdown(label="履歴", width=160, dense=True, options=list(_recent_opts), on_select=lambda e: _on_recent_select('B', e))
+    recent_dd_a = ft.Dropdown(label="履歴", width=220, dense=True, options=list(_recent_opts), on_select=lambda e: _on_recent_select('A', e))
+    recent_dd_b = ft.Dropdown(label="履歴", width=220, dense=True, options=list(_recent_opts), on_select=lambda e: _on_recent_select('B', e))
     folder_a_label = ft.Text("", size=11, color=ft.Colors.GREY_500)
     folder_b_label = ft.Text("", size=11, color=ft.Colors.GREY_500)
     status_label = ft.Text("", size=11, color=ft.Colors.GREY_500)

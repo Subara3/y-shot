@@ -294,11 +294,33 @@ def compute_diff(text_a, text_b):
     ops = []
     stats = {"same": 0, "add": 0, "del": 0, "change": 0, "noise": 0, "php_warning": 0}
     cat_counts = {"form": 0, "content": 0, "structural": 0, "noise": 0, "php_warning": 0}
-    def _is_noise(text):
-        return '__' in text and any(m in text for m in
-            ('__NORM__','__D4__','__D2__','__T2__','__TS__','__NONCE__','__CACHE__',
+    _CAT_PRIORITY = {"php_warning": 4, "form": 3, "content": 2, "structural": 1, "noise": 0}
+    def _is_noise(text_a, text_b=None):
+        """Check if a change is noise. For replace ops, both lines must be noise-only."""
+        if not ('__' in (text_a or '')):
+            return False
+        markers = ('__NORM__','__D4__','__D2__','__T2__','__TS__','__NONCE__','__CACHE__',
              '__TRACKING__','__GTM__','__UUID__','__VER__',
-             '__ADS__','__TW_ID__','__GTM_BLOCK__','__GTM_FID__'))
+             '__ADS__','__TW_ID__','__GTM_BLOCK__','__GTM_FID__')
+        has_marker = any(m in (text_a or '') for m in markers)
+        if not has_marker:
+            return False
+        # For replace: if only the marker VALUES differ (same structure), it's noise
+        # But if the FORMAT differs (e.g. / vs -), it's a real change
+        if text_b is not None and has_marker:
+            # Strip all marker values and compare structure
+            import re as _re
+            strip_pat = _re.compile(r'__(?:D4|D2|T2|TS|NORM|NONCE|CACHE|UUID|VER)__')
+            struct_a = strip_pat.sub('##', text_a or '')
+            struct_b = strip_pat.sub('##', text_b or '')
+            if struct_a != struct_b:
+                return False  # Structure differs — real change (e.g. date format)
+        return True
+    def _best_cat(la, lb):
+        """Classify using both old and new lines, return the most important category."""
+        cat_a = classify_line(la) if la else "structural"
+        cat_b = classify_line(lb) if lb else "structural"
+        return cat_a if _CAT_PRIORITY.get(cat_a, 0) >= _CAT_PRIORITY.get(cat_b, 0) else cat_b
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == 'equal':
             for k in range(i2 - i1):
@@ -309,9 +331,8 @@ def compute_diff(text_a, text_b):
             for k in range(n):
                 la = lines_a[i1+k].rstrip('\n') if i1+k < i2 else None
                 lb = lines_b[j1+k].rstrip('\n') if j1+k < j2 else None
-                line_text = la or lb or ""
-                is_noise = _is_noise(line_text)
-                cat = "noise" if is_noise else classify_line(line_text)
+                is_noise = _is_noise(la, lb)
+                cat = "noise" if is_noise else _best_cat(la, lb)
                 if la is not None and lb is not None:
                     ops.append(("~", i1+k, j1+k, la, lb, cat)); stats["change"] += 1
                 elif la is not None:

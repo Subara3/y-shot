@@ -40,7 +40,9 @@ def _get_file_path(entry, preferred=SOURCE_DOM):
 # ============================================================
 _NOISE_PATTERNS = [
     (re.compile(r'(<(?:input|meta)[^>]*(?:name|content)\s*=\s*["\'](?:_token|csrf[_-]?token|csrfmiddlewaretoken|__RequestVerificationToken|authenticity_token|nonce|PHPSESSID|session_id|_session|jsessionid)[^>]*(?:value|content)\s*=\s*["\'])[^"\']*(["\'])', re.I), r'\1__NORM__\2'),
-    (re.compile(r'\d{4}[-/]\d{2}[-/]\d{2}[\sT]\d{2}:\d{2}(:\d{2})?(\+\d{2}:\d{2})?'), '__DATETIME__'),
+    # Datetime: preserve format pattern (YYYY-MM-DD vs YYYY/MM/DD), replace only digits
+    (re.compile(r'\d{4}([-/])\d{2}\1\d{2}([\sT])\d{2}:\d{2}:\d{2}(\+\d{2}:\d{2})?'), r'__D4__\1__D2__\1__D2__\2__T2__:__T2__:__T2__'),
+    (re.compile(r'\d{4}([-/])\d{2}\1\d{2}([\sT])\d{2}:\d{2}'), r'__D4__\1__D2__\1__D2__\2__T2__:__T2__'),
     (re.compile(r'(?<=["\'\s=])\d{10,13}(?=["\'\s&;])'), '__TS__'),
     (re.compile(r'(nonce\s*=\s*["\'])[A-Za-z0-9+/=]+(["\'])', re.I), r'\1__NONCE__\2'),
     (re.compile(r'(\?(?:v|t|_|ver|version|cache|cb|_dc)\s*=)[^"\'&\s]+', re.I), r'\1__CACHE__'),
@@ -62,8 +64,8 @@ _NOISE_PATTERNS = [
     (re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.I), '__UUID__'),
     # PHP version strings in comments/meta
     (re.compile(r'(PHP/?)\d+\.\d+(\.\d+)?', re.I), r'\1__VER__'),
-    # PHP error message format differences
-    (re.compile(r'((?:Notice|Warning|Deprecated|Fatal error):.*?in\s+)\S+\.php(?:\s+on\s+line\s+|\:)\d+', re.I), r'\1__PHP_ERR__'),
+    # NOTE: PHP errors/warnings are NOT normalized here — they are classified as
+    # "php_warning" by classify_line() so they remain visible for VU review.
 ]
 
 def normalize(html):
@@ -77,7 +79,15 @@ def normalize(html):
         s = pat.sub(repl, s)
     # 2. Remove entire GTM/tracking script blocks (multiline, greedy but bounded)
     s = re.sub(r'<script>\s*\(function\(w,\s*d,\s*s,\s*l,\s*i\).*?</script>', '<!-- __GTM_BLOCK__ -->', s, flags=re.S)
-    # 3. JS formatting normalization (PHP version output differences)
+    # 3. Protect <script>, <pre>, <code> content — replace with placeholders before whitespace normalization
+    _protected = []
+    def _protect(m):
+        _protected.append(m.group(0))
+        return f'__PROTECTED_{len(_protected)-1}__'
+    s = re.sub(r'<script\b[^>]*>.*?</script>', _protect, s, flags=re.S)
+    s = re.sub(r'<pre\b[^>]*>.*?</pre>', _protect, s, flags=re.S)
+    s = re.sub(r'<code\b[^>]*>.*?</code>', _protect, s, flags=re.S)
+    # 4. JS formatting normalization (only for non-protected HTML)
     s = re.sub(r'if\s*\(', 'if(', s)                              # if ( → if(
     s = re.sub(r'\s*\(\s*function\s*\(', '(function(', s)
     s = re.sub(r'\)\s*;\s*', ');', s)
@@ -88,10 +98,16 @@ def normalize(html):
     s = re.sub(r'\s+\)', ')', s)
     s = re.sub(r'\(\s*\'', "('", s)                               # ( ' → ('
     s = re.sub(r'\'\s*\)', "')", s)                               # ' ) → ')
-    # 4. Collapse all whitespace (tabs, newlines, spaces) into single spaces
+    # 5. Collapse all whitespace (tabs, newlines, spaces) into single spaces
     s = re.sub(r'\s+', ' ', s)
-    # 5. Clean up spaces around tags
+    # 6. Clean up spaces around tags
     s = re.sub(r'> <', '><', s)
+    # Restore protected blocks
+    for i, block in enumerate(_protected):
+        # Normalize only basic whitespace within protected blocks (not aggressive)
+        block = block.replace('\r\n', '\n').replace('\r', '\n')
+        block = re.sub(r'[ \t]+$', '', block, flags=re.M)
+        s = s.replace(f'__PROTECTED_{i}__', block)
     # 6. Remove empty script/style tags (browser-injected remnants)
     s = re.sub(r'<script[^>]*>\s*</script>', '', s)
     s = re.sub(r'<style[^>]*>\s*</style>', '', s)
@@ -107,6 +123,9 @@ def normalize(html):
 
 def classify_line(line):
     l = line.lower()
+    # PHP warnings/errors — highest priority, must not be masked as noise
+    if re.search(r'\b(?:notice|warning|deprecated|fatal error|parse error)\s*:', l): return "php_warning"
+    if re.search(r'\.php\s+on\s+line\s+\d+', l): return "php_warning"
     if re.search(r'<(?:input|select|textarea|option|button|label|form)\b', l): return "form"
     if re.search(r'\b(?:value|checked|selected|disabled|readonly|placeholder|required)\s*=', l): return "form"
     if re.search(r'</?(?:div|section|article|nav|header|footer|main|aside|table|tr|td|th|ul|ol|li)\b', l): return "structural"
@@ -117,6 +136,16 @@ def classify_line(line):
 # ============================================================
 # Folder scanning
 # ============================================================
+_RE_NUM_PREFIX = re.compile(r'^\d{3}_')  # e.g. "001_" prefix in y-shot filenames
+
+def _strip_num_prefix(key):
+    """Strip the 3-digit number prefix from y-shot filenames for fallback matching.
+    e.g. '1_page/001_1-1_test_ss1' → '1_page/1-1_test_ss1'"""
+    parts = key.rsplit('/', 1)
+    if len(parts) == 2:
+        return parts[0] + '/' + _RE_NUM_PREFIX.sub('', parts[1])
+    return _RE_NUM_PREFIX.sub('', key)
+
 def scan_source_folder(folder):
     result = {}
     source_dir = None
@@ -205,37 +234,42 @@ def compare_images(path_a, path_b):
         mask_rgb = mask.convert("L")
         overlay = Image.composite(red_layer, overlay, mask_rgb)
         blended = Image.blend(img_b, overlay, 0.4)
-        # Draw bounding rectangles
+        # Draw bounding rectangles using row-scan approach (much faster than BFS)
         draw = ImageDraw.Draw(blended)
-        # Find contiguous regions from mask
-        mask_data = list(mask.getdata())
         w, h = img_a.size
-        visited = [False] * (w * h)
+        # Downscale mask for fast region detection (4x smaller)
+        scale = 4
+        small_mask = mask.resize((w // scale, h // scale), Image.NEAREST)
+        small_w, small_h = small_mask.size
+        small_data = list(small_mask.getdata())
+        visited = [False] * (small_w * small_h)
         regions = []
-        for y in range(h):
-            for x in range(w):
-                idx = y * w + x
-                if mask_data[idx] > 0 and not visited[idx]:
-                    # BFS to find region bounds
-                    min_x, min_y, max_x, max_y = x, y, x, y
-                    stack = [(x, y)]
+        for sy in range(small_h):
+            for sx in range(small_w):
+                si = sy * small_w + sx
+                if small_data[si] > 0 and not visited[si]:
+                    # BFS on downscaled image (much fewer pixels)
+                    min_x, min_y, max_x, max_y = sx, sy, sx, sy
+                    stack = [(sx, sy)]
                     while stack:
                         cx, cy = stack.pop()
-                        ci = cy * w + cx
-                        if cx < 0 or cx >= w or cy < 0 or cy >= h: continue
-                        if visited[ci] or mask_data[ci] == 0: continue
+                        ci = cy * small_w + cx
+                        if cx < 0 or cx >= small_w or cy < 0 or cy >= small_h: continue
+                        if visited[ci] or small_data[ci] == 0: continue
                         visited[ci] = True
                         min_x = min(min_x, cx); max_x = max(max_x, cx)
                         min_y = min(min_y, cy); max_y = max(max_y, cy)
-                        # Only check every 5th pixel for speed
-                        for dx, dy in [(5,0),(-5,0),(0,5),(0,-5)]:
+                        for dx, dy in [(1,0),(-1,0),(0,1),(0,-1)]:
                             nx, ny = cx+dx, cy+dy
-                            if 0 <= nx < w and 0 <= ny < h:
-                                ni = ny * w + nx
-                                if not visited[ni] and mask_data[ni] > 0:
+                            if 0 <= nx < small_w and 0 <= ny < small_h:
+                                ni = ny * small_w + nx
+                                if not visited[ni] and small_data[ni] > 0:
                                     stack.append((nx, ny))
-                    if (max_x - min_x) > 3 and (max_y - min_y) > 3:
-                        regions.append((min_x, min_y, max_x, max_y))
+                    # Scale back to original coordinates
+                    rx1, ry1 = min_x * scale, min_y * scale
+                    rx2, ry2 = min((max_x + 1) * scale, w), min((max_y + 1) * scale, h)
+                    if (rx2 - rx1) > 5 and (ry2 - ry1) > 5:
+                        regions.append((rx1, ry1, rx2, ry2))
         for x1, y1, x2, y2 in regions:
             draw.rectangle([x1-2, y1-2, x2+2, y2+2], outline=(255, 0, 0), width=2)
         blended.save(diff_path)
@@ -258,12 +292,12 @@ def compute_diff(text_a, text_b):
     lines_b = normalize(text_b).splitlines(keepends=True)
     sm = difflib.SequenceMatcher(None, lines_a, lines_b)
     ops = []
-    stats = {"same": 0, "add": 0, "del": 0, "change": 0, "noise": 0}
-    cat_counts = {"form": 0, "content": 0, "structural": 0, "noise": 0}
+    stats = {"same": 0, "add": 0, "del": 0, "change": 0, "noise": 0, "php_warning": 0}
+    cat_counts = {"form": 0, "content": 0, "structural": 0, "noise": 0, "php_warning": 0}
     def _is_noise(text):
         return '__' in text and any(m in text for m in
-            ('__NORM__','__DATETIME__','__TS__','__NONCE__','__CACHE__',
-             '__TRACKING__','__GTM__','__UUID__','__VER__','__PHP_ERR__',
+            ('__NORM__','__D4__','__D2__','__T2__','__TS__','__NONCE__','__CACHE__',
+             '__TRACKING__','__GTM__','__UUID__','__VER__',
              '__ADS__','__TW_ID__','__GTM_BLOCK__','__GTM_FID__'))
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == 'equal':
@@ -286,6 +320,7 @@ def compute_diff(text_a, text_b):
                     ops.append(("+", None, j1+k, None, lb, cat)); stats["add"] += 1
                 if is_noise: stats["noise"] += 1
                 else: cat_counts[cat] = cat_counts.get(cat, 0) + 1
+                if cat == "php_warning": stats["php_warning"] += 1
         elif tag == 'delete':
             for k in range(i2 - i1):
                 la = lines_a[i1+k].rstrip('\n')
@@ -294,6 +329,7 @@ def compute_diff(text_a, text_b):
                 ops.append(("-", i1+k, None, la, None, cat)); stats["del"] += 1
                 if is_noise: stats["noise"] += 1
                 else: cat_counts[cat] = cat_counts.get(cat, 0) + 1
+                if cat == "php_warning": stats["php_warning"] += 1
         elif tag == 'insert':
             for k in range(j2 - j1):
                 lb = lines_b[j1+k].rstrip('\n')
@@ -302,6 +338,7 @@ def compute_diff(text_a, text_b):
                 ops.append(("+", None, j1+k, None, lb, cat)); stats["add"] += 1
                 if is_noise: stats["noise"] += 1
                 else: cat_counts[cat] = cat_counts.get(cat, 0) + 1
+                if cat == "php_warning": stats["php_warning"] += 1
     return ops, stats, cat_counts
 
 # ============================================================
@@ -347,18 +384,21 @@ CAT_COLORS = {
     "content": ft.Colors.PURPLE_100,
     "structural": ft.Colors.AMBER_50,
     "noise": ft.Colors.GREY_200,
+    "php_warning": ft.Colors.RED_100,
 }
 CAT_TEXT_DEL = {
     "form": ft.Colors.GREEN_900,
     "content": ft.Colors.PURPLE_900,
     "structural": ft.Colors.RED_700,
     "noise": ft.Colors.GREY_500,
+    "php_warning": ft.Colors.RED_900,
 }
 CAT_TEXT_ADD = {
     "form": ft.Colors.GREEN_800,
     "content": ft.Colors.PURPLE_700,
     "structural": ft.Colors.TEAL_700,
     "noise": ft.Colors.GREY_500,
+    "php_warning": ft.Colors.RED_800,
 }
 
 def main(page: ft.Page):
@@ -518,6 +558,16 @@ def main(page: ft.Page):
             # All computation in background (no UI access)
             files_a = scan_source_folder(state["folder_a"])
             files_b = scan_source_folder(state["folder_b"])
+            # Fallback matching: if keys differ only by numeric prefix, remap
+            stripped_a = {_strip_num_prefix(k): k for k in files_a}
+            stripped_b = {_strip_num_prefix(k): k for k in files_b}
+            for sk, orig_a in stripped_a.items():
+                if orig_a not in files_b and sk in stripped_b:
+                    orig_b = stripped_b[sk]
+                    if orig_b not in files_a:
+                        # Remap: use the stripped key as the common key
+                        files_a[sk] = files_a.pop(orig_a)
+                        files_b[sk] = files_b.pop(orig_b)
             review = load_review(state["folder_a"], state["folder_b"])
             src = state["src_type"]
             keys = sorted(set(list(files_a.keys()) + list(files_b.keys())))
@@ -533,7 +583,7 @@ def main(page: ft.Page):
                         ta = read_file(pa); tb = read_file(pb)
                         if normalize(ta) == normalize(tb):
                             status = "same"
-                            stats = {"same": len(ta.splitlines()), "add":0, "del":0, "change":0, "noise":0}
+                            stats = {"same": len(ta.splitlines()), "add":0, "del":0, "change":0, "noise":0, "php_warning":0}
                             cat_counts = {}
                         else:
                             status = "diff"
@@ -542,9 +592,17 @@ def main(page: ft.Page):
                     else:
                         status = "same"
                 matched.append({"key": k, "in_a": in_a, "in_b": in_b, "status": status, "stats": stats, "cat_counts": cat_counts})
-            # Image scan
+            # Image scan (with fallback matching)
             imgs_a = scan_image_folder(state["folder_a"])
             imgs_b = scan_image_folder(state["folder_b"])
+            stripped_ia = {_strip_num_prefix(k): k for k in imgs_a}
+            stripped_ib = {_strip_num_prefix(k): k for k in imgs_b}
+            for sk, orig_a in stripped_ia.items():
+                if orig_a not in imgs_b and sk in stripped_ib:
+                    orig_b = stripped_ib[sk]
+                    if orig_b not in imgs_a:
+                        imgs_a[sk] = imgs_a.pop(orig_a)
+                        imgs_b[sk] = imgs_b.pop(orig_b)
             img_keys = sorted(set(list(imgs_a.keys()) + list(imgs_b.keys())))
             img_matched = []
             for k in img_keys:
@@ -614,7 +672,7 @@ def main(page: ft.Page):
                         if meaningful > 0: sub_parts.append(f"差分{meaningful}")
                         if s.get("noise",0): sub_parts.append(f"ノイズ{s['noise']}")
                     if m.get("cat_counts"):
-                        for c in ("form", "content", "structural"):
+                        for c in ("php_warning", "form", "content", "structural"):
                             if m["cat_counts"].get(c, 0): sub_parts.append(f"{c}:{m['cat_counts'][c]}")
                 note = review.get("note", "")
                 if note: sub_parts.append(f"memo:{note[:15]}")
@@ -698,7 +756,9 @@ def main(page: ft.Page):
             except Exception: ctx = 3
             try: show_noise = noise_cb.value
             except Exception: show_noise = False
+            php_warn = stats.get('php_warning', 0)
             summary = f"一致: {stats['same']} | 変更: {stats['change']} | 追加: {stats['add']} | 削除: {stats['del']} | ノイズ除外: {stats['noise']}"
+            if php_warn: summary += f" | ⚠ PHP警告: {php_warn}"
             if cat_counts:
                 cats = " | ".join(f"{c}:{n}" for c, n in cat_counts.items() if n > 0 and c != "noise")
                 if cats: summary += f" | {cats}"

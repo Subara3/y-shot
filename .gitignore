@@ -29,6 +29,8 @@ __pycache__/
 build/
 dist/
 *.spec
+!y-shot.spec
+!y-diff.spec
 
 # バイナリ / アーカイブ / 出力
 *.exe

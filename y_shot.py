@@ -877,6 +877,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
             opts.add_argument("--headless=new")
             log_cb("[INFO] ヘッドレスモード")
         driver = webdriver.Chrome(options=opts); driver.set_window_size(1280, 900)
+        # Stealth: remove navigator.webdriver flag
+        try: driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>false});"})
+        except Exception: pass
         if driver_ref is not None: driver_ref.append(driver)
         ba = config.get("basic_auth_user","").strip()
         if ba:
@@ -1169,6 +1172,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                     cs = metrics.get('cssContentSize') or metrics.get('contentSize', {})
                                     cw = cs.get('width', 1280)
                                     ch = cs.get('height', 900)
+                                    if ch > 16384:
+                                        log_cb(f"  S{si} [WARN] ページ高さ{ch}px > 上限16384px。画像が切れます")
+                                        ch = 16384
                                     _flog.debug(f"fullshot: {cw}x{ch} (keys={list(metrics.keys())})")
                                     result = driver.execute_cdp_cmd('Page.captureScreenshot', {
                                         'format': 'png',
@@ -2188,6 +2194,8 @@ def _main_inner(page: ft.Page):
                 _br_opts.add_experimental_option("excludeSwitches", ["enable-automation"])
                 _br_opts.add_argument("--disable-notifications")
                 state["browser_driver"] = webdriver.Chrome(options=_br_opts); state["browser_driver"].set_window_size(1280,900)
+                try: state["browser_driver"].execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>false});"})
+                except Exception: pass
             ba = state["config"].get("basic_auth_user","").strip()
             if ba:
                 setup_basic_auth(state["browser_driver"], state["config"])

@@ -184,6 +184,7 @@ def scan_image_folder(folder):
         dirs[:] = [d for d in sorted(dirs) if not d.startswith("_")]
         for f in sorted(files):
             if not f.lower().endswith(".png"): continue
+            if f.lower().endswith("_diff.png"): continue  # Skip y-diff generated diff images
             fp = os.path.join(root, f)
             rel = os.path.relpath(fp, folder).replace('\\', '/')
             result[rel] = fp

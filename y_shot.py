@@ -196,8 +196,30 @@ _JS_COLLECT_ELEMENTS = """
             var ename=el.getAttribute('name')||'';
             var sel=buildSel(el,tag,eid,ename);
             if (seen[sel]) continue; seen[sel]=true;
+            // Collect extra metadata for test case creation
+            var meta={};
+            if (tag==='input'||tag==='textarea'||tag==='select') {
+                if (el.hasAttribute('required')) meta.required=true;
+                var ml=el.getAttribute('maxlength'); if (ml) meta.maxlength=parseInt(ml);
+                var pt=el.getAttribute('pattern'); if (pt) meta.pattern=pt;
+                if (el.disabled) meta.disabled=true;
+                if (el.readOnly) meta.readonly=true;
+                if (tag==='select') meta.option_count=el.options?el.options.length:0;
+                // Associated label
+                var lbl='';
+                if (eid) { var le=document.querySelector('label[for="'+eid+'"]'); if (le) lbl=le.textContent.trim().substring(0,40); }
+                if (!lbl) { var cl=el.closest('label'); if (cl) lbl=cl.textContent.trim().substring(0,40); }
+                if (!lbl && el.closest('div,li,td')) {
+                    var pp=el.closest('div,li,td');
+                    for (var ci=0;ci<pp.childNodes.length;ci++) {
+                        if (pp.childNodes[ci].nodeType===3) { var t=pp.childNodes[ci].textContent.trim(); if(t){lbl=t.substring(0,40);break;} }
+                    }
+                }
+                if (lbl) meta.label=lbl;
+            }
+            if (tag==='a') { var hr=el.getAttribute('href'); if (hr) meta.href=hr.substring(0,80); }
             results.push({selector:sel,tag:tag,type:etype,name:ename,id:eid,
-                          hint:getHint(el,tag,etype),visible:vis[0],hidden_reason:vis[1]});
+                          hint:getHint(el,tag,etype),visible:vis[0],hidden_reason:vis[1],meta:meta});
         } catch(e) { continue; }
     }
     return results;
@@ -2322,12 +2344,28 @@ def _main_inner(page: ft.Page):
             hint_tooltip = hint_text + (f"\n{vis_indicator.strip()}" if vis_indicator else "")
             id_or_name = el.get("id") or el.get("name", "")
             sel_text = el["selector"]
+            # Build label/validation info column
+            meta = el.get("meta", {})
+            label_text = meta.get("label", "")
+            badges = []
+            if meta.get("required"): badges.append("*必須")
+            if meta.get("maxlength"): badges.append(f"max{meta['maxlength']}")
+            if meta.get("pattern"): badges.append("正規表現")
+            if meta.get("disabled"): badges.append("無効")
+            if meta.get("readonly"): badges.append("読取専用")
+            if meta.get("option_count"): badges.append(f"{meta['option_count']}件")
+            info_parts = []
+            if label_text: info_parts.append(label_text)
+            if badges: info_parts.append(" ".join(badges))
+            info_text = " | ".join(info_parts) if info_parts else ""
+            info_color = ft.Colors.RED_700 if meta.get("required") else ft.Colors.GREY_600
             el_table.rows.append(ft.DataRow(
                 cells=[ft.DataCell(ft.Text(el["tag"],size=11)),
                        ft.DataCell(ft.Text(el.get("type",""),size=11)),
                        ft.DataCell(ft.Text(id_or_name,size=11,tooltip=id_or_name)),
                        ft.DataCell(ft.Text(hint_display,size=11,tooltip=hint_tooltip,
                                            color=ft.Colors.ORANGE_700 if not is_visible else None)),
+                       ft.DataCell(ft.Text(info_text,size=10,color=info_color,tooltip=info_text)),
                        ft.DataCell(ft.Text(sel_text,size=10,color=ft.Colors.GREY_600,tooltip=sel_text))],
                 on_select_change=lambda e, idx=i: on_el_click(idx),
                 selected=is_selected,
@@ -2429,6 +2467,20 @@ def _main_inner(page: ft.Page):
             if val: rows.append(ft.DataRow(cells=[
                 ft.DataCell(ft.Text(key, size=11, weight=ft.FontWeight.BOLD, selectable=True)),
                 ft.DataCell(ft.Text(val, size=11, selectable=True))]))
+        # Show collected metadata
+        meta = el.get("meta", {})
+        if meta:
+            rows.append(ft.DataRow(cells=[ft.DataCell(ft.Text("── テスト情報 ──", size=10, color=ft.Colors.TEAL_600)),
+                                          ft.DataCell(ft.Text(""))]))
+            meta_labels = {"label": "ラベル", "required": "必須", "maxlength": "最大文字数",
+                          "pattern": "入力パターン", "disabled": "無効", "readonly": "読取専用",
+                          "option_count": "選択肢数", "href": "リンク先"}
+            for mk, mv in meta.items():
+                label = meta_labels.get(mk, mk)
+                rows.append(ft.DataRow(cells=[
+                    ft.DataCell(ft.Text(label, size=11, weight=ft.FontWeight.BOLD, selectable=True,
+                                       color=ft.Colors.RED_700 if mk == "required" else None)),
+                    ft.DataCell(ft.Text(str(mv), size=11, selectable=True))]))
         # Show live DOM attributes
         if attrs:
             rows.append(ft.DataRow(cells=[ft.DataCell(ft.Text("── DOM属性 ──", size=10, color=ft.Colors.BLUE_600)),
@@ -3188,7 +3240,7 @@ def _main_inner(page: ft.Page):
     el_table = ft.DataTable(
         columns=[ft.DataColumn(ft.Text("タグ",size=11)), ft.DataColumn(ft.Text("type",size=11)),
                  ft.DataColumn(ft.Text("id/name",size=11)), ft.DataColumn(ft.Text("ヒント",size=11)),
-                 ft.DataColumn(ft.Text("セレクタ",size=11))],
+                 ft.DataColumn(ft.Text("ラベル/検証",size=11)), ft.DataColumn(ft.Text("セレクタ",size=11))],
         rows=[], column_spacing=8, data_row_min_height=28, heading_row_height=30,
         show_checkbox_column=True)
 

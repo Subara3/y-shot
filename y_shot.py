@@ -120,21 +120,35 @@ _JS_COLLECT_ELEMENTS = """
                 }
             }
         }
-        // ancestor ID path (walk up to find any ancestor with ID)
+        // ancestor ID path: build child-combinator path from nearest ancestor with ID
         var anc=p;
         while (anc && anc!==document.body && anc!==document.documentElement) {
             if (anc.id) {
                 var ancSel=/^\\d/.test(anc.id)||!/^[a-zA-Z0-9_-]+$/.test(anc.id)
                     ? '[id="'+escAttr(anc.id)+'"]' : '#'+anc.id;
+                // Simple descendant (if unique)
                 var descendant=ancSel+' '+tag;
                 if (cnt(descendant)===1) return descendant;
-                // Try with nth-of-type among descendants
-                var allDesc;
-                try { allDesc=anc.querySelectorAll(tag); } catch(e) { break; }
-                for (var k=0;k<allDesc.length;k++) {
-                    if (allDesc[k]===el) {
-                        return ancSel+' '+tag+':nth-of-type('+(k+1)+')';
+                // Build child-combinator path from ancestor to element
+                var pathParts=[];
+                var cur=el;
+                var tooDeep=false;
+                while (cur && cur!==anc) {
+                    var pp=cur.parentElement;
+                    if (!pp) { tooDeep=true; break; }
+                    var ci=1;
+                    for (var si=0;si<pp.children.length;si++) {
+                        if (pp.children[si]===cur) break;
+                        ci++;
                     }
+                    var ctag=cur.tagName.toLowerCase();
+                    pathParts.unshift(ctag+':nth-child('+ci+')');
+                    cur=pp;
+                    if (pathParts.length>6) { tooDeep=true; break; }
+                }
+                if (!tooDeep && pathParts.length>0) {
+                    var fullSel=ancSel+' > '+pathParts.join(' > ');
+                    try { if (cnt(fullSel)===1) return fullSel; } catch(e) {}
                 }
                 break;
             }

@@ -20,7 +20,7 @@ from urllib.parse import urlparse, urlunparse
 import flet as ft
 
 APP_NAME = "y-shot"
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 APP_AUTHOR = "Yuri Norimatsu"
 
 # ── Constants ──

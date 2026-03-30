@@ -28,7 +28,7 @@ def _setup_logger():
 _flog = _setup_logger()
 
 APP_NAME = "y-diff"
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 
 # ============================================================
 # Constants

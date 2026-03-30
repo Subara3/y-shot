@@ -4,6 +4,12 @@ y-diff: y-shot HTMLソース比較レビューツール v1.2
   2つのy-shot出力フォルダを比較し、差分をレビュー・マーク・記録する。
 """
 import os, sys, json, re, difflib, threading, logging
+# Set AppUserModelID so Windows taskbar shows the exe icon, not the Flet client icon
+try:
+    import ctypes
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ydiff.app")
+except Exception:
+    pass
 from datetime import datetime
 import flet as ft
 

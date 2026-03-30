@@ -9,6 +9,12 @@ y-shot: Web Screenshot Automation Tool  v1.7 (Flet)
 """
 
 import csv, os, sys, json, threading, time, logging, traceback, copy
+# Set AppUserModelID so Windows taskbar shows the exe icon, not the Flet client icon
+try:
+    import ctypes
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("yshot.app")
+except Exception:
+    pass
 from datetime import datetime
 from urllib.parse import urlparse, urlunparse
 import flet as ft
@@ -514,14 +520,28 @@ HIGHLIGHT_JS = ("(function(s){try{"
     "var all=document.querySelectorAll(s);"
     "if(!all.length)return JSON.stringify({found:0});"
     "var e=all[0];"
+    # Override scroll-behavior: smooth to ensure instant scroll
+    "var html=document.documentElement;"
+    "var origSB=html.style.scrollBehavior;"
+    "html.style.setProperty('scroll-behavior','auto','important');"
     "e.scrollIntoView({block:'center',behavior:'instant'});"
-    "var r=e.getBoundingClientRect(),h=document.createElement('div');h.id='__yshot_hl';"
+    "html.style.scrollBehavior=origSB;"
+    # Force reflow so getBoundingClientRect returns post-scroll coords
+    "void html.offsetHeight;"
+    "var r=e.getBoundingClientRect();"
+    "var h=document.createElement('div');h.id='__yshot_hl';"
     "var color=all.length===1?'#FF4444':'#FF8800';"
     "h.style.cssText='position:fixed;border:3px solid '+color+';background:rgba(255,68,68,0.15);"
-    "z-index:2147483647;pointer-events:none;border-radius:3px;';"
+    "z-index:2147483647;pointer-events:none;border-radius:3px;transition:none;';"
     "h.style.top=r.top-3+'px';h.style.left=r.left-3+'px';"
     "h.style.width=r.width+6+'px';h.style.height=r.height+6+'px';"
-    "document.body.appendChild(h);"
+    # Append to documentElement to avoid body margin/transform issues
+    "html.appendChild(h);"
+    # Self-correct: if ancestor transforms shifted fixed positioning, compensate
+    "var hr=h.getBoundingClientRect();"
+    "var dx=hr.left-(r.left-3),dy=hr.top-(r.top-3);"
+    "if(Math.abs(dx)>1||Math.abs(dy)>1){"
+    "h.style.left=(r.left-3-dx)+'px';h.style.top=(r.top-3-dy)+'px';}"
     "setTimeout(function(){"
     "window.__yshot_scroll_rm=function(){"
     "var x=document.getElementById('__yshot_hl');if(x)x.remove();"
@@ -3299,7 +3319,7 @@ def _main_inner(page: ft.Page):
                 ft.IconButton(ft.Icons.ADD, tooltip="テスト追加", icon_size=16, on_click=add_test)],
                alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
         test_list,
-    ], spacing=4)
+    ], spacing=4, expand=True)
     tc_panel_mini = ft.Column([
         ft.Text("TC", size=10, color=ft.Colors.GREY_500, text_align=ft.TextAlign.CENTER),
     ], spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER, visible=False)
@@ -3317,7 +3337,7 @@ def _main_inner(page: ft.Page):
     tc_panel_container = ft.Container(ft.Column([
         ft.Row([tc_collapse_btn], alignment=ft.MainAxisAlignment.END),
         tc_panel_full, tc_panel_mini,
-    ], spacing=0), width=320, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8)
+    ], spacing=0, expand=True), width=320, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8)
 
     tc_content = ft.Row([
         tc_panel_container,
@@ -3346,7 +3366,7 @@ def _main_inner(page: ft.Page):
                     ft.OutlinedButton("閉じる", on_click=close_br)], spacing=4, wrap=True),
             ft.Row([el_search, el_sort_dd, el_show_hidden], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Row([el_loading, el_status], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ft.Container(ft.Column([el_table], scroll=ft.ScrollMode.AUTO),
+            ft.Container(ft.Column([ft.Row([el_table], scroll=ft.ScrollMode.AUTO)], scroll=ft.ScrollMode.AUTO),
                 expand=True, border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4),
             ft.Row([ft.Text("追加:", size=10, color=ft.Colors.GREY_500),
                     ft.IconButton(ft.Icons.EDIT, tooltip="入力", icon_size=18, on_click=lambda e: quick_add("入力")),
@@ -3359,9 +3379,9 @@ def _main_inner(page: ft.Page):
                     ft.VerticalDivider(width=1),
                     ft.IconButton(ft.Icons.SEARCH, tooltip="セレクタテスト", icon_size=18, on_click=test_selector_dlg),
                     ft.IconButton(ft.Icons.INFO_OUTLINE, tooltip="要素詳細", icon_size=18, on_click=show_el_detail),
-                   ], spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-        ], spacing=4), expand=2, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
-    ], spacing=8, expand=True, vertical_alignment=ft.CrossAxisAlignment.START)
+                   ], spacing=0, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        ], spacing=4), expand=3, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
+    ], spacing=8, expand=True, vertical_alignment=ft.CrossAxisAlignment.STRETCH)
 
     # ── Layout: Tab 2 ──
     ps_content = ft.Row([
@@ -3383,7 +3403,7 @@ def _main_inner(page: ft.Page):
             ft.Container(pat_items, expand=True, padding=ft.Padding(4,4,4,4),
                 border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=6),
         ], expand=True, spacing=6),
-    ], spacing=8, expand=True, visible=False, vertical_alignment=ft.CrossAxisAlignment.START)
+    ], spacing=8, expand=True, visible=False, vertical_alignment=ft.CrossAxisAlignment.STRETCH)
 
     nav_bar = ft.NavigationBar(
         destinations=[ft.NavigationBarDestination(icon=ft.Icons.LIST_ALT, label="テストケース"),

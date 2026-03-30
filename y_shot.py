@@ -1,11 +1,15 @@
 """
-y-shot: Web Screenshot Automation Tool  v1.7 (Flet)
-  - Multiple test cases, each with own steps + pattern set reference
+y-shot: Web Screenshot Automation Tool  v2.3 (Flet)
   - v1.5: highlight fix, abort, tel capture, input check fix
   - v1.6: popup menu, reorder fix, pattern count sync, modal dialogs
   - v1.7: dropdown page selector, 1-column test list, start_number per page,
            pattern numbering in filenames/UI/Excel, manual number override,
            fullshot (CDP full-page capture)
+  - v2.2: highlight self-correction, element browser width/scroll,
+           F5 refresh step, page duplicate/reorder,
+           step/pattern copy-paste, taskbar icon fix
+  - v2.3: alert OK/cancel (confirm dialog handling),
+           step delete confirmation setting, snackbar fix
 """
 
 import csv, os, sys, json, threading, time, logging, traceback, copy
@@ -20,7 +24,7 @@ from urllib.parse import urlparse, urlunparse
 import flet as ft
 
 APP_NAME = "y-shot"
-APP_VERSION = "2.2"
+APP_VERSION = "2.3"
 APP_AUTHOR = "Yuri Norimatsu"
 
 # ── Constants ──
@@ -688,14 +692,16 @@ def setup_basic_auth(driver, config):
     except Exception:
         pass
 
-STEP_TYPES = ["入力", "クリック", "ホバー", "選択", "待機", "要素待機", "スクロール", "スクショ", "戻る", "ナビゲーション", "見出し", "コメント"]
+STEP_TYPES = ["入力", "クリック", "ホバー", "選択", "待機", "要素待機", "スクロール", "スクショ", "戻る", "更新", "アラートOK", "アラートキャンセル", "ナビゲーション", "見出し", "コメント"]
 STEP_ICONS = {"入力": ft.Icons.EDIT, "クリック": ft.Icons.MOUSE,
               "ホバー": ft.Icons.NEAR_ME,
               "選択": ft.Icons.ARROW_DROP_DOWN_CIRCLE,
               "待機": ft.Icons.HOURGLASS_BOTTOM, "要素待機": ft.Icons.VISIBILITY,
               "スクロール": ft.Icons.SWAP_VERT,
               "スクショ": ft.Icons.CAMERA_ALT,
-              "戻る": ft.Icons.ARROW_BACK, "ナビゲーション": ft.Icons.OPEN_IN_BROWSER,
+              "戻る": ft.Icons.ARROW_BACK, "更新": ft.Icons.REFRESH,
+              "アラートOK": ft.Icons.CHECK_CIRCLE, "アラートキャンセル": ft.Icons.CANCEL,
+              "ナビゲーション": ft.Icons.OPEN_IN_BROWSER,
               "見出し": ft.Icons.TITLE, "コメント": ft.Icons.COMMENT}
 SCROLL_MODES = [("element", "要素へスクロール"), ("pixel", "ピクセル指定"), ("top", "先頭に戻る")]
 INPUT_MODES = [("overwrite", "上書き"), ("append", "追記"), ("clear", "クリアのみ")]
@@ -725,6 +731,9 @@ def step_short(step):
         if len(v) > 15: v = v[:12]+"..."
         return f"{sel} \u2190 [{v}]"
     if t == "戻る": return f"ブラウザバック +{step.get('seconds','1.0')}秒"
+    if t == "更新": return f"F5更新 +{step.get('seconds','1.0')}秒"
+    if t == "アラートOK": return "ダイアログOK"
+    if t == "アラートキャンセル": return "ダイアログキャンセル"
     if t == "ナビゲーション":
         url = step.get("url","")
         return url[:40]+"..." if len(url) > 40 else url
@@ -1048,8 +1057,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             iframes = driver.find_elements(By.CSS_SELECTOR, "iframe, frame")
                             if fi < len(iframes): driver.switch_to.frame(iframes[fi])
                         except Exception as fx: log_cb(f"  S{si} [WARN] iframe切替失敗: {fx}")
-                    elif si > 1:
+                    elif si > 1 and st not in ("アラートOK", "アラートキャンセル"):
                         # Return to default content if previous step was in iframe
+                        # (skip for alert steps — switch_to.default_content() auto-dismisses confirm dialogs)
                         try: driver.switch_to.default_content()
                         except Exception: pass
                     if st == "入力":
@@ -1125,6 +1135,31 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             s = float(step.get("seconds","1.0")); time.sleep(s)
                             log_cb(f"  S{si} 戻る (+{s}秒)")
                         except Exception as x: log_cb(f"  S{si} [WARN] 戻る失敗: {x}")
+                    elif st == "更新":
+                        try:
+                            driver.refresh()
+                            s = float(step.get("seconds","1.0")); time.sleep(s)
+                            log_cb(f"  S{si} 更新 (+{s}秒)")
+                        except Exception as x: log_cb(f"  S{si} [WARN] 更新失敗: {x}")
+                    elif st in ("アラートOK", "アラートキャンセル"):
+                        _accept = (st == "アラートOK")
+                        try:
+                            alert = None
+                            for _retry in range(20):
+                                try:
+                                    alert = driver.switch_to.alert
+                                    break
+                                except Exception as _ae:
+                                    if _retry == 0:
+                                        log_cb(f"  S{si} [DEBUG] アラート待機中... ({type(_ae).__name__})")
+                                    time.sleep(0.5)
+                            if alert is None:
+                                raise Exception("アラートが見つかりません (10秒待機)")
+                            if _accept: alert.accept()
+                            else: alert.dismiss()
+                            log_cb(f"  S{si} {'確認OK' if _accept else '確認×'}")
+                        except Exception as x:
+                            log_cb(f"  S{si} [WARN] {st}失敗: {x}")
                     elif st == "ナビゲーション":
                         nav_url = step.get("url","").replace("{パターン}",value).replace("{pattern}",value)
                         try:
@@ -1436,6 +1471,8 @@ def _main_inner(page: ft.Page):
         "selected_test": -1, "selected_pat_set": None, "selected_el": -1,
         "selected_page": None,
         "collapsed": set(),
+        "_copied_pat": None,
+        "_copied_step": None,
         "stop_event": None, "test_drivers": [], "running": False,
         "selected_test_per_page": {},
         "_tc_id_counter": 0, "_page_id_counter": 0,
@@ -1545,7 +1582,7 @@ def _main_inner(page: ft.Page):
     def snack(msg, color=ft.Colors.GREEN_700):
         try:
             sb = ft.SnackBar(ft.Text(msg, color=ft.Colors.WHITE), bgcolor=color)
-            page.show_dialog(sb)
+            page.open(sb)
         except Exception: pass
     def open_dlg(d, modal=True):
         d.modal = modal
@@ -1672,6 +1709,54 @@ def _main_inner(page: ft.Page):
             content=ft.Column([nf, url_f, ft.Row([numf, startf], spacing=10)], tight=True, spacing=10, width=500),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
+
+    def move_page_up(e):
+        if _guard_running(): return
+        pg = cur_page()
+        if not pg: return
+        idx = next((i for i, p in enumerate(state["pages"]) if p["_id"] == pg["_id"]), -1)
+        if idx <= 0: snack("先頭です", ft.Colors.ORANGE_700); return
+        state["pages"][idx], state["pages"][idx-1] = state["pages"][idx-1], state["pages"][idx]
+        auto_number_tests(); refresh_page_dd(False); refresh_test_list(False); refresh_steps(False); page.update()
+
+    def move_page_down(e):
+        if _guard_running(): return
+        pg = cur_page()
+        if not pg: return
+        idx = next((i for i, p in enumerate(state["pages"]) if p["_id"] == pg["_id"]), -1)
+        if idx < 0 or idx >= len(state["pages"]) - 1: snack("末尾です", ft.Colors.ORANGE_700); return
+        state["pages"][idx], state["pages"][idx+1] = state["pages"][idx+1], state["pages"][idx]
+        auto_number_tests(); refresh_page_dd(False); refresh_test_list(False); refresh_steps(False); page.update()
+
+    def dup_page(e):
+        if _guard_running(): return
+        pg = cur_page()
+        if not pg: snack("ページを選択してください", ft.Colors.ORANGE_700); return
+        # ページを複製
+        new_pg = copy.deepcopy(pg)
+        new_pg["_id"] = _new_page_id()
+        new_pg["name"] += " (コピー)"
+        # 番号を自動で空き番号にする
+        used = {p["number"] for p in state["pages"]}
+        n = int(pg["number"]) + 1 if pg["number"].isdigit() else len(state["pages"]) + 1
+        while str(n) in used: n += 1
+        new_pg["number"] = str(n)
+        # ページ挿入
+        idx = next((i for i, p in enumerate(state["pages"]) if p["_id"] == pg["_id"]), len(state["pages"]))
+        state["pages"].insert(idx + 1, new_pg)
+        # テストケースも複製
+        src_tests = tests_for_page(pg["_id"])
+        for tc in src_tests:
+            new_tc = copy.deepcopy(tc)
+            new_tc["_id"] = _new_tc_id()
+            new_tc["page_id"] = new_pg["_id"]
+            new_tc.pop("_sub_number", None)
+            state["tests"].append(new_tc)
+        state["selected_page"] = new_pg["_id"]
+        auto_number_tests()
+        refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
+        page.update()
+        snack(f"ページ複製: {new_pg['name']} ({len(src_tests)}テスト)")
 
     def del_page(e):
         if _guard_running(): return
@@ -1972,6 +2057,7 @@ def _main_inner(page: ft.Page):
                     ft.Icon(ft.Icons.TITLE, color=ft.Colors.BLUE_800, size=16),
                     ft.Text(s.get("text",""), weight=ft.FontWeight.BOLD, size=13, color=ft.Colors.BLUE_800, expand=True),
                     ft.IconButton(ic, icon_size=16, on_click=lambda e, sid=sid: toggle_sec(sid)),
+                    ft.IconButton(ft.Icons.COPY, icon_size=14, tooltip="コピー", on_click=lambda e, idx=i: copy_step(idx)),
                     ft.IconButton(ft.Icons.EDIT, icon_size=14, on_click=lambda e, idx=i: show_step_dlg(idx)),
                     ft.IconButton(ft.Icons.DELETE, icon_size=14, on_click=lambda e, idx=i: del_step(idx)),
                 ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -1981,6 +2067,7 @@ def _main_inner(page: ft.Page):
                 step_reorder.controls.append(ft.Container(ft.Row([
                     ft.Icon(ft.Icons.COMMENT, color=ft.Colors.GREY_400, size=14),
                     ft.Text(s.get("text",""), size=11, italic=True, color=ft.Colors.GREY_500, expand=True),
+                    ft.IconButton(ft.Icons.COPY, icon_size=14, tooltip="コピー", on_click=lambda e, idx=i: copy_step(idx)),
                     ft.IconButton(ft.Icons.EDIT, icon_size=14, on_click=lambda e, idx=i: show_step_dlg(idx)),
                     ft.IconButton(ft.Icons.DELETE, icon_size=14, on_click=lambda e, idx=i: del_step(idx)),
                 ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -1989,8 +2076,9 @@ def _main_inner(page: ft.Page):
                 if hidden: continue
                 step_reorder.controls.append(ft.Container(ft.Row([
                     ft.Icon(STEP_ICONS.get(t, ft.Icons.HELP), color=ft.Colors.BLUE_600, size=16),
-                    ft.Text(t, size=10, color=ft.Colors.GREY_500, width=38),
+                    ft.Text({"アラートOK":"確認OK","アラートキャンセル":"確認×","ナビゲーション":"ナビ"}.get(t,t), size=10, color=ft.Colors.GREY_500, width=38),
                     ft.Text(step_short(s), size=11, expand=True, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS, tooltip=step_short(s)),
+                    ft.IconButton(ft.Icons.COPY, icon_size=14, tooltip="コピー", on_click=lambda e, idx=i: copy_step(idx)),
                     ft.IconButton(ft.Icons.EDIT, icon_size=14, on_click=lambda e, idx=i: show_step_dlg(idx)),
                     ft.IconButton(ft.Icons.DELETE, icon_size=14, on_click=lambda e, idx=i: del_step(idx)),
                 ], spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -2028,17 +2116,37 @@ def _main_inner(page: ft.Page):
     def toggle_sec(sid):
         state["collapsed"].symmetric_difference_update({sid}); refresh_steps()
 
+    def copy_step(idx):
+        tc = cur_test()
+        if not tc or not (0 <= idx < len(tc["steps"])): return
+        state["_copied_step"] = copy.deepcopy(tc["steps"][idx])
+        snack(f"ステップをコピー: {step_short(tc['steps'][idx])}")
+
+    def paste_step(e):
+        if _guard_running(): return
+        tc = cur_test()
+        if not tc: snack("テストケースを選択", ft.Colors.ORANGE_700); return
+        s = state.get("_copied_step")
+        if not s: snack("コピーされたステップなし", ft.Colors.ORANGE_700); return
+        tc["steps"].append(copy.deepcopy(s))
+        refresh_steps(False); refresh_test_list()
+        snack(f"ステップを貼り付け: {step_short(s)}")
+
     def del_step(idx):
         if _guard_running(): return
         tc = cur_test()
         if not tc or not (0 <= idx < len(tc["steps"])): return
+        def do_delete():
+            tc["steps"].pop(idx)
+            state["collapsed"] = {c if c < idx else c-1 for c in state["collapsed"] if c != idx}
+            refresh_steps()
+        if state["config"].get("confirm_step_delete", "1") != "1":
+            do_delete(); return
         step = tc["steps"][idx]
         label = step_short(step)
         if len(label) > 30: label = label[:27] + "..."
         def on_yes(e):
-            tc["steps"].pop(idx)
-            state["collapsed"] = {c if c < idx else c-1 for c in state["collapsed"] if c != idx}
-            refresh_steps(); close_dlg(dlg)
+            do_delete(); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("ステップ削除"),
             content=ft.Text(f"「{step['type']}: {label}」を削除しますか？"),
             actions=[ft.TextButton("削除", on_click=on_yes, style=ft.ButtonStyle(color=ft.Colors.RED_600)),
@@ -2129,7 +2237,7 @@ def _main_inner(page: ft.Page):
                 if is_input and input_mode_dd.value == "clear":
                     val_mode.visible = False; pat_select.visible = False; val_field.visible = False
                 nav_url_f.visible = (t == "ナビゲーション")
-                sec_field.visible = t in ("待機", "戻る", "要素待機"); mode_dd.visible = (t=="スクショ")
+                sec_field.visible = t in ("待機", "戻る", "更新", "要素待機"); mode_dd.visible = (t=="スクショ")
                 scroll_mode_dd.visible = (t == "スクロール")
                 scroll_px_f.visible = (t == "スクロール" and scroll_mode_dd.value == "pixel")
                 if t == "要素待機": sec_field.label = "タイムアウト(秒)"
@@ -2141,7 +2249,7 @@ def _main_inner(page: ft.Page):
                 # Hide empty groups entirely
                 input_group.visible = needs_sel or is_input or t == "選択"
                 nav_group.visible = (t == "ナビゲーション")
-                time_group.visible = t in ("待機", "戻る", "要素待機")
+                time_group.visible = t in ("待機", "戻る", "更新", "要素待機")
                 ss_group.visible = (t == "スクショ")
                 scroll_group.visible = (t == "スクロール")
                 text_group.visible = t in ("見出し","コメント")
@@ -2181,7 +2289,7 @@ def _main_inner(page: ft.Page):
                             if existing and existing != pn:
                                 snack(f"このテストには既に「{existing}」が設定されています（1テスト1パターン）", ft.Colors.RED_700); return
                             step["value"] = "{パターン}"; tc["pattern"] = pn
-                elif t == "戻る":
+                elif t in ("戻る", "更新"):
                     try: step["seconds"] = str(float(sec_field.value))
                     except Exception: snack("秒数を正しく", ft.Colors.RED_700); return
                 elif t == "ナビゲーション":
@@ -2776,6 +2884,7 @@ def _main_inner(page: ft.Page):
                     ft.Text(d, size=11, color=ft.Colors.GREY_600, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
                 ], spacing=1, expand=True),
                 ft.Text(f"{len(v)}字", size=10, color=ft.Colors.GREY_400, width=40),
+                ft.IconButton(ft.Icons.COPY, icon_size=14, tooltip="コピー", on_click=lambda e, idx=i: copy_pat(idx)),
                 ft.IconButton(ft.Icons.EDIT, icon_size=14, on_click=lambda e, idx=i: edit_pat(idx)),
                 ft.IconButton(ft.Icons.DELETE, icon_size=14, icon_color=ft.Colors.RED_400, on_click=lambda e, idx=i: del_pat(idx)),
             ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
@@ -2825,6 +2934,24 @@ def _main_inner(page: ft.Page):
             actions=[ft.TextButton("削除", on_click=on_yes, style=ft.ButtonStyle(color=ft.Colors.RED_600)),
                      ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
+
+    def copy_pat(idx):
+        name = state["selected_pat_set"]
+        if not name or name not in state["pattern_sets"]: return
+        pats = state["pattern_sets"][name]
+        if 0 <= idx < len(pats):
+            state["_copied_pat"] = copy.deepcopy(pats[idx])
+            snack(f"パターンをコピー: {pats[idx].get('label','')}")
+
+    def paste_pat(e):
+        if _guard_running(): return
+        name = state["selected_pat_set"]
+        if not name or name not in state["pattern_sets"]: snack("パターンセットを選択", ft.Colors.ORANGE_700); return
+        p = state.get("_copied_pat")
+        if not p: snack("コピーされたパターンなし", ft.Colors.ORANGE_700); return
+        state["pattern_sets"][name].append(copy.deepcopy(p))
+        refresh_pats(False); refresh_pat_set_list(False); refresh_test_list()
+        snack(f"パターンを貼り付け: {p.get('label','')}")
 
     def export_csv(e):
         name = state["selected_pat_set"]
@@ -2956,17 +3083,19 @@ def _main_inner(page: ft.Page):
         of = ft.TextField(label="出力フォルダ", value=c.get("output_dir", os.path.join(get_app_dir(), "screenshots")), width=450)
         hl = ft.Checkbox(label="ヘッドレスモード (ブラウザ非表示)", value=c.get("headless")=="1")
         ss = ft.Checkbox(label="HTMLソース保存 (diff比較用)", value=c.get("save_source")=="1")
+        csd = ft.Checkbox(label="ステップ削除時に確認する", value=c.get("confirm_step_delete","1")=="1")
         def on_ok(e):
             try:
                 state["config"].update({"basic_auth_user":auf.value,"basic_auth_pass":apf.value,
                     "output_dir":of.value,"headless":"1" if hl.value else "0",
-                    "save_source":"1" if ss.value else "0"})
+                    "save_source":"1" if ss.value else "0",
+                    "confirm_step_delete":"1" if csd.value else "0"})
                 state["config"].pop("url", None)  # 旧グローバルURL設定を除去
                 save_config(state["config"]); snack("設定保存")
                 refresh_test_list(False); page.update(); close_dlg(dlg)
             except Exception as x: _log_error("show_settings", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("設定"),
-            content=ft.Column([ft.Row([auf, apf], spacing=10), of, hl, ss], tight=True, spacing=12, width=500),
+            content=ft.Column([ft.Row([auf, apf], spacing=10), of, hl, ss, csd], tight=True, spacing=12, width=500),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
 
@@ -3310,8 +3439,16 @@ def _main_inner(page: ft.Page):
     tc_panel_full = ft.Column([
         ft.Row([page_dd,
                 ft.IconButton(ft.Icons.ADD, tooltip="ページ追加", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=add_page),
-                ft.IconButton(ft.Icons.EDIT, tooltip="ページ編集", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=edit_page),
-                ft.IconButton(ft.Icons.DELETE, tooltip="ページ削除", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=del_page),
+                ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, icon_size=16, icon_color=ft.Colors.GREY_700,
+                    tooltip="ページ操作", items=[
+                        ft.PopupMenuItem(icon=ft.Icons.EDIT, content="編集", on_click=edit_page),
+                        ft.PopupMenuItem(icon=ft.Icons.COPY, content="複製", on_click=dup_page),
+                        ft.PopupMenuItem(),
+                        ft.PopupMenuItem(icon=ft.Icons.ARROW_UPWARD, content="一つ上へ", on_click=move_page_up),
+                        ft.PopupMenuItem(icon=ft.Icons.ARROW_DOWNWARD, content="一つ下へ", on_click=move_page_down),
+                        ft.PopupMenuItem(),
+                        ft.PopupMenuItem(icon=ft.Icons.DELETE, content="削除", on_click=del_page),
+                    ]),
                ], spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         page_info_label,
         ft.Divider(height=1),
@@ -3347,6 +3484,7 @@ def _main_inner(page: ft.Page):
                        alignment=ft.MainAxisAlignment.START),
                 tc_pattern_label,
                 ft.Row([ft.IconButton(ft.Icons.ADD, tooltip="ステップ追加", icon_size=18, on_click=lambda e: show_step_dlg(None)),
+                        ft.IconButton(ft.Icons.PASTE, tooltip="ステップ貼り付け", icon_size=18, on_click=paste_step),
                         ft.IconButton(ft.Icons.TITLE, tooltip="見出し", icon_size=18,
                             on_click=lambda e: (cur_test() and cur_test()["steps"].append({"type":"見出し","text":"セクション"}), refresh_steps())),
                         ft.IconButton(ft.Icons.COMMENT, tooltip="コメント", icon_size=18,
@@ -3391,10 +3529,11 @@ def _main_inner(page: ft.Page):
                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             ps_search,
             pat_set_list,
-        ], spacing=4), width=320, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
+        ], spacing=4, expand=True), width=320, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
         ft.Column([
             ft.Row([pat_header,
                     ft.Row([ft.Button("追加", icon=ft.Icons.ADD, on_click=add_pat),
+                            ft.Button("貼り付け", icon=ft.Icons.PASTE, on_click=paste_pat),
                             ft.Button("テンプレート", icon=ft.Icons.FOLDER_OPEN, on_click=load_template),
                             ft.Button("文字max", icon=ft.Icons.STRAIGHTEN, on_click=gen_input_check, tooltip="max_length境界値(文字)"),
                             ft.Button("数値max", icon=ft.Icons.PIN, on_click=gen_numeric_check, tooltip="max_length境界値(半角数値)"),

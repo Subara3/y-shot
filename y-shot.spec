@@ -13,18 +13,6 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('openpyxl')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
-# Exclude heavy packages not used by y-shot (pulled in transitively by flet/skimage)
-_excludes = [
-    'torch', 'torchvision', 'torchaudio',
-    'tensorflow', 'keras',
-    'transformers', 'tokenizers', 'huggingface_hub', 'safetensors',
-    'scipy', 'pandas', 'matplotlib',
-    'cv2', 'opencv', 'onnxruntime',
-    'bitsandbytes', 'sympy',
-    'IPython', 'notebook', 'jupyter',
-    'tkinter', '_tkinter',
-    'test', 'tests',
-]
 
 a = Analysis(
     ['y_shot.py'],
@@ -35,7 +23,17 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=_excludes,
+    excludes=[
+        'torch', 'torchvision', 'torchaudio',
+        'tensorflow', 'keras',
+        'transformers', 'tokenizers', 'huggingface_hub', 'safetensors',
+        'scipy', 'pandas', 'matplotlib',
+        'cv2', 'opencv', 'onnxruntime',
+        'bitsandbytes', 'sympy',
+        'IPython', 'notebook', 'jupyter',
+        'tkinter', '_tkinter',
+        'test', 'tests',
+    ],
     noarchive=False,
     optimize=0,
 )

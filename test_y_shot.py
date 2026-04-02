@@ -17,7 +17,7 @@ import copy
 
 def test_logic():
     print("=== テスト1: ロジック部分 ===")
-    from y_shot import load_csv, save_csv, save_tests, load_tests, step_display
+    from y_shot import load_csv, save_csv, save_tests, load_tests, step_short, STEP_TYPES, STEP_ICONS
 
     # CSV round-trip
     with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
@@ -42,23 +42,30 @@ def test_logic():
         {"type": "クリック", "selector": "#btn"},
         {"type": "待機", "seconds": "2.0"},
         {"type": "スクショ", "mode": "fullpage"},
+        {"type": "セッション削除"},
     ]}]
     with open(tmp_json, "w", encoding="utf-8") as f:
         json.dump(test_cases, f, ensure_ascii=False)
     with open(tmp_json, "r", encoding="utf-8") as f:
         loaded_tests = json.load(f)
     assert len(loaded_tests) == 1
-    assert len(loaded_tests[0]["steps"]) == 4
+    assert len(loaded_tests[0]["steps"]) == 5
     os.unlink(tmp_json)
     print("  [OK] テストケース保存/読込")
 
-    # step_display
+    # step_short
     steps = test_cases[0]["steps"]
-    assert "入力" in step_display(steps[0]) or "#name" in step_display(steps[0])
-    assert "クリック" in step_display(steps[1]) or "#btn" in step_display(steps[1])
-    assert "2.0" in step_display(steps[2])
-    assert "表示範囲" in step_display(steps[3]) or "fullpage" in step_display(steps[3])
+    assert "入力" in step_short(steps[0]) or "#name" in step_short(steps[0])
+    assert "クリック" in step_short(steps[1]) or "#btn" in step_short(steps[1])
+    assert "2.0" in step_short(steps[2])
+    assert "表示範囲" in step_short(steps[3]) or "fullpage" in step_short(steps[3])
+    assert "セッション削除" in step_short(steps[4]) or "Cookie" in step_short(steps[4])
     print("  [OK] ステップ表示")
+
+    # セッション削除がSTEP_TYPESに含まれること
+    assert "セッション削除" in STEP_TYPES
+    assert "セッション削除" in STEP_ICONS
+    print("  [OK] セッション削除ステップ定義")
 
     print("  全てパス\n")
 
@@ -262,7 +269,7 @@ def test_import():
     try:
         spec.loader.exec_module(mod)
         for fn_name in ['main', '_main_inner', 'kill_driver', 'run_all_tests', 'collect_elements_python',
-                         'step_display', 'load_csv', 'save_csv', 'load_tests', 'save_tests',
+                         'step_short', 'load_csv', 'save_csv', 'load_tests', 'save_tests',
                          'load_pattern_sets', 'save_pattern_sets', 'load_pages', 'save_pages',
                          'build_auth_url', 'capture_form_values', '_safe_filename', '_has_non_bmp']:
             assert hasattr(mod, fn_name), f"{fn_name} が見つからない"

@@ -12,7 +12,7 @@ y-shot: Web Screenshot Automation Tool  v2.3 (Flet)
            step delete confirmation setting, snackbar fix
 """
 
-import csv, os, sys, json, threading, time, logging, traceback, copy
+import csv, os, sys, json, threading, time, logging, traceback, copy, shutil
 # Set AppUserModelID so Windows taskbar shows the exe icon, not the Flet client icon
 try:
     import ctypes
@@ -61,6 +61,13 @@ def _has_non_bmp(s):
 # ===================================================================
 # Backend
 # ===================================================================
+
+def _sel_by(selector):
+    """Return (By.XPATH, selector) if selector starts with '//', else (By.CSS_SELECTOR, selector)."""
+    from selenium.webdriver.common.by import By
+    if selector.startswith("//"):
+        return (By.XPATH, selector)
+    return (By.CSS_SELECTOR, selector)
 
 # ── JS-based bulk element collection (replaces per-element round-trips) ──
 _JS_COLLECT_ELEMENTS = """
@@ -163,6 +170,30 @@ _JS_COLLECT_ELEMENTS = """
                 break;
             }
             anc=anc.parentElement;
+        }
+        // XPath fallback: use text content to build a unique XPath
+        var txt=(el.textContent||'').trim();
+        if (txt && txt.length<=60 && txt.indexOf("'")<0) {
+            if (txt.indexOf("\\n")>=0 || txt.length>30) {
+                var shortTxt=txt.replace(/\\s+/g,' ').substring(0,20);
+                var xp='//'+tag+"[contains(normalize-space(),'"+shortTxt+"')]";
+                try { var xr=document.evaluate(xp,document,null,7,null); if (xr.snapshotLength===1) return xp; } catch(e){}
+            } else {
+                var xp='//'+tag+"[normalize-space()='"+txt+"']";
+                try { var xr=document.evaluate(xp,document,null,7,null); if (xr.snapshotLength===1) return xp; } catch(e){}
+            }
+        }
+        // XPath by @value (for input[type=submit/button] etc.)
+        var val=el.getAttribute('value');
+        if (val && val.indexOf("'")<0 && (tag==='input'||tag==='button')) {
+            var xp='//'+tag+"[@value='"+val+"']";
+            try { var xr=document.evaluate(xp,document,null,7,null); if (xr.snapshotLength===1) return xp; } catch(e){}
+        }
+        // aria-label XPath (may have been non-unique as CSS, try XPath)
+        var ariaL=el.getAttribute('aria-label');
+        if (ariaL && ariaL.indexOf("'")<0) {
+            var xp='//'+tag+"[@aria-label='"+ariaL+"']";
+            try { var xr=document.evaluate(xp,document,null,7,null); if (xr.snapshotLength===1) return xp; } catch(e){}
         }
         return tag;
     }
@@ -388,6 +419,28 @@ def _build_selector(driver, el, tag, eid, ename):
                     return f'[id="{_css_escape_attr(pid)}"] > {tag}:nth-of-type({idx})'
                 return f"#{pid} > {tag}:nth-of-type({idx})"
     except Exception: pass
+    # XPath fallback: use text content to build a unique XPath
+    try:
+        txt = (el.text or "").strip()
+        if txt and len(txt) <= 60 and "'" not in txt:
+            if "\n" in txt or len(txt) > 30:
+                short = " ".join(txt.split())[:20]
+                xp = f"//{tag}[contains(normalize-space(),'{short}')]"
+            else:
+                xp = f"//{tag}[normalize-space()='{txt}']"
+            from selenium.webdriver.common.by import By
+            if len(driver.find_elements(By.XPATH, xp)) == 1:
+                return xp
+    except Exception: pass
+    # XPath by @value (for input[type=submit/button] etc.)
+    try:
+        val = el.get_attribute("value") or ""
+        if val and "'" not in val and tag in ("input", "button"):
+            xp = f"//{tag}[@value='{val}']"
+            from selenium.webdriver.common.by import By
+            if len(driver.find_elements(By.XPATH, xp)) == 1:
+                return xp
+    except Exception: pass
     return tag
 
 _JS_CAPTURE_FORM_VALUES = """
@@ -482,7 +535,7 @@ def collect_element_options(driver, el_info):
     sel = el_info.get("selector", "")
     if tag == "select":
         try:
-            el = driver.find_element(By.CSS_SELECTOR, sel)
+            el = driver.find_element(*_sel_by(sel))
             options = el.find_elements(By.TAG_NAME, "option")
             result = []
             for opt in options:
@@ -495,7 +548,7 @@ def collect_element_options(driver, el_info):
             return None, []
     elif etype == "radio":
         try:
-            name = el_info.get("name", "") or driver.find_element(By.CSS_SELECTOR, sel).get_attribute("name") or ""
+            name = el_info.get("name", "") or driver.find_element(*_sel_by(sel)).get_attribute("name") or ""
             if not name: return None, []
             safe_name = _css_escape_attr(name)
             radios = driver.find_elements(By.CSS_SELECTOR, f'input[type="radio"][name="{safe_name}"]')
@@ -521,8 +574,12 @@ def collect_element_options(driver, el_info):
 HIGHLIGHT_JS = ("(function(s){try{"
     "var p=document.getElementById('__yshot_hl');if(p)p.remove();"
     "if(window.__yshot_scroll_rm){window.removeEventListener('scroll',window.__yshot_scroll_rm,true);}"
-    "var all=document.querySelectorAll(s);"
-    "if(!all.length)return JSON.stringify({found:0});"
+    "var all,cnt;"
+    "if(s.substring(0,2)==='//'){"
+    "var xr=document.evaluate(s,document,null,7,null);cnt=xr.snapshotLength;"
+    "all=[];for(var xi=0;xi<cnt;xi++)all.push(xr.snapshotItem(xi));"
+    "}else{all=document.querySelectorAll(s);cnt=all.length;}"
+    "if(!cnt)return JSON.stringify({found:0});"
     "var e=all[0];"
     # Override scroll-behavior: smooth to ensure instant scroll
     "var html=document.documentElement;"
@@ -534,7 +591,7 @@ HIGHLIGHT_JS = ("(function(s){try{"
     "void html.offsetHeight;"
     "var r=e.getBoundingClientRect();"
     "var h=document.createElement('div');h.id='__yshot_hl';"
-    "var color=all.length===1?'#FF4444':'#FF8800';"
+    "var color=cnt===1?'#FF4444':'#FF8800';"
     "h.style.cssText='position:fixed;border:3px solid '+color+';background:rgba(255,68,68,0.15);"
     "z-index:2147483647;pointer-events:none;border-radius:3px;transition:none;';"
     "h.style.top=r.top-3+'px';h.style.left=r.left-3+'px';"
@@ -552,7 +609,7 @@ HIGHLIGHT_JS = ("(function(s){try{"
     "window.removeEventListener('scroll',window.__yshot_scroll_rm,true);};"
     "window.addEventListener('scroll',window.__yshot_scroll_rm,true);"
     "},600);"
-    "return JSON.stringify({found:all.length,tag:e.tagName,id:e.id||'',name:e.getAttribute('name')||''});"
+    "return JSON.stringify({found:cnt,tag:e.tagName,id:e.id||'',name:e.getAttribute('name')||''});"
     "}catch(x){return JSON.stringify({found:0,error:x.message});}})(arguments[0]);")
 
 JS_SET_VALUE = (
@@ -692,7 +749,7 @@ def setup_basic_auth(driver, config):
     except Exception:
         pass
 
-STEP_TYPES = ["入力", "クリック", "ホバー", "選択", "待機", "要素待機", "スクロール", "スクショ", "戻る", "更新", "アラートOK", "アラートキャンセル", "ナビゲーション", "見出し", "コメント"]
+STEP_TYPES = ["入力", "クリック", "ホバー", "選択", "待機", "要素待機", "スクロール", "スクショ", "戻る", "更新", "アラートOK", "アラートキャンセル", "ナビゲーション", "セッション削除", "見出し", "コメント"]
 STEP_ICONS = {"入力": ft.Icons.EDIT, "クリック": ft.Icons.MOUSE,
               "ホバー": ft.Icons.NEAR_ME,
               "選択": ft.Icons.ARROW_DROP_DOWN_CIRCLE,
@@ -702,6 +759,7 @@ STEP_ICONS = {"入力": ft.Icons.EDIT, "クリック": ft.Icons.MOUSE,
               "戻る": ft.Icons.ARROW_BACK, "更新": ft.Icons.REFRESH,
               "アラートOK": ft.Icons.CHECK_CIRCLE, "アラートキャンセル": ft.Icons.CANCEL,
               "ナビゲーション": ft.Icons.OPEN_IN_BROWSER,
+              "セッション削除": ft.Icons.DELETE_SWEEP,
               "見出し": ft.Icons.TITLE, "コメント": ft.Icons.COMMENT}
 SCROLL_MODES = [("element", "要素へスクロール"), ("pixel", "ピクセル指定"), ("top", "先頭に戻る")]
 INPUT_MODES = [("overwrite", "上書き"), ("append", "追記"), ("clear", "クリアのみ")]
@@ -734,6 +792,7 @@ def step_short(step):
     if t == "更新": return f"F5更新 +{step.get('seconds','1.0')}秒"
     if t == "アラートOK": return "ダイアログOK"
     if t == "アラートキャンセル": return "ダイアログキャンセル"
+    if t == "セッション削除": return "Cookie/セッション全削除"
     if t == "ナビゲーション":
         url = step.get("url","")
         return url[:40]+"..." if len(url) > 40 else url
@@ -961,7 +1020,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
             if tc_url: return tc_url
             return _page_urls.get(tc.get("page_id", ""), "")
         outdir_base = config.get("output_dir", os.path.join(get_app_dir(), "screenshots"))
-        ts = datetime.now().strftime("%Y%m%d%H%M%S")
+        ts = datetime.now().strftime("%Y%m%d")
         outdir = os.path.join(outdir_base, ts)
         os.makedirs(outdir, exist_ok=True)
         gss = 0
@@ -990,11 +1049,23 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                 return page_dirs[pid]
             planned = _page_dir_paths.get(pid)
             if planned:
+                # Clear existing page dir on re-run (same-day overwrite)
+                if os.path.isdir(planned):
+                    for old_f in os.listdir(planned):
+                        old_fp = os.path.join(planned, old_f)
+                        if os.path.isfile(old_fp):
+                            os.remove(old_fp)
                 os.makedirs(planned, exist_ok=True)
                 page_dirs[pid] = planned
                 if save_source:
                     os.makedirs(source_root, exist_ok=True)
                     src_dir = os.path.join(source_root, os.path.basename(planned))
+                    # Clear existing source dir too
+                    if os.path.isdir(src_dir):
+                        for old_f in os.listdir(src_dir):
+                            old_fp = os.path.join(src_dir, old_f)
+                            if os.path.isfile(old_fp):
+                                os.remove(old_fp)
                     os.makedirs(src_dir, exist_ok=True)
                     source_dirs[pid] = src_dir
                 return planned
@@ -1057,7 +1128,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             iframes = driver.find_elements(By.CSS_SELECTOR, "iframe, frame")
                             if fi < len(iframes): driver.switch_to.frame(iframes[fi])
                         except Exception as fx: log_cb(f"  S{si} [WARN] iframe切替失敗: {fx}")
-                    elif si > 1 and st not in ("アラートOK", "アラートキャンセル"):
+                    elif si > 1 and st not in ("アラートOK", "アラートキャンセル", "セッション削除"):
                         # Return to default content if previous step was in iframe
                         # (skip for alert steps — switch_to.default_content() auto-dismisses confirm dialogs)
                         try: driver.switch_to.default_content()
@@ -1067,7 +1138,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         iv = step.get("value","{パターン}").replace("{パターン}",value).replace("{pattern}",value)
                         input_mode = step.get("input_mode", "overwrite")
                         try:
-                            e = WebDriverWait(driver,10).until(EC.presence_of_element_located((By.CSS_SELECTOR,sel)))
+                            e = WebDriverWait(driver,10).until(EC.presence_of_element_located(_sel_by(sel)))
                             driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", e)
                             etype = (e.get_attribute("type") or "").lower()
                             if input_mode == "clear":
@@ -1097,7 +1168,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                     elif st == "クリック":
                         sel = step.get("selector","").replace("{パターン}",value).replace("{pattern}",value)
                         try:
-                            _el = WebDriverWait(driver,10).until(EC.element_to_be_clickable((By.CSS_SELECTOR,sel)))
+                            _el = WebDriverWait(driver,10).until(EC.element_to_be_clickable(_sel_by(sel)))
                             driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", _el)
                             _el.click()
                             log_cb(f"  S{si} クリック: {sel}")
@@ -1108,7 +1179,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         sel = step.get("selector","")
                         try:
                             from selenium.webdriver.common.action_chains import ActionChains
-                            _el = WebDriverWait(driver,10).until(EC.presence_of_element_located((By.CSS_SELECTOR,sel)))
+                            _el = WebDriverWait(driver,10).until(EC.presence_of_element_located(_sel_by(sel)))
                             driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", _el)
                             ActionChains(driver).move_to_element(_el).perform()
                             time.sleep(0.3)
@@ -1120,7 +1191,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         sel = step.get("selector","")
                         sv = step.get("value","").replace("{パターン}",value).replace("{pattern}",value)
                         try:
-                            el = WebDriverWait(driver,10).until(EC.presence_of_element_located((By.CSS_SELECTOR,sel)))
+                            el = WebDriverWait(driver,10).until(EC.presence_of_element_located(_sel_by(sel)))
                             driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", el)
                             dd = SeleniumSelect(el)
                             try: dd.select_by_value(sv)
@@ -1141,6 +1212,11 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             s = float(step.get("seconds","1.0")); time.sleep(s)
                             log_cb(f"  S{si} 更新 (+{s}秒)")
                         except Exception as x: log_cb(f"  S{si} [WARN] 更新失敗: {x}")
+                    elif st == "セッション削除":
+                        try:
+                            driver.delete_all_cookies()
+                            log_cb(f"  S{si} セッション削除: すべてのCookieを削除")
+                        except Exception as x: log_cb(f"  S{si} [WARN] セッション削除失敗: {x}")
                     elif st in ("アラートOK", "アラートキャンセル"):
                         _accept = (st == "アラートOK")
                         try:
@@ -1181,7 +1257,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                 log_cb(f"  S{si} スクロール: {px}px")
                             else:
                                 sel = step.get("selector","")
-                                el = WebDriverWait(driver,10).until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+                                el = WebDriverWait(driver,10).until(EC.presence_of_element_located(_sel_by(sel)))
                                 driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", el)
                                 log_cb(f"  S{si} スクロール: {sel}")
                             time.sleep(0.3)
@@ -1192,7 +1268,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         sel = step.get("selector","")
                         timeout = float(step.get("seconds","10"))
                         try:
-                            WebDriverWait(driver, timeout).until(EC.visibility_of_element_located((By.CSS_SELECTOR, sel)))
+                            WebDriverWait(driver, timeout).until(EC.visibility_of_element_located(_sel_by(sel)))
                             log_cb(f"  S{si} 要素待機OK: {sel}")
                         except Exception as x:
                             log_cb(f"  S{si} [WARN] 要素待機タイムアウト({timeout}秒): {sel}")
@@ -1226,10 +1302,10 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         fp = os.path.join(tc_outdir, fn)
                         try:
                             if mode == "element" and sel:
-                                driver.find_element(By.CSS_SELECTOR, sel).screenshot(fp)
+                                driver.find_element(*_sel_by(sel)).screenshot(fp)
                             elif mode == "margin" and sel:
                                 mg = int(step.get("margin_px",500))
-                                tgt = driver.find_element(By.CSS_SELECTOR, sel)
+                                tgt = driver.find_element(*_sel_by(sel))
                                 driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});",tgt)
                                 time.sleep(0.3)
                                 r = driver.execute_script("var r=arguments[0].getBoundingClientRect();return{x:r.x,y:r.y,w:r.width,h:r.height};",tgt)
@@ -1337,7 +1413,11 @@ def get_bundle_dir():
     if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'): return sys._MEIPASS
     return os.path.dirname(os.path.abspath(__file__))
 
+_active_project_dir = [None]  # activate_project() でセット
+
 def _data_path(filename):
+    if _active_project_dir[0]:
+        return os.path.join(_active_project_dir[0], filename)
     return os.path.join(get_app_dir(), filename)
 
 # ===================================================================
@@ -1402,6 +1482,65 @@ def load_pages():
     return _safe_json_load(_data_path(PAGES_FILE), [])
 def save_pages(pages):
     _safe_json_save(_data_path(PAGES_FILE), pages)
+
+# ===================================================================
+# Project management
+# ===================================================================
+PROJECTS_DIR = "projects"
+PROJECTS_FILE = "projects.json"
+
+def get_projects_dir():
+    return os.path.join(get_app_dir(), PROJECTS_DIR)
+
+def load_projects_registry():
+    p = os.path.join(get_projects_dir(), PROJECTS_FILE)
+    return _safe_json_load(p, {"last_active": "default", "projects": []})
+
+def save_projects_registry(registry):
+    os.makedirs(get_projects_dir(), exist_ok=True)
+    _safe_json_save(os.path.join(get_projects_dir(), PROJECTS_FILE), registry)
+
+def activate_project(project_id, registry):
+    for proj in registry["projects"]:
+        if proj["id"] == project_id:
+            d = os.path.join(get_projects_dir(), proj["dir"])
+            os.makedirs(d, exist_ok=True)
+            _active_project_dir[0] = d
+            registry["last_active"] = project_id
+            return True
+    return False
+
+def _new_project_id(registry):
+    max_id = 0
+    for proj in registry["projects"]:
+        try: max_id = max(max_id, int(proj["id"].split("_", 1)[1]))
+        except (ValueError, IndexError): pass
+    return f"proj_{max_id + 1}"
+
+def _safe_dir_name(name):
+    """Convert project name to a safe directory name."""
+    safe = re.sub(r'[\\/:*?"<>|]', '_', name).strip()
+    return safe or "project"
+
+def migrate_to_projects():
+    reg_path = os.path.join(get_projects_dir(), PROJECTS_FILE)
+    if os.path.isfile(reg_path):
+        return load_projects_registry()
+    default_dir = os.path.join(get_projects_dir(), "default")
+    os.makedirs(default_dir, exist_ok=True)
+    for fname in [TESTS_FILE, PAGES_FILE, PATTERNS_FILE, SELECTOR_BANK_FILE, CONFIG_FILE]:
+        src = os.path.join(get_app_dir(), fname)
+        dst = os.path.join(default_dir, fname)
+        if os.path.isfile(src) and not os.path.isfile(dst):
+            shutil.copy2(src, dst)
+    registry = {
+        "last_active": "default",
+        "projects": [{"id": "default", "name": "デフォルト", "dir": "default",
+                       "created": datetime.now().isoformat()}]
+    }
+    save_projects_registry(registry)
+    return registry
+
 def get_templates_dir():
     user_dir = os.path.join(get_app_dir(), "templates")
     bundle_dir = os.path.join(get_bundle_dir(), "templates")
@@ -1454,6 +1593,14 @@ def _main_inner(page: ft.Page):
     page.theme_mode = ft.ThemeMode.LIGHT
     page.theme = ft.Theme(color_scheme_seed=ft.Colors.BLUE)
 
+    # ── Project initialization ──
+    _projects_registry = migrate_to_projects()
+    _last_proj = _projects_registry.get("last_active", "default")
+    if not activate_project(_last_proj, _projects_registry):
+        # fallback to first project
+        if _projects_registry["projects"]:
+            activate_project(_projects_registry["projects"][0]["id"], _projects_registry)
+
     def _safe_load(loader, default, name):
         try:
             return loader()
@@ -1477,23 +1624,25 @@ def _main_inner(page: ft.Page):
         "selected_test_per_page": {},
         "_tc_id_counter": 0, "_page_id_counter": 0,
     }
-    _max_id = 0
-    for tc in state["tests"]:
-        if "_id" in tc:
-            try: _max_id = max(_max_id, int(tc["_id"].split("_", 1)[1]))
+    def _reinit_id_counters():
+        _max_id = 0
+        for tc in state["tests"]:
+            if "_id" in tc:
+                try: _max_id = max(_max_id, int(tc["_id"].split("_", 1)[1]))
+                except (ValueError, IndexError): pass
+            else:
+                state["_tc_id_counter"] += 1
+                tc["_id"] = f"tc_{state['_tc_id_counter']}"
+        state["_tc_id_counter"] = max(state["_tc_id_counter"], _max_id)
+        _max_page_id = 0
+        for pg in state["pages"]:
+            try: _max_page_id = max(_max_page_id, int(pg["_id"].split("_", 1)[1]))
             except (ValueError, IndexError): pass
-        else:
-            state["_tc_id_counter"] += 1
-            tc["_id"] = f"tc_{state['_tc_id_counter']}"
-    state["_tc_id_counter"] = max(state["_tc_id_counter"], _max_id)
+        state["_page_id_counter"] = _max_page_id
+    _reinit_id_counters()
+
     def _new_tc_id():
         state["_tc_id_counter"] += 1; return f"tc_{state['_tc_id_counter']}"
-
-    _max_page_id = 0
-    for pg in state["pages"]:
-        try: _max_page_id = max(_max_page_id, int(pg["_id"].split("_", 1)[1]))
-        except (ValueError, IndexError): pass
-    state["_page_id_counter"] = _max_page_id
     def _new_page_id():
         state["_page_id_counter"] += 1; return f"p_{state['_page_id_counter']}"
 
@@ -1535,12 +1684,13 @@ def _main_inner(page: ft.Page):
                 tc["number"] = f"{pnum}-{next_sub}"
                 next_sub += 1
 
-    # Ensure at least one page exists
-    if not state["pages"]:
-        dp = {"_id": _new_page_id(), "name": "ページ1", "number": "1", "start_number": 1, "url": ""}
-        state["pages"].append(dp)
-        for tc in state["tests"]:
-            tc.setdefault("page_id", dp["_id"])
+    def _ensure_default_page():
+        if not state["pages"]:
+            dp = {"_id": _new_page_id(), "name": "ページ1", "number": "1", "start_number": 1, "url": ""}
+            state["pages"].append(dp)
+            for tc in state["tests"]:
+                tc.setdefault("page_id", dp["_id"])
+    _ensure_default_page()
     auto_number_tests()
     state["selected_page"] = state["pages"][0]["_id"]
 
@@ -2710,21 +2860,20 @@ def _main_inner(page: ft.Page):
             tc["steps"].extend(fs); refresh_steps(False); refresh_test_list(); snack(f"フォーム値 {len(fs)} 件")
         except Exception as x: log(f"[ERROR] {x}")
     def test_selector_dlg(e):
-        """Open a dialog to test CSS selectors by highlighting matches in the browser."""
+        """Open a dialog to test CSS/XPath selectors by highlighting matches in the browser."""
         if not state["browser_driver"]: snack("ブラウザ未起動", ft.Colors.ORANGE_700); return
         # Pre-fill with selected element's selector
         init_sel = ""
         idx = state["selected_el"]
         if 0 <= idx < len(state["browser_elements"]):
             init_sel = state["browser_elements"][idx].get("selector", "")
-        tf = ft.TextField(label="CSSセレクタ", width=420, value=init_sel, autofocus=True)
+        tf = ft.TextField(label="セレクタ (CSS / XPath)", width=420, value=init_sel, autofocus=True)
         result_text = ft.Text("", size=12)
         def do_test(e):
             sel_val = (tf.value or "").strip()
             if not sel_val: result_text.value = "セレクタを入力"; result_text.color = ft.Colors.RED_700; page.update(); return
             try:
-                from selenium.webdriver.common.by import By
-                matches = state["browser_driver"].find_elements(By.CSS_SELECTOR, sel_val)
+                matches = state["browser_driver"].find_elements(*_sel_by(sel_val))
                 if not matches:
                     result_text.value = f"該当なし"; result_text.color = ft.Colors.RED_700
                 else:
@@ -3129,21 +3278,29 @@ def _main_inner(page: ft.Page):
         search_dirs = [
             state["config"].get("output_dir", os.path.join(get_app_dir(), "screenshots")),
             get_app_dir(),
+            os.path.join(get_app_dir(), "docs"),
+            get_projects_dir(),
         ]
         found_files = []
         for d in search_dirs:
             if not os.path.isdir(d): continue
             for fn in os.listdir(d):
+                fp = os.path.join(d, fn)
                 if fn.endswith(".yshot.json"):
-                    fp = os.path.join(d, fn)
                     found_files.append(fp)
+                elif os.path.isdir(fp):
+                    # 1階層のサブディレクトリも探索
+                    for fn2 in os.listdir(fp):
+                        if fn2.endswith(".yshot.json"):
+                            found_files.append(os.path.join(fp, fn2))
         found_files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
 
         path_field = ft.TextField(label="ファイルパス", width=450, hint_text=".yshot.json ファイルのパスを入力",
                                   value=found_files[0] if found_files else "")
-        mode_dd = ft.Dropdown(label="インポート方法", width=250, value="replace",
+        mode_dd = ft.Dropdown(label="インポート方法", width=350, value="replace",
             options=[ft.dropdown.Option(key="replace", text="置換（現在のデータを上書き）"),
-                     ft.dropdown.Option(key="merge", text="マージ（現在のデータに追加）")])
+                     ft.dropdown.Option(key="merge", text="マージ（現在のデータに追加）"),
+                     ft.dropdown.Option(key="new_project", text="新規プロジェクトとしてインポート")])
         preview_text = ft.Text("", size=11, color=ft.Colors.GREY_600)
         file_list_col = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, height=120)
 
@@ -3199,6 +3356,42 @@ def _main_inner(page: ft.Page):
                 imp_tests = data.get("tests", [])
                 imp_pats = data.get("pattern_sets", {})
 
+                if mode_dd.value == "new_project":
+                    # Create a new project and import data into it
+                    save_all()
+                    proj_name = os.path.basename(fp).replace(".yshot.json", "") or "Imported"
+                    new_id = _new_project_id(_projects_registry)
+                    dir_name = _safe_dir_name(proj_name)
+                    base_dir = dir_name; counter = 1
+                    while os.path.isdir(os.path.join(get_projects_dir(), dir_name)):
+                        counter += 1; dir_name = f"{base_dir}_{counter}"
+                    _projects_registry["projects"].append({
+                        "id": new_id, "name": proj_name, "dir": dir_name,
+                        "created": datetime.now().isoformat()
+                    })
+                    activate_project(new_id, _projects_registry)
+                    save_projects_registry(_projects_registry)
+                    state["pages"] = imp_pages
+                    state["tests"] = imp_tests
+                    state["pattern_sets"] = imp_pats
+                    state["selector_bank"] = {}
+                    _reinit_id_counters()
+                    _ensure_default_page()
+                    auto_number_tests()
+                    state["selected_page"] = state["pages"][0]["_id"]
+                    state["selected_test"] = -1
+                    state["selected_pat_set"] = None
+                    save_all()
+                    project_dd.options = _project_dd_options()
+                    project_dd.value = new_id
+                    refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
+                    refresh_pat_set_list(False); refresh_pats(False)
+                    page.title = f"{APP_NAME} - {_current_project_name()}"
+                    page.update()
+                    snack(f"新規プロジェクト「{proj_name}」にインポート完了 ({len(imp_pages)}ページ, {len(imp_tests)}テスト)")
+                    log(f"[プロジェクト] 新規プロジェクトインポート: {fp} -> {proj_name}")
+                    close_dlg(dlg); return
+
                 if mode_dd.value == "replace":
                     state["pages"] = imp_pages
                     state["tests"] = imp_tests
@@ -3236,20 +3429,8 @@ def _main_inner(page: ft.Page):
                             if old_pat in pat_name_map:
                                 tc["pattern"] = pat_name_map[old_pat]
 
-                # Re-init ID counters
-                _max_id = 0
-                for tc in state["tests"]:
-                    try: _max_id = max(_max_id, int(tc["_id"].split("_", 1)[1]))
-                    except (ValueError, IndexError): pass
-                state["_tc_id_counter"] = _max_id
-                _max_pg = 0
-                for pg in state["pages"]:
-                    try: _max_pg = max(_max_pg, int(pg["_id"].split("_", 1)[1]))
-                    except (ValueError, IndexError): pass
-                state["_page_id_counter"] = _max_pg
-
-                if not state["pages"]:
-                    state["pages"].append({"_id": _new_page_id(), "name": "ページ1", "number": "1", "start_number": 1, "url": ""})
+                _reinit_id_counters()
+                _ensure_default_page()
                 state["selected_page"] = state["pages"][0]["_id"]
                 state["selected_test"] = -1
                 state["selected_pat_set"] = None
@@ -3393,6 +3574,136 @@ def _main_inner(page: ft.Page):
         rows=[], column_spacing=8, data_row_min_height=28, heading_row_height=30,
         show_checkbox_column=True)
 
+    # ── Project selector ──
+    def _project_dd_options():
+        return [ft.dropdown.Option(key=p["id"], text=p["name"])
+                for p in _projects_registry["projects"]]
+
+    def _current_project_name():
+        for p in _projects_registry["projects"]:
+            if p["id"] == _projects_registry.get("last_active"): return p["name"]
+        return ""
+
+    def _reload_project_data():
+        """Reload all data from current project directory."""
+        state["tests"] = _safe_load(load_tests, [], "tests")
+        state["pages"] = _safe_load(load_pages, [], "pages")
+        state["pattern_sets"] = _safe_load(load_pattern_sets, {}, "pattern_sets")
+        state["selector_bank"] = _safe_load(load_selector_bank, {}, "selector_bank")
+        state["config"] = _safe_load(load_config, {}, "config")
+        _reinit_id_counters()
+        _ensure_default_page()
+        _invalidate_idx()
+        auto_number_tests()
+        state["selected_page"] = state["pages"][0]["_id"]
+        state["selected_test"] = -1
+        state["selected_pat_set"] = None
+        state["collapsed"] = set()
+        state["selected_test_per_page"] = {}
+
+    def on_project_change(e):
+        if _guard_running(): return
+        if not project_dd.value: return
+        if project_dd.value == _projects_registry.get("last_active"): return
+        save_all()
+        activate_project(project_dd.value, _projects_registry)
+        save_projects_registry(_projects_registry)
+        _reload_project_data()
+        refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
+        refresh_pat_set_list(False); refresh_pats(False)
+        page.title = f"{APP_NAME} - {_current_project_name()}"
+        page.update()
+
+    def add_project(e):
+        if _guard_running(): return
+        nf = ft.TextField(label="プロジェクト名", width=350, autofocus=True)
+        def on_ok(e):
+            name = nf.value.strip()
+            if not name: snack("名前を入力してください", ft.Colors.RED_700); return
+            save_all()
+            new_id = _new_project_id(_projects_registry)
+            dir_name = _safe_dir_name(name)
+            # Ensure unique directory name
+            base_dir = dir_name
+            counter = 1
+            while os.path.isdir(os.path.join(get_projects_dir(), dir_name)):
+                counter += 1; dir_name = f"{base_dir}_{counter}"
+            _projects_registry["projects"].append({
+                "id": new_id, "name": name, "dir": dir_name,
+                "created": datetime.now().isoformat()
+            })
+            activate_project(new_id, _projects_registry)
+            save_projects_registry(_projects_registry)
+            _reload_project_data()
+            project_dd.options = _project_dd_options()
+            project_dd.value = new_id
+            refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
+            refresh_pat_set_list(False); refresh_pats(False)
+            page.title = f"{APP_NAME} - {_current_project_name()}"
+            page.update(); close_dlg(dlg)
+        dlg = ft.AlertDialog(title=ft.Text("プロジェクト追加"),
+            content=ft.Column([nf], tight=True, spacing=10, width=400),
+            actions=[ft.TextButton("OK", on_click=on_ok),
+                     ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg)
+
+    def rename_project(e):
+        cur_id = _projects_registry.get("last_active")
+        cur_proj = None
+        for p in _projects_registry["projects"]:
+            if p["id"] == cur_id: cur_proj = p; break
+        if not cur_proj: return
+        nf = ft.TextField(label="プロジェクト名", width=350, value=cur_proj["name"], autofocus=True)
+        def on_ok(e):
+            name = nf.value.strip()
+            if not name: snack("名前を入力してください", ft.Colors.RED_700); return
+            cur_proj["name"] = name
+            save_projects_registry(_projects_registry)
+            project_dd.options = _project_dd_options()
+            page.title = f"{APP_NAME} - {_current_project_name()}"
+            page.update(); close_dlg(dlg)
+        dlg = ft.AlertDialog(title=ft.Text("プロジェクト名変更"),
+            content=ft.Column([nf], tight=True, spacing=10, width=400),
+            actions=[ft.TextButton("OK", on_click=on_ok),
+                     ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg)
+
+    def del_project(e):
+        if _guard_running(): return
+        cur_id = _projects_registry.get("last_active")
+        if cur_id == "default":
+            snack("デフォルトプロジェクトは削除できません", ft.Colors.RED_700); return
+        cur_proj = None
+        for p in _projects_registry["projects"]:
+            if p["id"] == cur_id: cur_proj = p; break
+        if not cur_proj: return
+        def on_ok(e):
+            close_dlg(dlg)
+            proj_dir = os.path.join(get_projects_dir(), cur_proj["dir"])
+            _projects_registry["projects"].remove(cur_proj)
+            activate_project("default", _projects_registry)
+            save_projects_registry(_projects_registry)
+            # Remove project directory
+            try: shutil.rmtree(proj_dir)
+            except Exception: pass
+            _reload_project_data()
+            project_dd.options = _project_dd_options()
+            project_dd.value = "default"
+            refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
+            refresh_pat_set_list(False); refresh_pats(False)
+            page.title = f"{APP_NAME} - {_current_project_name()}"
+            page.update()
+        dlg = ft.AlertDialog(title=ft.Text("プロジェクト削除"),
+            content=ft.Text(f"「{cur_proj['name']}」を削除しますか？\nすべてのページ・テストが削除されます。"),
+            actions=[ft.TextButton("削除", on_click=on_ok, style=ft.ButtonStyle(color=ft.Colors.RED_700)),
+                     ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
+        open_dlg(dlg)
+
+    project_dd = ft.Dropdown(label="プロジェクト", expand=True, dense=True,
+                             options=_project_dd_options(),
+                             value=_projects_registry.get("last_active"),
+                             on_select=on_project_change)
+
     # Page selector
     page_dd = ft.Dropdown(label="ページ", expand=True, dense=True,
                           options=_page_dd_options(), value=state["selected_page"],
@@ -3437,6 +3748,15 @@ def _main_inner(page: ft.Page):
     # ── Layout: Tab 1 (collapsible test list) ──
     _tc_panel_collapsed = [False]
     tc_panel_full = ft.Column([
+        ft.Row([project_dd,
+                ft.IconButton(ft.Icons.ADD, tooltip="プロジェクト追加", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=add_project),
+                ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, icon_size=16, icon_color=ft.Colors.GREY_700,
+                    tooltip="プロジェクト操作", items=[
+                        ft.PopupMenuItem(icon=ft.Icons.EDIT, content="名前変更", on_click=rename_project),
+                        ft.PopupMenuItem(icon=ft.Icons.DELETE, content="削除", on_click=del_project),
+                    ]),
+               ], spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        ft.Divider(height=1),
         ft.Row([page_dd,
                 ft.IconButton(ft.Icons.ADD, tooltip="ページ追加", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=add_page),
                 ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, icon_size=16, icon_color=ft.Colors.GREY_700,
@@ -3584,9 +3904,10 @@ def _main_inner(page: ft.Page):
 
     refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
     refresh_pat_set_list(False); refresh_pats(False)
+    page.title = f"{APP_NAME} - {_current_project_name()}"
     page.update()
     _init_done[0] = True
-    _flog.info(f"{APP_NAME} v{APP_VERSION} started ({len(state['pages'])} pages, {len(state['tests'])} tests, {len(state['pattern_sets'])} pattern sets)")
+    _flog.info(f"{APP_NAME} v{APP_VERSION} started (project={_current_project_name()}, {len(state['pages'])} pages, {len(state['tests'])} tests, {len(state['pattern_sets'])} pattern sets)")
 
     def _cleanup_all_drivers():
         """Best-effort quit of Selenium drivers (non-blocking)."""

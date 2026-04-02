@@ -120,12 +120,20 @@ def normalize(html):
     # 7. Remove standalone closing tags for structural elements (they're implicit in HTML5)
     s = re.sub(r'</(head|body|html)>', '', s)
     # 8. Split into lines at block-level OPENING tag boundaries for readable diff
-    s = re.sub(r'><(?=(html|head|body|div|p|form|table|tr|td|th|ul|ol|li|section|article|nav|header|footer|main|aside|h[1-6]|script|style|link|meta|hr|br|noscript|iframe)\b)', '>\n<', s)
+    s = re.sub(r'><(?=(html|head|body|div|p|form|table|tr|td|th|ul|ol|li|section|article|nav|header|footer|main|aside|h[1-6]|script|style|link|meta|hr|br|noscript|iframe|input|select|textarea|button|label|img|a\b|span)\b)', '>\n<', s)
+    # Also split before HTML comments
+    s = re.sub(r'><!--', '>\n<!--', s)
+    s = re.sub(r'--><', '-->\n<', s)
     # 6. Remove all noise placeholder remnants
     s = re.sub(r'<!-- __(?:TRACKING|GTM_BLOCK|GTM_NS)__ -->', '', s)
     s = re.sub(r'/\* __GTM[^*]*\*/', '', s)
     s = re.sub(r'^\s*\n', '', s, flags=re.M)
     return s
+
+def _extract_text_content(html_line):
+    """HTMLタグを除去してテキスト内容だけ抽出"""
+    s = re.sub(r'<[^>]+>', '', html_line)
+    return re.sub(r'\s+', ' ', s).strip()
 
 def classify_line(line):
     l = line.lower()
@@ -138,6 +146,17 @@ def classify_line(line):
     if re.search(r'\b(?:class|id|style)\s*=', l): return "structural"
     if re.search(r'<(?:p|span|h[1-6]|a|strong|em|b|i|img|br)\b', l) or not l.strip().startswith('<'): return "content"
     return "structural"
+
+def classify_change(la, lb):
+    """変更行ペアの分類。テキスト内容が同じでタグ構造だけ違えばnoiseにする"""
+    cat_a = classify_line(la) if la else "structural"
+    cat_b = classify_line(lb) if lb else "structural"
+    # 両方structuralで、テキスト内容が同じなら noise
+    if cat_a == "structural" and cat_b == "structural":
+        if la and lb and _extract_text_content(la) == _extract_text_content(lb):
+            return "noise"
+    _CAT_PRIORITY = {"php_warning": 4, "form": 3, "content": 2, "structural": 1, "noise": 0}
+    return cat_a if _CAT_PRIORITY.get(cat_a, 0) >= _CAT_PRIORITY.get(cat_b, 0) else cat_b
 
 # ============================================================
 # Folder scanning
@@ -220,11 +239,18 @@ def compare_images(path_a, path_b):
         diff = ImageChops.difference(img_a, img_b)
         pixels = img_a.size[0] * img_a.size[1]
         if pixels == 0: return True, 0.0, None
+        # Quick check: if all pixels identical, skip heavy processing
+        if diff.getbbox() is None:
+            return True, 0.0, None
         # Convert to grayscale for threshold check
         diff_gray = diff.convert("L")
-        diff_data = list(diff_gray.getdata())
-        changed = sum(1 for v in diff_data if v > 10)
-        pct = (changed / pixels) * 100
+        # Use thumbnail for fast percentage calculation
+        thumb_size = (200, 200)
+        diff_thumb = diff_gray.copy()
+        diff_thumb.thumbnail(thumb_size)
+        thumb_data = list(diff_thumb.getdata())
+        thumb_changed = sum(1 for v in thumb_data if v > 10)
+        pct = (thumb_changed / len(thumb_data)) * 100
         if pct < 0.01:
             return True, 0.0, None
         # Generate diff highlight image with red bounding boxes around changed regions
@@ -301,7 +327,6 @@ def compute_diff(text_a, text_b):
     ops = []
     stats = {"same": 0, "add": 0, "del": 0, "change": 0, "noise": 0, "php_warning": 0}
     cat_counts = {"form": 0, "content": 0, "structural": 0, "noise": 0, "php_warning": 0}
-    _CAT_PRIORITY = {"php_warning": 4, "form": 3, "content": 2, "structural": 1, "noise": 0}
     def _is_noise(text_a, text_b=None):
         """Check if a change is noise. For replace ops, both lines must be noise-only."""
         if not ('__' in (text_a or '')):
@@ -312,22 +337,14 @@ def compute_diff(text_a, text_b):
         has_marker = any(m in (text_a or '') for m in markers)
         if not has_marker:
             return False
-        # For replace: if only the marker VALUES differ (same structure), it's noise
-        # But if the FORMAT differs (e.g. / vs -), it's a real change
         if text_b is not None and has_marker:
-            # Strip all marker values and compare structure
             import re as _re
             strip_pat = _re.compile(r'__(?:D4|D2|T2|TS|NORM|NONCE|CACHE|UUID|VER)__')
             struct_a = strip_pat.sub('##', text_a or '')
             struct_b = strip_pat.sub('##', text_b or '')
             if struct_a != struct_b:
-                return False  # Structure differs — real change (e.g. date format)
+                return False
         return True
-    def _best_cat(la, lb):
-        """Classify using both old and new lines, return the most important category."""
-        cat_a = classify_line(la) if la else "structural"
-        cat_b = classify_line(lb) if lb else "structural"
-        return cat_a if _CAT_PRIORITY.get(cat_a, 0) >= _CAT_PRIORITY.get(cat_b, 0) else cat_b
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == 'equal':
             for k in range(i2 - i1):
@@ -339,7 +356,7 @@ def compute_diff(text_a, text_b):
                 la = lines_a[i1+k].rstrip('\n') if i1+k < i2 else None
                 lb = lines_b[j1+k].rstrip('\n') if j1+k < j2 else None
                 is_noise = _is_noise(la, lb)
-                cat = "noise" if is_noise else _best_cat(la, lb)
+                cat = "noise" if is_noise else classify_change(la, lb)
                 if la is not None and lb is not None:
                     ops.append(("~", i1+k, j1+k, la, lb, cat)); stats["change"] += 1
                 elif la is not None:
@@ -506,7 +523,9 @@ def main(page: ft.Page):
         "src_type": "dom",
         "view_mode": "source",  # "source" or "image"
         "scanning": False,
+        "scan_abort": False,
         "ready": False,
+        "list_page": 0,
     }
 
     def snack(msg, color=ft.Colors.GREEN_700):
@@ -529,7 +548,6 @@ def main(page: ft.Page):
                 folder_b_field.value = path
                 folder_b_field.label = f"新: {os.path.basename(path)}"
             page.update()
-            if state["folder_a"] and state["folder_b"]: do_scan()
         except Exception as x:
             _flog.error(f"_apply_folder: {x}")
             snack(f"エラー: {x}", ft.Colors.RED_700)
@@ -555,7 +573,7 @@ def main(page: ft.Page):
             try:
                 for d in sorted(os.listdir(root), reverse=True):
                     fp = os.path.join(root, d)
-                    if os.path.isdir(fp) and re.match(r'\d{14}$', d):
+                    if os.path.isdir(fp) and (re.match(r'\d{8,14}$', d) or os.path.isfile(os.path.join(fp, "report.html"))):
                         candidates.append(fp)
                         if len(candidates) >= 20: break
             except Exception: pass
@@ -575,14 +593,19 @@ def main(page: ft.Page):
 
     # B1: Threaded scan — compute in background, update UI on main thread
     def do_scan():
-        if state["scanning"]: return
+        if state["scanning"]:
+            # 既にスキャン中なら中断
+            state["scan_abort"] = True
+            return
         state["scanning"] = True
+        state["scan_abort"] = False
         status_label.value = "スキャン中..."; page.update()
         state["diff_cache"].clear()
         page.run_thread(_do_scan_bg)
 
     def _do_scan_bg():
         try:
+            if state.get("scan_abort"): return
             # All computation in background (no UI access)
             files_a = scan_source_folder(state["folder_a"])
             files_b = scan_source_folder(state["folder_b"])
@@ -601,7 +624,12 @@ def main(page: ft.Page):
             keys = sorted(set(list(files_a.keys()) + list(files_b.keys())))
             matched = []
             diff_cache = {}
-            for k in keys:
+            total_keys = len(keys)
+            for ki, k in enumerate(keys):
+                if state.get("scan_abort"): return
+                if ki % 10 == 0:
+                    try: status_label.value = f"ソース比較中... {ki+1}/{total_keys}"; page.update()
+                    except Exception: pass
                 in_a = k in files_a; in_b = k in files_b
                 status = "only"; stats = cat_counts = None
                 if in_a and in_b:
@@ -615,8 +643,7 @@ def main(page: ft.Page):
                             cat_counts = {}
                         else:
                             status = "diff"
-                            ops, stats, cat_counts = compute_diff(ta, tb)
-                            diff_cache[k] = (ops, stats, cat_counts)
+                            # diff計算は選択時に遅延実行（スキャン高速化）
                     else:
                         status = "same"
                 matched.append({"key": k, "in_a": in_a, "in_b": in_b, "status": status, "stats": stats, "cat_counts": cat_counts})
@@ -633,7 +660,12 @@ def main(page: ft.Page):
                         imgs_b[sk] = imgs_b.pop(orig_b)
             img_keys = sorted(set(list(imgs_a.keys()) + list(imgs_b.keys())))
             img_matched = []
-            for k in img_keys:
+            total_imgs = len(img_keys)
+            for ii, k in enumerate(img_keys):
+                if state.get("scan_abort"): return
+                if ii % 5 == 0:
+                    try: status_label.value = f"画像比較中... {ii+1}/{total_imgs}"; page.update()
+                    except Exception: pass
                 in_a = k in imgs_a; in_b = k in imgs_b
                 img_status = "only"; diff_pct = 0.0; diff_path = None
                 if in_a and in_b:
@@ -662,12 +694,19 @@ def main(page: ft.Page):
             _flog.error(f"scan: {x}\n{_tb.format_exc()}")
             status_label.value = f"エラー: {x}"
         finally:
+            was_aborted = state.get("scan_abort", False)
             state["scanning"] = False
-            state["ready"] = True
+            state["scan_abort"] = False
+            if was_aborted:
+                status_label.value = "スキャン中断"
+            else:
+                state["ready"] = True
             try: page.update()
             except Exception: pass
 
     # ── File list ──
+    PAGE_SIZE = 50
+
     def refresh_file_list(update=True):
         try:
             file_list.controls.clear()
@@ -677,12 +716,34 @@ def main(page: ft.Page):
             try: filter_status = status_filter_dd.value
             except Exception: filter_status = "all"
             items = state["img_matched"] if state["view_mode"] == "image" else state["matched"]
+            # フィルタ適用済みリストを作成
+            filtered = []
             for m in items:
                 cnt[m["status"]] = cnt.get(m["status"], 0) + 1
                 review = state["review"].get(m["key"], {})
                 mark = review.get("mark", "unreviewed")
                 if filter_mark and filter_mark != "all" and mark != filter_mark: continue
                 if filter_status and filter_status != "all" and m["status"] != filter_status: continue
+                filtered.append(m)
+            # ページネーション
+            total_filtered = len(filtered)
+            total_pages = max(1, (total_filtered + PAGE_SIZE - 1) // PAGE_SIZE)
+            current_page = min(state["list_page"], total_pages - 1)
+            state["list_page"] = current_page
+            start = current_page * PAGE_SIZE
+            page_items = filtered[start:start + PAGE_SIZE]
+            if total_pages > 1:
+                def _go_page(p):
+                    state["list_page"] = p
+                    refresh_file_list()
+                nav_controls = []
+                if current_page > 0:
+                    nav_controls.append(ft.TextButton("◀前", on_click=lambda e: _go_page(current_page - 1)))
+                nav_controls.append(ft.Text(f"{current_page+1}/{total_pages} ({total_filtered}件)", size=10, color=ft.Colors.GREY_600))
+                if current_page < total_pages - 1:
+                    nav_controls.append(ft.TextButton("次▶", on_click=lambda e: _go_page(current_page + 1)))
+                file_list.controls.append(ft.Row(nav_controls, alignment=ft.MainAxisAlignment.CENTER, spacing=4))
+            for m in page_items:
                 selected = m["key"] == state["selected_key"]
                 if m["status"] == "same": icon = ft.Icon(ft.Icons.CHECK, size=14, color=ft.Colors.GREEN_500)
                 elif m["status"] == "diff": icon = ft.Icon(ft.Icons.COMPARE_ARROWS, size=14, color=ft.Colors.ORANGE_600)
@@ -704,7 +765,7 @@ def main(page: ft.Page):
                             if m["cat_counts"].get(c, 0): sub_parts.append(f"{c}:{m['cat_counts'][c]}")
                 note = review.get("note", "")
                 if note: sub_parts.append(f"memo:{note[:15]}")
-                subtitle = " | ".join(sub_parts) if sub_parts else ("一致" if m["status"] == "same" else "")
+                subtitle = " | ".join(sub_parts) if sub_parts else ("一致" if m["status"] == "same" else ("差分あり" if m["status"] == "diff" else ""))
                 display_name = m["key"]
                 if len(display_name) > 50: display_name = "..." + display_name[-47:]
                 card = ft.Container(
@@ -720,6 +781,14 @@ def main(page: ft.Page):
                     border=ft.Border.all(1, ft.Colors.BLUE_300 if selected else ft.Colors.GREY_200),
                     on_click=lambda e, k=m["key"]: select_file(k))
                 file_list.controls.append(card)
+            if total_pages > 1:
+                nav_controls2 = []
+                if current_page > 0:
+                    nav_controls2.append(ft.TextButton("◀前", on_click=lambda e: _go_page(current_page - 1)))
+                nav_controls2.append(ft.Text(f"{current_page+1}/{total_pages}", size=10, color=ft.Colors.GREY_600))
+                if current_page < total_pages - 1:
+                    nav_controls2.append(ft.TextButton("次▶", on_click=lambda e: _go_page(current_page + 1)))
+                file_list.controls.append(ft.Row(nav_controls2, alignment=ft.MainAxisAlignment.CENTER, spacing=4))
             badge_same.value = str(cnt.get("same", 0))
             badge_diff.value = str(cnt.get("diff", 0))
             badge_only.value = str(cnt.get("only", 0))
@@ -733,6 +802,24 @@ def main(page: ft.Page):
     def select_file(key):
         if state["scanning"]: return
         state["selected_key"] = key
+        # 選択したアイテムが表示されるページに移動
+        try:
+            filter_mark = mark_filter_dd.value
+        except Exception: filter_mark = "all"
+        try:
+            filter_status = status_filter_dd.value
+        except Exception: filter_status = "all"
+        items = state["img_matched"] if state["view_mode"] == "image" else state["matched"]
+        idx = 0
+        for m in items:
+            review = state["review"].get(m["key"], {})
+            mark = review.get("mark", "unreviewed")
+            if filter_mark and filter_mark != "all" and mark != filter_mark: continue
+            if filter_status and filter_status != "all" and m["status"] != filter_status: continue
+            if m["key"] == key:
+                state["list_page"] = idx // PAGE_SIZE
+                break
+            idx += 1
         refresh_file_list(False); refresh_diff(False)
         try: page.update()
         except Exception: pass
@@ -780,6 +867,8 @@ def main(page: ft.Page):
                 ta = read_file(pa) if pa else ""; tb = read_file(pb) if pb else ""
                 ops, stats, cat_counts = compute_diff(ta, tb)
                 state["diff_cache"][key] = (ops, stats, cat_counts)
+                # matchedリストのstats/cat_countsも更新
+                if m: m["stats"] = stats; m["cat_counts"] = cat_counts
             try: ctx = int(ctx_dd.value)
             except Exception: ctx = 3
             try: show_noise = noise_cb.value
@@ -798,14 +887,23 @@ def main(page: ft.Page):
                     for j in range(max(0, i-ctx), min(len(ops), i+ctx+1)):
                         visible_indices.add(j)
             if ctx == 0: visible_indices = set(range(len(ops)))
+            MAX_DISPLAY = 500  # 表示行数上限
+            display_count = 0
             last_shown = -1
             for i, op in enumerate(ops):
                 if i not in visible_indices: continue
+                if display_count >= MAX_DISPLAY:
+                    remaining = sum(1 for j in visible_indices if j > i)
+                    diff_list.controls.append(ft.Container(
+                        ft.Text(f"... 残り {remaining} 行（表示上限 {MAX_DISPLAY} 行）...", size=11, color=ft.Colors.ORANGE_700, text_align=ft.TextAlign.CENTER),
+                        bgcolor=ft.Colors.ORANGE_50, padding=4))
+                    break
                 if last_shown >= 0 and i - last_shown > 1:
                     diff_list.controls.append(ft.Container(
                         ft.Text(f"... {i - last_shown - 1} 行省略 ...", size=10, color=ft.Colors.GREY_400, text_align=ft.TextAlign.CENTER),
                         bgcolor=ft.Colors.GREY_100, padding=2))
                 last_shown = i
+                display_count += 1
                 typ, la_idx, lb_idx, la, lb, cat = op
                 ln_a = str(la_idx + 1) if la_idx is not None else ""
                 ln_b = str(lb_idx + 1) if lb_idx is not None else ""
@@ -1006,7 +1104,8 @@ def main(page: ft.Page):
                 html_parts.append(f'<tr><td>{m["key"]}</td><td>{diff_str}</td><td>{cat_str}</td><td>{note}</td></tr>')
             html_parts.append('</table>')
         html_parts.append('</body></html>')
-        fp = os.path.join(state["folder_b"], f"review_report_{datetime.now().strftime('%Y%m%d%H%M')}.html")
+        report_dir = os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv else __file__))
+        fp = os.path.join(report_dir, f"review_report_{datetime.now().strftime('%Y%m%d%H%M')}.html")
         try:
             with open(fp, 'w', encoding='utf-8') as f: f.write('\n'.join(html_parts))
             snack(f"レポート出力: {fp}")
@@ -1047,12 +1146,7 @@ def main(page: ft.Page):
 
     # ── Build controls ──
     _recent = _scan_recent_folders()
-    def _fmt_ts(name):
-        """Format '20260327170643' → '03/27 17:06'"""
-        if len(name) == 14 and name.isdigit():
-            return f"{name[4:6]}/{name[6:8]} {name[8:10]}:{name[10:12]}"
-        return name
-    _recent_opts = [ft.dropdown.Option(key=p, text=_fmt_ts(os.path.basename(p))) for p in _recent]
+    _recent_opts = [ft.dropdown.Option(key=p, text=os.path.basename(p)) for p in _recent]
     folder_a_field = ft.TextField(label="パス", expand=True, dense=True, hint_text="y-shot出力フォルダのパスを貼り付け", on_submit=lambda e: _apply_folder('A'))
     folder_b_field = ft.TextField(label="パス", expand=True, dense=True, hint_text="y-shot出力フォルダのパスを貼り付け", on_submit=lambda e: _apply_folder('B'))
     recent_dd_a = ft.Dropdown(label="履歴", width=220, dense=True, options=list(_recent_opts), on_select=lambda e: _on_recent_select('A', e))
@@ -1107,14 +1201,15 @@ def main(page: ft.Page):
     page.add(ft.Column([
         ft.Column([
             ft.Row([ft.Text("旧", size=10, weight=ft.FontWeight.BOLD, color=ft.Colors.GREY_600, width=20),
-                    folder_a_field, recent_dd_a,
-                    ft.OutlinedButton("読込", on_click=lambda e: _apply_folder('A'))],
+                    folder_a_field, recent_dd_a],
                    spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Row([ft.Text("新", size=10, weight=ft.FontWeight.BOLD, color=ft.Colors.GREY_600, width=20),
-                    folder_b_field, recent_dd_b,
-                    ft.OutlinedButton("読込", on_click=lambda e: _apply_folder('B'))],
+                    folder_b_field, recent_dd_b],
                    spacing=4, vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            ft.Row([status_label, progress_label,
+            ft.Row([ft.ElevatedButton("実行", icon=ft.Icons.PLAY_ARROW,
+                        on_click=lambda e: ((_apply_folder('A'), _apply_folder('B'), do_scan()) if not state["scanning"] else do_scan())),
+                    view_mode_dd,
+                    status_label, progress_label,
                     ft.Text("N=次 P=前 O=OK→次", size=9, color=ft.Colors.GREY_400)], spacing=12),
         ], spacing=2),
         ft.Divider(height=1),
@@ -1137,7 +1232,7 @@ def main(page: ft.Page):
                         ft.Button("OK→次", icon=ft.Icons.CHECK, bgcolor=ft.Colors.GREEN_600, color=ft.Colors.WHITE, on_click=on_mark_ok_next, height=32),
                         ft.Button("前", icon=ft.Icons.NAVIGATE_BEFORE, on_click=on_prev, height=32),
                         ft.Button("次", icon=ft.Icons.NAVIGATE_NEXT, on_click=on_next, height=32),
-                        view_mode_dd, src_type_dd, ctx_dd, noise_cb,
+                        src_type_dd, ctx_dd, noise_cb,
                     ], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER, wrap=True),
                 ], spacing=4), padding=6, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
                 ft.Container(diff_list, expand=True, padding=4, border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4),

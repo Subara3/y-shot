@@ -3560,9 +3560,9 @@ def _main_inner(page: ft.Page):
         if not test_cases_to_run: snack("テストケース0件", ft.Colors.RED_700); return
         # URL pre-check: project URL が設定されていればスキップ
         _proj_url = c.get("project_url", "").strip()
+        no_url_tests = []
         if not _proj_url:
             _page_url_map = {pg["_id"]: pg.get("url","").strip() for pg in state["pages"]}
-            no_url_tests = []
             for tc in test_cases_to_run:
                 tc_url = tc.get("url","").strip()
                 if not tc_url and not _page_url_map.get(tc.get("page_id",""), ""):

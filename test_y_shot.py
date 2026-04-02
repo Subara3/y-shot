@@ -618,11 +618,17 @@ def test_output_structure():
     import tempfile, shutil
     from y_shot import _safe_filename
 
-    # ルートフォルダ名 (タイムスタンプのみ)
-    ts = "20260326120000"
-    dir_name = ts
-    assert dir_name == "20260326120000"
+    # ルートフォルダ名 (yyyymmdd_プロジェクト名)
+    ts = "20260326"
+    proj_name = "お問合せ"
+    dir_name = f"{ts}_{_safe_filename(proj_name, 30)}"
+    assert dir_name == "20260326_お問合せ"
     print(f"  [OK] ルートフォルダ名: {dir_name}")
+
+    # プロジェクト名なしの場合はタイムスタンプのみ
+    dir_name_noname = ts
+    assert dir_name_noname == "20260326"
+    print(f"  [OK] プロジェクト名なし: {dir_name_noname}")
 
     # ページごとサブフォルダ名
     pg_num = "1"; pg_name = "初期状態"

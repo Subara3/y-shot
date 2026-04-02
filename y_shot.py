@@ -991,7 +991,7 @@ def _generate_excel_report(outdir, log_cb, pages=None, test_cases=None, run_labe
     except Exception as x:
         log_cb(f"[WARN] Excel生成失敗: {x}")
 
-def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=None, progress_cb=None, driver_ref=None, pages=None, run_label=""):
+def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=None, progress_cb=None, driver_ref=None, pages=None, run_label="", project_name=""):
     try:
         from selenium import webdriver
         from selenium.webdriver.common.by import By
@@ -1042,7 +1042,11 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
             return _page_urls.get(tc.get("page_id", ""), "")
         outdir_base = config.get("output_dir", os.path.join(get_app_dir(), "screenshots"))
         ts = datetime.now().strftime("%Y%m%d")
-        outdir = os.path.join(outdir_base, ts)
+        if project_name:
+            safe_proj = _safe_filename(project_name, 30)
+            outdir = os.path.join(outdir_base, f"{ts}_{safe_proj}")
+        else:
+            outdir = os.path.join(outdir_base, ts)
         os.makedirs(outdir, exist_ok=True)
         gss = 0
         total_pats = 0
@@ -3611,7 +3615,7 @@ def _main_inner(page: ft.Page):
             page.update()
         page.run_thread(run_all_tests, dict(c), list(test_cases_to_run),
                         dict(state["pattern_sets"]), lambda m: log(m), on_done, stop_ev, on_progress,
-                        state["test_drivers"], list(state["pages"]), run_label)
+                        state["test_drivers"], list(state["pages"]), run_label, _current_project_name())
 
     def run_click(e):
         tcs = state["tests"]

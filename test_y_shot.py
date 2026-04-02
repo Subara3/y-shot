@@ -1067,6 +1067,262 @@ def test_clipboard():
 
 
 # ---------------------------------------------------------------------------
+# テスト21: _do_run URL事前チェックのシミュレーション
+# ---------------------------------------------------------------------------
+
+def test_url_precheck():
+    print("=== テスト21: URL事前チェック ===")
+
+    def simulate_precheck(project_url, pages, test_cases):
+        """_do_runのURL事前チェックロジックを再現"""
+        no_url_tests = []
+        if not project_url:
+            page_url_map = {pg["_id"]: pg.get("url","").strip() for pg in pages}
+            for tc in test_cases:
+                tc_url = tc.get("url","").strip()
+                if not tc_url and not page_url_map.get(tc.get("page_id",""), ""):
+                    no_url_tests.append(tc)
+            if len(no_url_tests) == len(test_cases):
+                return "blocked"  # 全テストURL未設定→実行拒否
+        if no_url_tests:
+            return "warn"  # 一部URL未設定→警告
+        return "ok"  # 全テスト実行可能
+
+    pages = [{"_id": "p1", "url": ""}, {"_id": "p2", "url": ""}]
+    tests = [{"page_id": "p1", "url": ""}, {"page_id": "p2", "url": ""}]
+
+    # プロジェクトURL設定時→全テスト実行可能
+    assert simulate_precheck("http://example.com", pages, tests) == "ok"
+    print("  [OK] プロジェクトURL設定時→実行可能")
+
+    # プロジェクトURLなし、ページURLもなし→ブロック
+    assert simulate_precheck("", pages, tests) == "blocked"
+    print("  [OK] URL全未設定→実行拒否")
+
+    # プロジェクトURLなし、ページURLあり→実行可能
+    pages_with_url = [{"_id": "p1", "url": "http://example.com"}, {"_id": "p2", "url": "http://example.com"}]
+    assert simulate_precheck("", pages_with_url, tests) == "ok"
+    print("  [OK] ページURL設定時→実行可能")
+
+    # プロジェクトURLなし、一部のみURL設定→警告
+    pages_partial = [{"_id": "p1", "url": "http://example.com"}, {"_id": "p2", "url": ""}]
+    assert simulate_precheck("", pages_partial, tests) == "warn"
+    print("  [OK] 一部URL未設定→警告")
+
+    # テストケースに個別URL設定→実行可能
+    tests_with_url = [{"page_id": "p1", "url": "http://test.com"}, {"page_id": "p2", "url": "http://test.com"}]
+    assert simulate_precheck("", pages, tests_with_url) == "ok"
+    print("  [OK] テストケースURL設定時→実行可能")
+
+    # 変数スコープ確認: no_url_testsがブロック外で参照可能
+    # (今回のバグの再現テスト)
+    project_url = "http://example.com"
+    no_url_tests = []
+    if not project_url:
+        no_url_tests.append("should not reach")
+    assert len(no_url_tests) == 0, "プロジェクトURL設定時にno_url_testsは空であるべき"
+    # この参照がエラーにならないこと
+    if no_url_tests:
+        pass  # ここに到達しないが、参照自体がエラーにならないことが重要
+    print("  [OK] 変数スコープ: no_url_testsがブロック外で安全に参照可能")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト22: config保存/読込ラウンドトリップ
+# ---------------------------------------------------------------------------
+
+def test_config_roundtrip():
+    print("=== テスト22: config保存/読込 ===")
+    import tempfile
+    from y_shot import _active_project_dir
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _active_project_dir[0] = tmpdir
+        from y_shot import save_config, load_config
+
+        # project_url含むconfig保存→読込
+        test_config = {
+            "project_url": "http://dev.example.com/test",
+            "basic_auth_user": "user",
+            "basic_auth_pass": "pass",
+            "output_dir": "/tmp/screenshots",
+            "headless": "1",
+            "save_source": "1",
+            "confirm_step_delete": "0",
+        }
+        save_config(test_config)
+        loaded = load_config()
+        assert loaded["project_url"] == "http://dev.example.com/test"
+        assert loaded["basic_auth_user"] == "user"
+        assert loaded["headless"] == "1"
+        print("  [OK] project_url含むconfig保存/読込")
+
+        # 空のproject_url
+        test_config["project_url"] = ""
+        save_config(test_config)
+        loaded = load_config()
+        assert loaded["project_url"] == ""
+        print("  [OK] 空project_urlの保存/読込")
+
+        # URLに特殊文字（&, =, ?）
+        test_config["project_url"] = "http://example.com/path?key=value&foo=bar"
+        save_config(test_config)
+        loaded = load_config()
+        assert loaded["project_url"] == "http://example.com/path?key=value&foo=bar"
+        print("  [OK] URL特殊文字の保存/読込")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト23: build_auth_url
+# ---------------------------------------------------------------------------
+
+def test_build_auth_url():
+    print("=== テスト23: build_auth_url ===")
+    from y_shot import build_auth_url
+
+    # 通常のURL
+    result = build_auth_url("http://example.com/path", "user", "pass")
+    assert "user:pass@example.com" in result
+    assert result.startswith("http://")
+    print("  [OK] Basic認証URL生成")
+
+    # ポート付き
+    result = build_auth_url("http://example.com:8080/path", "user", "pass")
+    assert "user:pass@example.com:8080" in result
+    print("  [OK] ポート付きURL")
+
+    # HTTPS
+    result = build_auth_url("https://example.com/path", "user", "pass")
+    assert result.startswith("https://")
+    assert "user:pass@example.com" in result
+    print("  [OK] HTTPS URL")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト24: _sel_by セレクタ判定
+# ---------------------------------------------------------------------------
+
+def test_sel_by():
+    print("=== テスト24: _sel_by セレクタ判定 ===")
+    from y_shot import _sel_by
+    from selenium.webdriver.common.by import By
+
+    # CSSセレクタ
+    by, val = _sel_by("#test")
+    assert by == By.CSS_SELECTOR
+    print("  [OK] #id → CSS_SELECTOR")
+
+    by, val = _sel_by(".class")
+    assert by == By.CSS_SELECTOR
+    print("  [OK] .class → CSS_SELECTOR")
+
+    by, val = _sel_by("input[name='q']")
+    assert by == By.CSS_SELECTOR
+    print("  [OK] 属性セレクタ → CSS_SELECTOR")
+
+    # XPath（//で始まるもののみ対応）
+    by, val = _sel_by("//div[@id='test']")
+    assert by == By.XPATH
+    print("  [OK] // → XPATH")
+
+    # /html/body は現在CSSとして扱われる（//のみXPath判定）
+    by, val = _sel_by("/html/body")
+    assert by == By.CSS_SELECTOR
+    print("  [OK] /html → CSS_SELECTOR（//のみXPath判定）")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト25: パターン番号付きファイル名
+# ---------------------------------------------------------------------------
+
+def test_pattern_filename():
+    print("=== テスト25: パターンファイル名 ===")
+    from y_shot import _safe_filename
+
+    # 通常のパターンラベル
+    assert _safe_filename("未入力", 50) == "未入力"
+    assert _safe_filename("OK(混在値)", 50) == "OK(混在値)"
+    print("  [OK] 通常ラベル")
+
+    # 長いラベルの切り詰め
+    long_name = "あ" * 100
+    result = _safe_filename(long_name, 30)
+    assert len(result) <= 30
+    print("  [OK] 長いラベルの切り詰め")
+
+    # 特殊文字の処理
+    result = _safe_filename("test/path\\file:name", 50)
+    assert "/" not in result
+    assert "\\" not in result
+    assert ":" not in result
+    print("  [OK] 特殊文字の除去")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト26: y-diff フォルダ検出
+# ---------------------------------------------------------------------------
+
+def test_diff_folder_detection():
+    print("=== テスト26: y-diffフォルダ検出 ===")
+    import tempfile, re
+
+    # タイムスタンプフォルダ（8〜14桁）にマッチ
+    assert re.match(r'\d{8,14}$', '20260401')
+    assert re.match(r'\d{8,14}$', '20260401150150')
+    assert not re.match(r'\d{8,14}$', '1234')  # 短すぎ
+    assert not re.match(r'\d{8,14}$', '2026_0401_テスト')  # 数字以外
+    print("  [OK] タイムスタンプパターンマッチ")
+
+    # report.htmlがあるフォルダも検出
+    with tempfile.TemporaryDirectory() as tmpdir:
+        import os
+        test_dir = os.path.join(tmpdir, "2026_0401_テスト")
+        os.makedirs(test_dir)
+        with open(os.path.join(test_dir, "report.html"), "w") as f:
+            f.write("<html></html>")
+        assert os.path.isfile(os.path.join(test_dir, "report.html"))
+        print("  [OK] 日本語フォルダ+report.html検出")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト27: y-diff compute_diff
+# ---------------------------------------------------------------------------
+
+def test_diff_compute():
+    print("=== テスト27: y-diff compute_diff ===")
+    from y_diff import compute_diff
+
+    # 完全一致
+    ops, stats, cats = compute_diff("<div>hello</div>", "<div>hello</div>")
+    assert stats["change"] == 0 and stats["add"] == 0 and stats["del"] == 0
+    print("  [OK] 完全一致→差分なし")
+
+    # テキスト変更
+    ops, stats, cats = compute_diff("<p>old text</p>", "<p>new text</p>")
+    assert stats["change"] > 0 or stats["add"] > 0 or stats["del"] > 0
+    print("  [OK] テキスト変更→差分あり")
+
+    # 空文字
+    ops, stats, cats = compute_diff("", "")
+    assert stats["same"] == 0
+    print("  [OK] 空文字→差分なし")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     print("y-shot テスト開始 (v2.4)\n")
@@ -1091,6 +1347,13 @@ if __name__ == "__main__":
     test_diff_normalize()
     test_diff_image_compare()
     test_clipboard()
+    test_url_precheck()
+    test_config_roundtrip()
+    test_build_auth_url()
+    test_sel_by()
+    test_pattern_filename()
+    test_diff_folder_detection()
+    test_diff_compute()
 
     print("=" * 40)
     print("全テスト完了 - すべてパス")

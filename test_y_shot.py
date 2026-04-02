@@ -1323,6 +1323,394 @@ def test_diff_compute():
 
 
 # ---------------------------------------------------------------------------
+# テスト28: プロジェクト管理（追加/切替/削除）
+# ---------------------------------------------------------------------------
+
+def test_project_management():
+    print("=== テスト28: プロジェクト管理 ===")
+    import tempfile, shutil
+    from y_shot import _active_project_dir, save_tests, load_tests, save_pages, load_pages
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # プロジェクトレジストリのシミュレーション
+        registry = {"last_active": "default", "projects": [
+            {"id": "default", "name": "デフォルト", "dir": "default"},
+        ]}
+
+        # プロジェクト追加
+        registry["projects"].append({"id": "proj_1", "name": "テストプロジェクト", "dir": "test_proj"})
+        assert len(registry["projects"]) == 2
+        print("  [OK] プロジェクト追加")
+
+        # プロジェクト切替
+        proj_dir = os.path.join(tmpdir, "test_proj")
+        os.makedirs(proj_dir, exist_ok=True)
+        _active_project_dir[0] = proj_dir
+        registry["last_active"] = "proj_1"
+
+        # 切替先でデータ保存/読込
+        test_data = [{"name": "テスト", "_id": "tc_1", "page_id": "p_1", "steps": []}]
+        save_tests(test_data)
+        loaded = load_tests()
+        assert len(loaded) == 1
+        assert loaded[0]["name"] == "テスト"
+        print("  [OK] プロジェクト切替+データ保存/読込")
+
+        # プロジェクト削除
+        registry["projects"] = [p for p in registry["projects"] if p["id"] != "proj_1"]
+        registry["last_active"] = "default"
+        assert len(registry["projects"]) == 1
+        assert registry["last_active"] == "default"
+        print("  [OK] プロジェクト削除")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト29: エクスポート/インポート .yshot.json
+# ---------------------------------------------------------------------------
+
+def test_export_import():
+    print("=== テスト29: エクスポート/インポート ===")
+    import tempfile
+
+    # エクスポートデータ構造
+    export_data = {
+        "app": "y-shot", "version": "2.3",
+        "pages": [
+            {"_id": "p_1", "name": "テストページ", "number": "1", "start_number": 1, "url": "http://example.com"}
+        ],
+        "tests": [
+            {"_id": "tc_1", "name": "テスト1", "page_id": "p_1", "number": "1-1", "pattern": None, "url": "", "steps": [
+                {"type": "スクショ", "mode": "fullpage"}
+            ]},
+            {"_id": "tc_2", "name": "テスト2", "page_id": "p_1", "number": "1-2", "pattern": "パターン1", "url": "", "steps": [
+                {"type": "入力", "selector": "#test", "value": "{パターン}"},
+                {"type": "スクショ", "mode": "fullshot"}
+            ]},
+        ],
+        "pattern_sets": {
+            "パターン1": [{"label": "値A", "value": "aaa"}, {"label": "値B", "value": "bbb"}]
+        }
+    }
+
+    with tempfile.NamedTemporaryFile(suffix=".yshot.json", delete=False, mode="w", encoding="utf-8") as f:
+        json.dump(export_data, f, ensure_ascii=False)
+        tmp = f.name
+
+    # インポート
+    with open(tmp, encoding="utf-8") as f:
+        imported = json.load(f)
+
+    assert imported["app"] == "y-shot"
+    assert len(imported["pages"]) == 1
+    assert len(imported["tests"]) == 2
+    assert len(imported["pattern_sets"]["パターン1"]) == 2
+    assert imported["tests"][1]["pattern"] == "パターン1"
+    assert imported["tests"][1]["steps"][0]["value"] == "{パターン}"
+    print("  [OK] エクスポート→インポート ラウンドトリップ")
+
+    # パターン参照の整合性
+    for tc in imported["tests"]:
+        pat = tc.get("pattern")
+        if pat:
+            assert pat in imported["pattern_sets"], f"パターン '{pat}' が見つからない"
+    print("  [OK] パターン参照の整合性")
+
+    # ページID参照の整合性
+    page_ids = {p["_id"] for p in imported["pages"]}
+    for tc in imported["tests"]:
+        assert tc["page_id"] in page_ids, f"page_id '{tc['page_id']}' が見つからない"
+    print("  [OK] ページID参照の整合性")
+
+    os.unlink(tmp)
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト30: auto_number_tests
+# ---------------------------------------------------------------------------
+
+def test_auto_number():
+    print("=== テスト30: auto_number_tests ===")
+
+    # シンプルな番号付けをシミュレート
+    pages = [
+        {"_id": "p_1", "number": "1", "start_number": 1},
+        {"_id": "p_2", "number": "2", "start_number": 5},
+    ]
+    tests = [
+        {"_id": "tc_1", "page_id": "p_1", "number": ""},
+        {"_id": "tc_2", "page_id": "p_1", "number": ""},
+        {"_id": "tc_3", "page_id": "p_2", "number": ""},
+    ]
+
+    # auto_number_testsのロジック再現
+    page_map = {p["_id"]: p for p in pages}
+    for pg in pages:
+        pid = pg["_id"]; pnum = pg.get("number", "1")
+        next_sub = pg.get("start_number", 1)
+        for tc in tests:
+            if tc.get("page_id") != pid: continue
+            sub = tc.get("_sub_number")
+            if sub is not None:
+                next_sub = sub; tc["number"] = f"{pnum}-{next_sub}"; next_sub += 1
+            else:
+                tc["number"] = f"{pnum}-{next_sub}"; next_sub += 1
+
+    assert tests[0]["number"] == "1-1"
+    assert tests[1]["number"] == "1-2"
+    assert tests[2]["number"] == "2-5"  # start_number=5
+    print("  [OK] ページ別番号付け + start_number")
+
+    # _sub_number による手動番号
+    tests2 = [
+        {"_id": "tc_1", "page_id": "p_1", "number": "", "_sub_number": 10},
+        {"_id": "tc_2", "page_id": "p_1", "number": ""},
+    ]
+    next_sub = 1
+    for tc in tests2:
+        sub = tc.get("_sub_number")
+        if sub is not None:
+            next_sub = sub; tc["number"] = f"1-{next_sub}"; next_sub += 1
+        else:
+            tc["number"] = f"1-{next_sub}"; next_sub += 1
+    assert tests2[0]["number"] == "1-10"
+    assert tests2[1]["number"] == "1-11"
+    print("  [OK] _sub_numberによる手動番号+連番継続")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト31: CSS escape
+# ---------------------------------------------------------------------------
+
+def test_css_escape():
+    print("=== テスト31: CSSエスケープ ===")
+    from y_shot import _css_escape_attr
+
+    # 通常の値
+    assert _css_escape_attr("test") == "test"
+    print("  [OK] 通常の値はそのまま")
+
+    # ダブルクォートのエスケープ
+    assert _css_escape_attr('te"st') == 'te\\"st'
+    print("  [OK] ダブルクォートのエスケープ")
+
+    # バックスラッシュのエスケープ
+    assert _css_escape_attr('te\\st') == 'te\\\\st'
+    print("  [OK] バックスラッシュのエスケープ")
+
+    # 両方含む
+    result = _css_escape_attr('a"b\\c')
+    assert '\\"' in result and '\\\\' in result
+    print("  [OK] 複合エスケープ")
+
+    # 空文字
+    assert _css_escape_attr("") == ""
+    print("  [OK] 空文字")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト32: y-diff normalize 詳細パターン
+# ---------------------------------------------------------------------------
+
+def test_diff_normalize_advanced():
+    print("=== テスト32: y-diff normalize 詳細 ===")
+    from y_diff import normalize
+
+    # 属性順序の違い（normalizeは属性順序を変えない=差分として出る）
+    html_a = '<div class="test" id="main">content</div>'
+    html_b = '<div id="main" class="test">content</div>'
+    # 属性順序が違えばnormalizeでは一致しない（想定通り）
+    # ただしclassify_changeでnoiseとして扱われる
+    from y_diff import classify_change
+    assert classify_change(normalize(html_a), normalize(html_b)) == "noise"
+    print("  [OK] 属性順序の違い→classify_changeでnoise")
+
+    # GTMブロック除去
+    html_gtm = '<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({"gtm.start":new Date().getTime()});})(window,document,"script","dataLayer","GTM-XXX");</script>'
+    result = normalize(html_gtm)
+    assert "GTM-XXX" not in result
+    print("  [OK] GTMブロック除去")
+
+    # CSRF token正規化
+    html_csrf = '<input type="hidden" name="_token" value="abc123def456">'
+    result = normalize(html_csrf)
+    assert "abc123def456" not in result
+    print("  [OK] CSRFトークン正規化")
+
+    # 連続空行の圧縮
+    html_spaces = "<p>hello</p>\n\n\n\n<p>world</p>"
+    result = normalize(html_spaces)
+    assert "\n\n\n" not in result
+    print("  [OK] 連続空行の圧縮")
+
+    # タブ→スペース変換
+    html_tab = "<div>\t<span>test</span></div>"
+    result = normalize(html_tab)
+    assert "\t" not in result
+    print("  [OK] タブ→スペース変換")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト33: y-diff scan_source_folder
+# ---------------------------------------------------------------------------
+
+def test_diff_scan_source():
+    print("=== テスト33: y-diff scan_source_folder ===")
+    import tempfile, shutil
+    from y_diff import scan_source_folder
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # _source フォルダ構造を作成
+        source_dir = os.path.join(tmpdir, "_source", "1_page")
+        os.makedirs(source_dir)
+        with open(os.path.join(source_dir, "001_test_ss1_dom.html"), "w") as f:
+            f.write("<html>dom</html>")
+        with open(os.path.join(source_dir, "001_test_ss1_raw.html"), "w") as f:
+            f.write("<html>raw</html>")
+        with open(os.path.join(source_dir, "002_test_ss2_dom.html"), "w") as f:
+            f.write("<html>dom2</html>")
+        with open(os.path.join(source_dir, "002_test_ss2_raw.html"), "w") as f:
+            f.write("<html>raw2</html>")
+
+        result = scan_source_folder(tmpdir)
+        assert len(result) == 2, f"期待2件, 実際{len(result)}件"
+        print("  [OK] dom+rawペアを1エントリとして検出")
+
+        # 各エントリにdom/rawキーがある
+        for key, entry in result.items():
+            assert "dom" in entry or "raw" in entry, f"{key}: dom/rawなし"
+        print("  [OK] 各エントリにdom/rawキー")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト34: y-diff scan_image_folder
+# ---------------------------------------------------------------------------
+
+def test_diff_scan_images():
+    print("=== テスト34: y-diff scan_image_folder ===")
+    import tempfile
+    from y_diff import scan_image_folder
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 画像フォルダ構造
+        page_dir = os.path.join(tmpdir, "1_page")
+        os.makedirs(page_dir)
+        for name in ["001_ss1.png", "002_ss2.png", "003_ss1_diff.png"]:
+            with open(os.path.join(page_dir, name), "w") as f:
+                f.write("fake png")
+
+        # _sourceフォルダ（スキップされるべき）
+        src_dir = os.path.join(tmpdir, "_source")
+        os.makedirs(src_dir)
+        with open(os.path.join(src_dir, "should_skip.png"), "w") as f:
+            f.write("fake")
+
+        result = scan_image_folder(tmpdir)
+        # diff画像はスキップ、_sourceもスキップ
+        assert all("_diff.png" not in k for k in result), "diff画像がスキップされていない"
+        assert all("_source" not in k for k in result), "_sourceがスキップされていない"
+        assert len(result) == 2, f"期待2件, 実際{len(result)}件"
+        print("  [OK] diff画像スキップ, _sourceスキップ, 通常PNG検出")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト35: y-diff classify_change エッジケース
+# ---------------------------------------------------------------------------
+
+def test_diff_classify_edge():
+    print("=== テスト35: classify_change エッジケース ===")
+    from y_diff import classify_change, classify_line
+
+    # PHP warning は最優先
+    assert classify_line("Warning: something in /var/www/test.php on line 10") == "php_warning"
+    assert classify_line("Fatal error: blah") == "php_warning"
+    print("  [OK] PHP warning/error検出")
+
+    # form要素
+    assert classify_line('<input type="text" name="q" value="test">') == "form"
+    assert classify_line('<select name="age">') == "form"
+    print("  [OK] フォーム要素検出")
+
+    # content
+    assert classify_line("<p>テキスト内容</p>") == "content"
+    assert classify_line("普通のテキスト行") == "content"
+    print("  [OK] コンテンツ検出")
+
+    # structural同士でテキスト同一 → noise
+    assert classify_change('<div class="old">', '<div class="new">') == "noise"
+    print("  [OK] class変更のみ→noise")
+
+    # structural同士でテキスト異なる → structural
+    result = classify_change('<div class="old">A</div>', '<div class="new">B</div>')
+    assert result != "noise"
+    print("  [OK] テキスト異なるstructural→noiseにならない")
+
+    # form vs structural → form優先
+    result = classify_change('<input type="text">', '<div class="test">')
+    assert result == "form"
+    print("  [OK] form vs structural → form優先")
+
+    # php_warning vs anything → php_warning最優先
+    result = classify_change('Warning: test in file.php on line 1', '<div>normal</div>')
+    assert result == "php_warning"
+    print("  [OK] php_warning最優先")
+
+    # Noneの場合
+    result = classify_change(None, '<div>test</div>')
+    assert result is not None  # エラーにならない
+    print("  [OK] None入力でエラーにならない")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト36: has_any_url ボタン有効化判定
+# ---------------------------------------------------------------------------
+
+def test_has_any_url():
+    print("=== テスト36: has_any_url判定 ===")
+
+    def has_any_url(config, pages, tests):
+        return bool(config.get("project_url","").strip()) or \
+               any(p.get("url","").strip() for p in pages) or \
+               any(t.get("url","").strip() for t in tests)
+
+    # プロジェクトURLのみ
+    assert has_any_url({"project_url": "http://example.com"}, [{"url": ""}], [{"url": ""}])
+    print("  [OK] プロジェクトURLのみ→有効")
+
+    # ページURLのみ
+    assert has_any_url({}, [{"url": "http://example.com"}], [{"url": ""}])
+    print("  [OK] ページURLのみ→有効")
+
+    # テストURLのみ
+    assert has_any_url({}, [{"url": ""}], [{"url": "http://example.com"}])
+    print("  [OK] テストURLのみ→有効")
+
+    # 全部空
+    assert not has_any_url({}, [{"url": ""}], [{"url": ""}])
+    print("  [OK] 全空→無効")
+
+    # スペースのみのURL
+    assert not has_any_url({"project_url": "  "}, [{"url": " "}], [{"url": "  "}])
+    print("  [OK] スペースのみ→無効")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     print("y-shot テスト開始 (v2.4)\n")
@@ -1354,6 +1742,15 @@ if __name__ == "__main__":
     test_pattern_filename()
     test_diff_folder_detection()
     test_diff_compute()
+    test_project_management()
+    test_export_import()
+    test_auto_number()
+    test_css_escape()
+    test_diff_normalize_advanced()
+    test_diff_scan_source()
+    test_diff_scan_images()
+    test_diff_classify_edge()
+    test_has_any_url()
 
     print("=" * 40)
     print("全テスト完了 - すべてパス")

@@ -3766,7 +3766,7 @@ def _main_inner(page: ft.Page):
             save_config(state["config"])
             project_dd.options = _project_dd_options()
             page.title = f"{APP_NAME} - {_current_project_name()}"
-            page.update(); close_dlg(dlg)
+            refresh_test_list(False); page.update(); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("プロジェクト設定"),
             content=ft.Column([nf, uf], tight=True, spacing=10, width=450),
             actions=[ft.TextButton("OK", on_click=on_ok),

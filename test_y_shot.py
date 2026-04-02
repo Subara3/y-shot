@@ -277,7 +277,7 @@ def test_import():
     except Exception as e:
         print(f"  [FAIL] {e}"); raise
 
-    assert mod.APP_VERSION == "1.8", f"バージョン不一致: {mod.APP_VERSION}"
+    assert mod.APP_VERSION == "2.3", f"バージョン不一致: {mod.APP_VERSION}"
     print(f"  [OK] バージョン: {mod.APP_VERSION}")
 
     print("  全てパス\n")
@@ -848,9 +848,228 @@ def test_source_normalization():
 
 
 # ---------------------------------------------------------------------------
+# テスト15: XPath JS生成
+# ---------------------------------------------------------------------------
+
+def test_xpath_js():
+    print("=== テスト15: XPath JS定数 ===")
+    from y_shot import XPATH_JS
+
+    # XPATH_JSが文字列であること
+    assert isinstance(XPATH_JS, str)
+    assert "arguments[0]" in XPATH_JS
+    assert "tagName" in XPATH_JS
+    assert "previousSibling" in XPATH_JS
+    print("  [OK] XPATH_JS定数の構造")
+
+    # JSON.stringifyでIDをエスケープする処理が含まれていること
+    assert "JSON.stringify" in XPATH_JS
+    print("  [OK] XPath IDエスケープ処理")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト16: プロジェクトURL解決
+# ---------------------------------------------------------------------------
+
+def test_project_url():
+    print("=== テスト16: プロジェクトURL解決 ===")
+
+    # _resolve_urlの動作をシミュレート
+    # 優先順位: project_url > test_url > page_url
+    def resolve_url(project_url, tc_url, page_url):
+        if project_url: return project_url
+        if tc_url: return tc_url
+        return page_url
+
+    # プロジェクトURL設定時は最優先
+    assert resolve_url("http://project.example.com", "http://test.example.com", "http://page.example.com") == "http://project.example.com"
+    print("  [OK] プロジェクトURL最優先")
+
+    # プロジェクトURL空欄時はテストURL
+    assert resolve_url("", "http://test.example.com", "http://page.example.com") == "http://test.example.com"
+    print("  [OK] テストURL次優先")
+
+    # テストURLも空欄時はページURL
+    assert resolve_url("", "", "http://page.example.com") == "http://page.example.com"
+    print("  [OK] ページURLフォールバック")
+
+    # 全部空欄
+    assert resolve_url("", "", "") == ""
+    print("  [OK] 全空欄時は空文字")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト17: ステップタイプ網羅
+# ---------------------------------------------------------------------------
+
+def test_step_types_complete():
+    print("=== テスト17: ステップタイプ網羅 ===")
+    from y_shot import STEP_TYPES, STEP_ICONS, step_short
+
+    # 全ステップタイプにアイコンが定義されていること
+    for st in STEP_TYPES:
+        assert st in STEP_ICONS, f"{st} のアイコンが未定義"
+    print(f"  [OK] 全{len(STEP_TYPES)}タイプにアイコン定義あり")
+
+    # 全ステップタイプのstep_short()が例外を出さないこと
+    test_steps = {
+        "入力": {"type": "入力", "selector": "#test", "value": "hello"},
+        "クリック": {"type": "クリック", "selector": "#btn"},
+        "ホバー": {"type": "ホバー", "selector": "#hover"},
+        "選択": {"type": "選択", "selector": "select", "value": "opt1"},
+        "待機": {"type": "待機", "seconds": "1.0"},
+        "要素待機": {"type": "要素待機", "selector": "#el", "seconds": "10"},
+        "スクロール": {"type": "スクロール", "scroll_mode": "element", "selector": "#top"},
+        "スクショ": {"type": "スクショ", "mode": "fullpage"},
+        "戻る": {"type": "戻る", "seconds": "1.0"},
+        "更新": {"type": "更新", "seconds": "1.0"},
+        "アラートOK": {"type": "アラートOK"},
+        "アラートキャンセル": {"type": "アラートキャンセル"},
+        "ナビゲーション": {"type": "ナビゲーション", "url": "https://example.com"},
+        "セッション削除": {"type": "セッション削除"},
+        "見出し": {"type": "見出し", "text": "テスト"},
+        "コメント": {"type": "コメント", "text": "メモ"},
+    }
+    for st_name, step in test_steps.items():
+        result = step_short(step)
+        assert isinstance(result, str), f"{st_name}: step_shortが文字列を返さない"
+    print(f"  [OK] 全{len(test_steps)}タイプのstep_short()正常動作")
+
+    # スクショモードの網羅
+    for mode_key, expected_text in [("fullpage", "表示範囲"), ("fullshot", "ページ全体"), ("element", "要素のみ"), ("margin", "要素+")]:
+        result = step_short({"type": "スクショ", "mode": mode_key, "margin_px": "500"})
+        assert expected_text in result, f"スクショmode={mode_key}: '{expected_text}' not in '{result}'"
+    print("  [OK] スクショモード4種類の表示")
+
+    # スクロールモードの網羅
+    for sm, expected in [("element", "→"), ("pixel", "px"), ("top", "先頭")]:
+        result = step_short({"type": "スクロール", "scroll_mode": sm, "selector": "#el", "scroll_px": "100"})
+        assert expected in result, f"スクロールmode={sm}: '{expected}' not in '{result}'"
+    print("  [OK] スクロールモード3種類の表示")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト18: y-diff normalize改善
+# ---------------------------------------------------------------------------
+
+def test_diff_normalize():
+    print("=== テスト18: y-diff normalize ===")
+    from y_diff import normalize, classify_line, classify_change, _extract_text_content
+
+    # コメントタグで改行分割されること
+    html = '<div>test</div><!-- comment --><span>hello</span>'
+    result = normalize(html)
+    assert '<!--' in result  # コメントが残っている
+    lines = result.strip().split('\n')
+    assert len(lines) >= 2, f"コメント前後で分割されるべき: {lines}"
+    print("  [OK] コメントタグで改行分割")
+
+    # classify_line: 基本カテゴリ
+    assert classify_line('<div class="test">') == "structural"
+    assert classify_line('<input type="text" name="q">') == "form"
+    assert classify_line('<p>Hello world</p>') == "content"
+    assert classify_line('Warning: something on line 10') == "php_warning"
+    print("  [OK] classify_line基本分類")
+
+    # classify_change: structuralでテキスト同一ならnoise
+    assert classify_change('<div class="a">', '<div class="b">') == "noise"
+    print("  [OK] structural同テキスト→noise")
+
+    # classify_change: テキストが違えばstructural
+    assert classify_change('<div>Hello</div>', '<div>World</div>') != "noise"
+    print("  [OK] テキスト異なり→noiseにならない")
+
+    # _extract_text_content
+    assert _extract_text_content('<div class="test">Hello World</div>') == "Hello World"
+    assert _extract_text_content('<a href="url">リンク</a>') == "リンク"
+    print("  [OK] テキスト抽出")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト19: y-diff画像比較高速化
+# ---------------------------------------------------------------------------
+
+def test_diff_image_compare():
+    print("=== テスト19: y-diff画像比較 ===")
+    import tempfile
+    try:
+        from PIL import Image
+    except ImportError:
+        print("  [SKIP] Pillowなし")
+        return
+
+    # 同一画像 → same
+    from y_diff import compare_images
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        tmp_a = f.name
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        tmp_b = f.name
+    img = Image.new("RGB", (100, 100), (255, 255, 255))
+    img.save(tmp_a); img.save(tmp_b)
+    same, pct, diff_path = compare_images(tmp_a, tmp_b)
+    assert same == True
+    assert pct == 0.0
+    print("  [OK] 同一画像 → same=True, pct=0.0")
+
+    # 異なる画像 → diff
+    img2 = Image.new("RGB", (100, 100), (0, 0, 0))
+    img2.save(tmp_b)
+    same, pct, diff_path = compare_images(tmp_a, tmp_b)
+    assert same == False
+    assert pct > 0
+    print(f"  [OK] 異なる画像 → same=False, pct={pct:.1f}%")
+
+    # サイズ違い → diff 100%
+    img3 = Image.new("RGB", (200, 200), (255, 255, 255))
+    img3.save(tmp_b)
+    same, pct, diff_path = compare_images(tmp_a, tmp_b)
+    assert same == False
+    assert pct == 100.0
+    print("  [OK] サイズ違い → diff 100%")
+
+    os.unlink(tmp_a); os.unlink(tmp_b)
+    if diff_path and os.path.exists(diff_path): os.unlink(diff_path)
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト20: クリップボードコピー（Windows）
+# ---------------------------------------------------------------------------
+
+def test_clipboard():
+    print("=== テスト20: クリップボード ===")
+    import subprocess
+    import platform
+    if platform.system() != "Windows":
+        print("  [SKIP] Windows以外")
+        return
+
+    # clipコマンドで書き込み→PowerShellで読み取り
+    test_text = "test_xpath_//*[@id='test']"
+    p = subprocess.Popen(['clip'], stdin=subprocess.PIPE)
+    p.communicate(test_text.encode('utf-16-le'))
+
+    result = subprocess.run(['powershell', '-Command', 'Get-Clipboard'], capture_output=True, text=True, timeout=5)
+    clipboard = result.stdout.strip()
+    assert test_text in clipboard, f"クリップボード不一致: {clipboard}"
+    print("  [OK] clip→Get-Clipboard一致")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("y-shot テスト開始 (v1.7)\n")
+    print("y-shot テスト開始 (v2.4)\n")
 
     test_logic()
     test_tc_ids()
@@ -866,6 +1085,12 @@ if __name__ == "__main__":
     test_output_structure()
     test_numeric_generation()
     test_source_normalization()
+    test_xpath_js()
+    test_project_url()
+    test_step_types_complete()
+    test_diff_normalize()
+    test_diff_image_compare()
+    test_clipboard()
 
     print("=" * 40)
     print("全テスト完了 - すべてパス")

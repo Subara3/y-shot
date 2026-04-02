@@ -571,6 +571,25 @@ def collect_element_options(driver, el_info):
             return None, []
     return None, []
 
+# Generate XPath for an element (executed via driver.execute_script)
+XPATH_JS = """
+var el = arguments[0];
+if (!el) return '';
+if (el.id) return '//*[@id=' + JSON.stringify(el.id) + ']';
+var segs = [];
+while (el && el.nodeType === 1) {
+    var i = 1;
+    var sib = el.previousSibling;
+    while (sib) {
+        if (sib.nodeType === 1 && sib.tagName === el.tagName) i++;
+        sib = sib.previousSibling;
+    }
+    segs.unshift(el.tagName.toLowerCase() + '[' + i + ']');
+    el = el.parentNode;
+}
+return '/' + segs.join('/');
+"""
+
 HIGHLIGHT_JS = ("(function(s){try{"
     "var p=document.getElementById('__yshot_hl');if(p)p.remove();"
     "if(window.__yshot_scroll_rm){window.removeEventListener('scroll',window.__yshot_scroll_rm,true);}"
@@ -1014,8 +1033,10 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         for pg in (pages or []):
             pu = pg.get("url", "").strip()
             if pu: _page_urls[pg["_id"]] = pu
+        _project_url = config.get("project_url", "").strip()
         def _resolve_url(tc):
-            """Resolve start URL: test URL > page URL."""
+            """Resolve start URL: project URL > test URL > page URL."""
+            if _project_url: return _project_url
             tc_url = tc.get("url", "").strip()
             if tc_url: return tc_url
             return _page_urls.get(tc.get("page_id", ""), "")
@@ -1326,8 +1347,6 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                         for pos in range(0, total_h, max(int(view_h * 0.8), 100)):
                                             driver.execute_script(f"window.scrollTo(0,{pos});")
                                             time.sleep(0.1)
-                                    driver.execute_script("window.scrollTo(0,0);")
-                                    time.sleep(0.5)
                                     if n_loaded:
                                         log_cb(f"  S{si} 遅延画像 {n_loaded}件 先読み")
                                 except Exception:
@@ -2006,7 +2025,7 @@ def _main_inner(page: ft.Page):
                 on_click=lambda e, tid=tc_id: select_test(_find_test_idx(tid)),
                 key=tc_id)
             test_list.controls.append(card)
-        has_any_url = any(p.get("url","").strip() for p in state["pages"]) or any(t.get("url","").strip() for t in state["tests"])
+        has_any_url = bool(state["config"].get("project_url","").strip()) or any(p.get("url","").strip() for p in state["pages"]) or any(t.get("url","").strip() for t in state["tests"])
         has_tests = len(state["tests"]) > 0
         run_btn.disabled = not (has_any_url and has_tests)
         run_single_btn.disabled = not (has_any_url and has_tests)
@@ -2787,12 +2806,29 @@ def _main_inner(page: ft.Page):
     def on_show_hidden_change(e):
         try: filter_el_table()
         except Exception as x: _log_error("on_show_hidden_change", x)
+    def _resolve_el_selector(el_info):
+        """セレクタモードに応じてCSS or XPathを返す"""
+        use_xpath = state.get("_sel_mode") == "xpath"
+        if not use_xpath:
+            return el_info["selector"]
+        # XPathモード: ブラウザからXPath生成
+        driver = state["browser_driver"]
+        css_sel = el_info["selector"]
+        if css_sel.startswith("//"): return css_sel  # 既にXPath
+        if not driver: return css_sel  # ブラウザなしならCSS fallback
+        try:
+            target = driver.find_element(*_sel_by(css_sel))
+            xpath = driver.execute_script(XPATH_JS, target)
+            return xpath if xpath else css_sel
+        except Exception:
+            return css_sel
+
     def quick_add(stype):
         tc = cur_test()
         if not tc: snack("テストケースを選択", ft.Colors.ORANGE_700); return
         idx = state["selected_el"]
         if idx < 0 or idx >= len(state["browser_elements"]): snack("要素をクリック", ft.Colors.ORANGE_700); return
-        el_info = state["browser_elements"][idx]; sel = el_info["selector"]
+        el_info = state["browser_elements"][idx]; sel = _resolve_el_selector(el_info)
         tag = el_info.get("tag", ""); etype = el_info.get("type", "").lower()
         actual_type = stype
         if stype != "ホバー":
@@ -2859,6 +2895,62 @@ def _main_inner(page: ft.Page):
             if not fs: snack("フォーム値なし", ft.Colors.ORANGE_700); return
             tc["steps"].extend(fs); refresh_steps(False); refresh_test_list(); snack(f"フォーム値 {len(fs)} 件")
         except Exception as x: log(f"[ERROR] {x}")
+    def _clipboard_copy(text):
+        """クリップボードにテキストをコピー（Windows対応）"""
+        try:
+            import subprocess
+            p = subprocess.Popen(['clip'], stdin=subprocess.PIPE)
+            p.communicate(text.encode('utf-16-le'))
+        except Exception:
+            try: page.set_clipboard(text)
+            except Exception: pass
+
+    def copy_el_selector(e):
+        """選択中の要素のセレクタをクリップボードにコピー（モードに連動）"""
+        idx = state["selected_el"]
+        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素を選択", ft.Colors.ORANGE_700); return
+        el_info = state["browser_elements"][idx]
+        sel = _resolve_el_selector(el_info)
+        if sel:
+            _clipboard_copy(sel)
+            snack(f"コピー: {sel[:50]}")
+
+    def copy_el_xpath(e):
+        """選択中の要素のXPathをクリップボードにコピー"""
+        idx = state["selected_el"]
+        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素を選択", ft.Colors.ORANGE_700); return
+        el = state["browser_elements"][idx]
+        sel = el.get("selector", "")
+        # XPathセレクタならそのままコピー
+        if sel.startswith("//"):
+            _clipboard_copy(sel)
+            snack(f"XPathコピー: {sel[:50]}"); return
+        # CSSセレクタからXPathを生成（ブラウザ使用）
+        driver = state["browser_driver"]
+        if not driver: snack("ブラウザ未起動", ft.Colors.ORANGE_700); return
+        try:
+            target = driver.find_element(*_sel_by(sel))
+            if target:
+                xpath = driver.execute_script(XPATH_JS, target)
+                _clipboard_copy(xpath)
+                snack(f"XPathコピー: {xpath[:50]}")
+            else:
+                snack("要素が見つかりません", ft.Colors.RED_700)
+        except Exception as x:
+            snack(f"XPath取得失敗: {x}", ft.Colors.RED_700)
+
+    def copy_el_id(e):
+        """選択中の要素のID/nameをクリップボードにコピー"""
+        idx = state["selected_el"]
+        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素を選択", ft.Colors.ORANGE_700); return
+        el = state["browser_elements"][idx]
+        val = el.get("id") or el.get("name") or ""
+        if val:
+            _clipboard_copy(val)
+            snack(f"コピー: {val}")
+        else:
+            snack("ID/nameなし", ft.Colors.ORANGE_700)
+
     def test_selector_dlg(e):
         """Open a dialog to test CSS/XPath selectors by highlighting matches in the browser."""
         if not state["browser_driver"]: snack("ブラウザ未起動", ft.Colors.ORANGE_700); return
@@ -3555,6 +3647,12 @@ def _main_inner(page: ft.Page):
     load_btn = ft.Button("読込", icon=ft.Icons.DOWNLOAD, on_click=load_page_click)
     el_loading = ft.ProgressRing(width=14, height=14, stroke_width=2, visible=False)
     el_status = ft.Text("未読込", size=11, color=ft.Colors.GREY_500)
+    def _on_sel_mode_change(e):
+        state["_sel_mode"] = e.control.value
+    sel_mode_radio = ft.RadioGroup(content=ft.Row([
+        ft.Radio(value="css", label="CSS", label_style=ft.TextStyle(size=10)),
+        ft.Radio(value="xpath", label="XPath", label_style=ft.TextStyle(size=10)),
+    ], spacing=0), value="css", on_change=_on_sel_mode_change)
     el_search = ft.TextField(label="検索", expand=True, dense=True, hint_text="セレクタ/id/name/ヒント",
                              on_change=on_el_search_change, prefix_icon=ft.Icons.SEARCH)
     el_show_hidden = ft.Checkbox(label="非表示", value=False, on_change=on_show_hidden_change)
@@ -3653,17 +3751,22 @@ def _main_inner(page: ft.Page):
         for p in _projects_registry["projects"]:
             if p["id"] == cur_id: cur_proj = p; break
         if not cur_proj: return
-        nf = ft.TextField(label="プロジェクト名", width=350, value=cur_proj["name"], autofocus=True)
+        nf = ft.TextField(label="プロジェクト名", width=400, value=cur_proj["name"], autofocus=True)
+        uf = ft.TextField(label="プロジェクトURL (設定時は全ページで優先)", width=400,
+                          value=state["config"].get("project_url", ""),
+                          hint_text="空欄の場合はページごとのURLを使用")
         def on_ok(e):
             name = nf.value.strip()
             if not name: snack("名前を入力してください", ft.Colors.RED_700); return
             cur_proj["name"] = name
             save_projects_registry(_projects_registry)
+            state["config"]["project_url"] = uf.value.strip()
+            save_config(state["config"])
             project_dd.options = _project_dd_options()
             page.title = f"{APP_NAME} - {_current_project_name()}"
             page.update(); close_dlg(dlg)
-        dlg = ft.AlertDialog(title=ft.Text("プロジェクト名変更"),
-            content=ft.Column([nf], tight=True, spacing=10, width=400),
+        dlg = ft.AlertDialog(title=ft.Text("プロジェクト設定"),
+            content=ft.Column([nf, uf], tight=True, spacing=10, width=450),
             actions=[ft.TextButton("OK", on_click=on_ok),
                      ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
@@ -3752,7 +3855,7 @@ def _main_inner(page: ft.Page):
                 ft.IconButton(ft.Icons.ADD, tooltip="プロジェクト追加", icon_size=16, icon_color=ft.Colors.GREY_700, style=ft.ButtonStyle(padding=4), on_click=add_project),
                 ft.PopupMenuButton(icon=ft.Icons.MORE_VERT, icon_size=16, icon_color=ft.Colors.GREY_700,
                     tooltip="プロジェクト操作", items=[
-                        ft.PopupMenuItem(icon=ft.Icons.EDIT, content="名前変更", on_click=rename_project),
+                        ft.PopupMenuItem(icon=ft.Icons.EDIT, content="プロジェクト設定", on_click=rename_project),
                         ft.PopupMenuItem(icon=ft.Icons.DELETE, content="削除", on_click=del_project),
                     ]),
                ], spacing=0, vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -3826,7 +3929,9 @@ def _main_inner(page: ft.Page):
             ft.Row([el_loading, el_status], spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Container(ft.Column([ft.Row([el_table], scroll=ft.ScrollMode.AUTO)], scroll=ft.ScrollMode.AUTO),
                 expand=True, border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=4),
-            ft.Row([ft.Text("追加:", size=10, color=ft.Colors.GREY_500),
+            ft.Row([
+                    sel_mode_radio,
+                    ft.VerticalDivider(width=1),
                     ft.IconButton(ft.Icons.EDIT, tooltip="入力", icon_size=18, on_click=lambda e: quick_add("入力")),
                     ft.IconButton(ft.Icons.MOUSE, tooltip="クリック", icon_size=18, on_click=lambda e: quick_add("クリック")),
                     ft.IconButton(ft.Icons.NEAR_ME, tooltip="ホバー", icon_size=18, on_click=lambda e: quick_add("ホバー")),
@@ -3837,6 +3942,9 @@ def _main_inner(page: ft.Page):
                     ft.VerticalDivider(width=1),
                     ft.IconButton(ft.Icons.SEARCH, tooltip="セレクタテスト", icon_size=18, on_click=test_selector_dlg),
                     ft.IconButton(ft.Icons.INFO_OUTLINE, tooltip="要素詳細", icon_size=18, on_click=show_el_detail),
+                    ft.VerticalDivider(width=1),
+                    ft.IconButton(ft.Icons.CONTENT_COPY, tooltip="セレクタをコピー", icon_size=18, on_click=copy_el_selector),
+                    ft.IconButton(ft.Icons.CODE, tooltip="XPathをコピー", icon_size=18, on_click=copy_el_xpath),
                    ], spacing=0, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ], spacing=4), expand=3, padding=8, border=ft.Border.all(1, ft.Colors.GREY_300), border_radius=8),
     ], spacing=8, expand=True, vertical_alignment=ft.CrossAxisAlignment.STRETCH)

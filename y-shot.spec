@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('templates', 'templates'), ('assets', 'assets')]
+datas = [('templates', 'templates')]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('flet')
@@ -23,17 +23,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[
-        'torch', 'torchvision', 'torchaudio',
-        'tensorflow', 'keras',
-        'transformers', 'tokenizers', 'huggingface_hub', 'safetensors',
-        'scipy', 'pandas', 'matplotlib',
-        'cv2', 'opencv', 'onnxruntime',
-        'bitsandbytes', 'sympy',
-        'IPython', 'notebook', 'jupyter',
-        'tkinter', '_tkinter',
-        'test', 'tests',
-    ],
+    excludes=[],
     noarchive=False,
     optimize=0,
 )

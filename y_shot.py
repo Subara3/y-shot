@@ -10,6 +10,9 @@ y-shot: Web Screenshot Automation Tool  v2.3 (Flet)
            step/pattern copy-paste, taskbar icon fix
   - v2.3: alert OK/cancel (confirm dialog handling),
            step delete confirmation setting, snackbar fix
+  - v2.6: POST値キャプチャモード(スクショmode=post),
+           hidden radio/checkbox のlabel経由クリック,
+           テストケース追加/削除時のUI更新エラー修正
 """
 
 import csv, os, sys, json, threading, time, logging, traceback, copy, shutil
@@ -24,7 +27,7 @@ from urllib.parse import urlparse, urlunparse
 import flet as ft
 
 APP_NAME = "y-shot"
-APP_VERSION = "2.3"
+APP_VERSION = "2.6"
 APP_AUTHOR = "Yuri Norimatsu"
 
 # ── Constants ──
@@ -63,9 +66,9 @@ def _has_non_bmp(s):
 # ===================================================================
 
 def _sel_by(selector):
-    """Return (By.XPATH, selector) if selector starts with '//', else (By.CSS_SELECTOR, selector)."""
+    """Return (By.XPATH, selector) if selector starts with '//' or '(/', else (By.CSS_SELECTOR, selector)."""
     from selenium.webdriver.common.by import By
-    if selector.startswith("//"):
+    if selector.startswith("//") or selector.startswith("(/"):
         return (By.XPATH, selector)
     return (By.CSS_SELECTOR, selector)
 
@@ -171,6 +174,28 @@ _JS_COLLECT_ELEMENTS = """
             }
             anc=anc.parentElement;
         }
+        // XPath position-based (e.g. (//img)[2] — useful for verification of img resources)
+        var allSameTag=document.querySelectorAll(tag);
+        if (allSameTag.length>1) {
+            for (var ni=0;ni<allSameTag.length;ni++) {
+                if (allSameTag[ni]===el) {
+                    var xp='(//'+tag+')['+(ni+1)+']';
+                    try { var xr=document.evaluate(xp,document,null,9,null); if (xr.singleNodeValue===el) return xp; } catch(e){}
+                    break;
+                }
+            }
+        }
+        // img: use alt or src as last resort
+        if (tag==='img') {
+            var alt=el.getAttribute('alt');
+            if (alt) { var s='img[alt="'+escAttr(alt)+'"]'; if (cnt(s)===1) return s; }
+            var src=el.getAttribute('src');
+            if (src) {
+                var s='img[src="'+escAttr(src)+'"]'; if (cnt(s)===1) return s;
+                var fname=src.split('/').pop().split('\\\\').pop().split('?')[0];
+                if (fname) { var s2='img[src*="'+escAttr(fname)+'"]'; if (cnt(s2)===1) return s2; }
+            }
+        }
         // XPath fallback: use text content to build a unique XPath
         var txt=(el.textContent||'').trim();
         if (txt && txt.length<=60 && txt.indexOf("'")<0) {
@@ -209,6 +234,10 @@ _JS_COLLECT_ELEMENTS = """
             var href=el.getAttribute('href')||'';
             if (href) { var q=href.indexOf('?'); h=(q>=0?href.substring(0,q):href).slice(-50); }
         }
+        if (!h && tag==='img') {
+            var src=el.getAttribute('src')||'';
+            if (src) { var q=src.indexOf('?'); h=(q>=0?src.substring(0,q):src).slice(-50); }
+        }
         if ((!h||h===(el.getAttribute('value')||'')) && tag==='input' && (etype==='checkbox'||etype==='radio')) {
             var lbl=el.closest('label');
             if (lbl) { var lt=lbl.textContent.trim(); if (lt) h=lt.substring(0,50); }
@@ -219,8 +248,9 @@ _JS_COLLECT_ELEMENTS = """
         }
         return h;
     }
-    var CSS="input,textarea,select,button,a,[role='button'],[type='submit'],"
-           +"[type='image'],img[onclick],[onclick],li[id],span[id],div[onclick]";
+    var CSS="input,textarea,select,button,a,label,[role='button'],[type='submit'],"
+           +"[type='image'],img,[onclick],li[id],span[id],div[onclick],"
+           +"[class*='btn'],[class*='Btn'],[class*='button'],[class*='Button']";
     var els; try { els=document.querySelectorAll(CSS); } catch(e) { return []; }
     var results=[], seen={};
     for (var i=0;i<els.length;i++) {
@@ -279,8 +309,9 @@ def collect_elements_js(driver, include_hidden=False):
 def collect_elements_python(driver, include_hidden=False):
     from selenium.webdriver.common.by import By
     results, seen = [], set()
-    css = ("input, textarea, select, button, a, [role='button'], [type='submit'], "
-           "[type='image'], img[onclick], [onclick], li[id], span[id], div[onclick]")
+    css = ("input, textarea, select, button, a, label, [role='button'], [type='submit'], "
+           "[type='image'], img, [onclick], li[id], span[id], div[onclick], "
+           "[class*='btn'], [class*='Btn'], [class*='button'], [class*='Button']")
     try: elements = driver.find_elements(By.CSS_SELECTOR, css)
     except Exception: return results
     # Pass 1: collect basic info
@@ -288,11 +319,12 @@ def collect_elements_python(driver, include_hidden=False):
     for el in elements:
         try:
             visible = el.is_displayed()
+            etype = el.get_attribute("type") or ""
             if not visible:
-                if (el.get_attribute("type") or "") not in ("radio","checkbox"):
+                if (etype or "") not in ("radio", "checkbox"):
                     if not include_hidden:
                         continue
-            tag = el.tag_name.lower(); etype = el.get_attribute("type") or ""
+            tag = el.tag_name.lower()
             if etype == "hidden": continue
             eid = el.get_attribute("id") or ""; ename = el.get_attribute("name") or ""
             sel = _build_selector(driver, el, tag, eid, ename)
@@ -305,6 +337,9 @@ def collect_elements_python(driver, include_hidden=False):
             if not hint and tag == "a":
                 href = el.get_attribute("href") or ""
                 if href: hint = href.split("?")[0][-50:]
+            if not hint and tag == "img":
+                src = el.get_attribute("src") or ""
+                if src: hint = src.split("?")[0][-50:]
             if (not hint or hint == (el.get_attribute("value") or "")) and tag == "input" and etype in ("checkbox", "radio"):
                 try:
                     label_text = driver.execute_script(
@@ -419,6 +454,33 @@ def _build_selector(driver, el, tag, eid, ename):
                     return f'[id="{_css_escape_attr(pid)}"] > {tag}:nth-of-type({idx})'
                 return f"#{pid} > {tag}:nth-of-type({idx})"
     except Exception: pass
+    # XPath position-based (e.g. (//img)[2])
+    try:
+        all_same = driver.find_elements(By.CSS_SELECTOR, tag)
+        if len(all_same) > 1:
+            for ni, _el in enumerate(all_same):
+                if _el == el:
+                    xp = f"(//{tag})[{ni+1}]"
+                    found = driver.find_elements(By.XPATH, xp)
+                    if len(found) == 1: return xp
+                    break
+    except Exception: pass
+    # img: use alt or src for unique selector (last resort)
+    if tag == "img":
+        try:
+            alt = el.get_attribute("alt") or ""
+            if alt:
+                s = f'img[alt="{_css_escape_attr(alt)}"]'
+                if len(driver.find_elements(By.CSS_SELECTOR, s)) == 1: return s
+            src = el.get_attribute("src") or ""
+            if src:
+                s = f'img[src="{_css_escape_attr(src)}"]'
+                if len(driver.find_elements(By.CSS_SELECTOR, s)) == 1: return s
+                fname = src.split("/")[-1].split("\\")[-1].split("?")[0]
+                if fname:
+                    s2 = f'img[src*="{_css_escape_attr(fname)}"]'
+                    if len(driver.find_elements(By.CSS_SELECTOR, s2)) == 1: return s2
+        except Exception: pass
     # XPath fallback: use text content to build a unique XPath
     try:
         txt = (el.text or "").strip()
@@ -768,7 +830,7 @@ def setup_basic_auth(driver, config):
     except Exception:
         pass
 
-STEP_TYPES = ["入力", "クリック", "ホバー", "選択", "待機", "要素待機", "スクロール", "スクショ", "戻る", "更新", "アラートOK", "アラートキャンセル", "ナビゲーション", "セッション削除", "見出し", "コメント"]
+STEP_TYPES = ["入力", "クリック", "ホバー", "選択", "待機", "要素待機", "スクロール", "スクショ", "検証", "戻る", "更新", "アラートOK", "アラートキャンセル", "ナビゲーション", "セッション削除", "見出し", "コメント"]
 STEP_ICONS = {"入力": ft.Icons.EDIT, "クリック": ft.Icons.MOUSE,
               "ホバー": ft.Icons.NEAR_ME,
               "選択": ft.Icons.ARROW_DROP_DOWN_CIRCLE,
@@ -832,7 +894,17 @@ def step_short(step):
         if m == "fullpage": return "表示範囲"
         if m == "fullshot": return "ページ全体(縦長)"
         if m == "margin": return f"要素+{step.get('margin_px','500')}px"
+        if m in ("post","state","attrs"):
+            return {"post":"POST値","state":"要素状態","attrs":"要素属性"}.get(m, m)
         return "要素のみ"
+    if t == "検証":
+        m = step.get("verify_type","attrs")
+        sel = step.get("selector","")
+        label = {"post":"POST値","state":"要素状態","attrs":"要素属性"}.get(m, m)
+        if sel:
+            if len(sel) > 25: sel = sel[:22]+"..."
+            return f"{label} {sel}"
+        return label
     return str(step)
 
 
@@ -1016,6 +1088,8 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_argument("--disable-notifications")
+        # Enable performance logging for POST data capture (mode="post")
+        opts.set_capability("goog:loggingPrefs", {"performance": "ALL"})
         if config.get("headless") == "1":
             opts.add_argument("--headless=new")
             log_cb("[INFO] ヘッドレスモード")
@@ -1138,8 +1212,8 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                 _step_failed = False
                 for si, step in enumerate(steps, 1):
                     if stop_event and stop_event.is_set(): break
-                    if _step_failed and step.get("type") != "スクショ":
-                        # Skip remaining steps after failure (except screenshots for evidence)
+                    if _step_failed and step.get("type") not in ("スクショ", "検証"):
+                        # Skip remaining steps after failure (except screenshots/verification for evidence)
                         continue
                     st = step["type"]
                     if st in ("見出し","コメント"):
@@ -1329,17 +1403,21 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             if mode == "element" and sel:
                                 driver.find_element(*_sel_by(sel)).screenshot(fp)
                             elif mode == "margin" and sel:
-                                mg = int(step.get("margin_px",500))
-                                tgt = driver.find_element(*_sel_by(sel))
-                                driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});",tgt)
-                                time.sleep(0.3)
-                                r = driver.execute_script("var r=arguments[0].getBoundingClientRect();return{x:r.x,y:r.y,w:r.width,h:r.height};",tgt)
-                                driver.save_screenshot(fp)
-                                img = _PILImage.open(fp)
-                                d = driver.execute_script("return window.devicePixelRatio||1;")
-                                x1,y1 = max(0,int(r["x"]*d)-mg), max(0,int(r["y"]*d)-mg)
-                                x2,y2 = min(img.width,int((r["x"]+r["w"])*d)+mg), min(img.height,int((r["y"]+r["h"])*d)+mg)
-                                if x2>x1 and y2>y1: img.crop((x1,y1,x2,y2)).save(fp)
+                                if _PILImage is None:
+                                    log_cb("  [WARN] Pillow未インストール: marginモードはfullpageにフォールバック")
+                                    driver.save_screenshot(fp)
+                                else:
+                                    mg = int(step.get("margin_px",500))
+                                    tgt = driver.find_element(*_sel_by(sel))
+                                    driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});",tgt)
+                                    time.sleep(0.3)
+                                    r = driver.execute_script("var r=arguments[0].getBoundingClientRect();return{x:r.x,y:r.y,w:r.width,h:r.height};",tgt)
+                                    driver.save_screenshot(fp)
+                                    img = _PILImage.open(fp)
+                                    d = driver.execute_script("return window.devicePixelRatio||1;")
+                                    x1,y1 = max(0,int(r["x"]*d)-mg), max(0,int(r["y"]*d)-mg)
+                                    x2,y2 = min(img.width,int((r["x"]+r["w"])*d)+mg), min(img.height,int((r["y"]+r["h"])*d)+mg)
+                                    if x2>x1 and y2>y1: img.crop((x1,y1,x2,y2)).save(fp)
                             elif mode == "fullshot":
                                 # Preload lazy images: force-load + scroll to trigger loaders
                                 try:
@@ -1348,7 +1426,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                     total_h = driver.execute_script("return Math.max(document.body.scrollHeight,document.documentElement.scrollHeight);")
                                     view_h = driver.execute_script("return window.innerHeight;")
                                     if total_h and view_h:
-                                        for pos in range(0, total_h, max(int(view_h * 0.8), 100)):
+                                        for pos in range(0, int(total_h), max(int(view_h * 0.8), 100)):
                                             driver.execute_script(f"window.scrollTo(0,{pos});")
                                             time.sleep(0.1)
                                     if n_loaded:
@@ -1387,6 +1465,197 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                         driver.save_screenshot(fp)
                                     finally:
                                         driver.set_window_size(1280, 900)
+                            elif mode == "state" and sel:
+                                # ── 要素状態キャプチャモード ──
+                                # 指定要素の全属性・計算済みスタイルをHTMLテーブルとしてDOMに注入
+                                try:
+                                    tgt_el = driver.find_element(*_sel_by(sel))
+                                    state_info = driver.execute_script("""
+var el = arguments[0];
+var result = {tagName: el.tagName.toLowerCase(), attrs: [], styles: []};
+// 全HTML属性
+for (var i = 0; i < el.attributes.length; i++) {
+    var a = el.attributes[i];
+    result.attrs.push([a.name, a.value]);
+}
+// 入力要素の現在値
+if (typeof el.value !== 'undefined' && el.value !== '') {
+    result.attrs.push(['[現在値]', el.value]);
+}
+// textContent (入力以外)
+if (!('value' in el) || el.tagName === 'BUTTON') {
+    var tc = (el.textContent || '').trim();
+    if (tc && tc.length <= 200) result.attrs.push(['[textContent]', tc]);
+    else if (tc) result.attrs.push(['[textContent]', tc.substring(0, 200) + '…']);
+}
+// 計算済みスタイル (リソースURL関連 + レイアウト)
+var cs = window.getComputedStyle(el);
+var props = ['display','visibility','opacity','width','height',
+    'background-image','background-color','color','font-size',
+    'border-width','border-style','border-color','position','overflow'];
+var skip_none = {'background-image':1,'background-color':1,'border-style':1,'border-color':1};
+for (var j = 0; j < props.length; j++) {
+    var p = props[j], v = cs.getPropertyValue(p);
+    if (!v) continue;
+    if (v === 'normal' || v === 'auto' || v === '0px') continue;
+    if (v === 'none' && skip_none[p]) continue;
+    result.styles.push([p, v]);
+}
+return result;
+""", tgt_el)
+                                    def _esc(s):
+                                        return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
+                                    # 属性テーブル行
+                                    attr_rows = "".join(
+                                        f'<tr><td style="border:1px solid #666;padding:6px 10px;font-weight:bold;background:#f5f5f5;white-space:nowrap">{_esc(k)}</td>'
+                                        f'<td style="border:1px solid #666;padding:6px 10px;word-break:break-all">{_esc(v) if v else "<span style=color:#999>(空)</span>"}</td></tr>'
+                                        for k, v in state_info.get("attrs", [])
+                                    )
+                                    # 計算済みスタイル行
+                                    style_rows = "".join(
+                                        f'<tr><td style="border:1px solid #666;padding:6px 10px;font-weight:bold;background:#f5f5f5;white-space:nowrap">{_esc(k)}</td>'
+                                        f'<td style="border:1px solid #666;padding:6px 10px;word-break:break-all">{_esc(v)}</td></tr>'
+                                        for k, v in state_info.get("styles", [])
+                                    )
+                                    tag_name = _esc(state_info.get("tagName", "?"))
+                                    safe_sel = _esc(sel)
+                                    inject_html = (
+                                        f'<div id="__yshot_state" style="margin:15px;padding:15px;border:3px solid #2E7D32;border-radius:8px;background:#E8F5E9;font-family:sans-serif">'
+                                        f'<div style="font-size:16px;font-weight:bold;color:#2E7D32;margin-bottom:8px">🔍 要素の状態</div>'
+                                        f'<div style="font-size:11px;color:#555;margin-bottom:10px;word-break:break-all">&lt;{tag_name}&gt; — {safe_sel}</div>'
+                                        f'<table style="border-collapse:collapse;width:100%;font-size:13px;margin-bottom:10px">'
+                                        f'<tr><th style="border:1px solid #666;padding:6px 10px;background:#2E7D32;color:#fff;text-align:left">属性名</th>'
+                                        f'<th style="border:1px solid #666;padding:6px 10px;background:#2E7D32;color:#fff;text-align:left">値</th></tr>'
+                                        f'{attr_rows}</table>'
+                                    )
+                                    if style_rows:
+                                        inject_html += (
+                                            f'<div style="font-size:13px;font-weight:bold;color:#2E7D32;margin:8px 0 4px">計算済みスタイル</div>'
+                                            f'<table style="border-collapse:collapse;width:100%;font-size:13px">'
+                                            f'<tr><th style="border:1px solid #666;padding:6px 10px;background:#558B2F;color:#fff;text-align:left">プロパティ</th>'
+                                            f'<th style="border:1px solid #666;padding:6px 10px;background:#558B2F;color:#fff;text-align:left">値</th></tr>'
+                                            f'{style_rows}</table>'
+                                        )
+                                    inject_html += '</div>'
+                                    driver.execute_script(
+                                        "var target=document.querySelector('main')||document.body;"
+                                        "target.insertAdjacentHTML('afterbegin',arguments[0]);",
+                                        inject_html
+                                    )
+                                    time.sleep(0.3)
+                                    n_attrs = len(state_info.get("attrs", []))
+                                    n_styles = len(state_info.get("styles", []))
+                                    log_cb(f"  S{si} 要素状態 属性{n_attrs}件+スタイル{n_styles}件 挿入")
+                                except Exception as state_err:
+                                    log_cb(f"  S{si} [WARN] 要素状態取得失敗: {state_err}")
+                                # fullshot と同じ方法でスクショ
+                                try:
+                                    metrics = driver.execute_cdp_cmd('Page.getLayoutMetrics', {})
+                                    cs = metrics.get('cssContentSize') or metrics.get('contentSize', {})
+                                    cw, ch = cs.get('width', 1280), cs.get('height', 900)
+                                    if ch > 16384: ch = 16384
+                                    result = driver.execute_cdp_cmd('Page.captureScreenshot', {
+                                        'format': 'png', 'captureBeyondViewport': True,
+                                        'clip': {'x': 0, 'y': 0, 'width': cw, 'height': ch, 'scale': 1}
+                                    })
+                                    with open(fp, 'wb') as _f:
+                                        _f.write(_b64.b64decode(result['data']))
+                                except Exception:
+                                    driver.save_screenshot(fp)
+                                # 挿入したDOMを除去
+                                try:
+                                    driver.execute_script("var e=document.getElementById('__yshot_state');if(e)e.remove();")
+                                except Exception:
+                                    pass
+                            elif mode == "post":
+                                # ── POST値キャプチャモード ──
+                                # パフォーマンスログからPOSTリクエストを抽出
+                                import json as _json_mod
+                                post_entries = []
+                                try:
+                                    perf_logs = driver.get_log("performance")
+                                    for entry in perf_logs:
+                                        try:
+                                            msg = _json_mod.loads(entry["message"])["message"]
+                                            if msg.get("method") != "Network.requestWillBeSent":
+                                                continue
+                                            req = msg.get("params", {}).get("request", {})
+                                            if req.get("method") != "POST":
+                                                continue
+                                            pd = req.get("postData", "")
+                                            if not pd:
+                                                continue
+                                            post_entries.append({
+                                                "url": req.get("url", ""),
+                                                "postData": pd,
+                                                "contentType": req.get("headers", {}).get("Content-Type", ""),
+                                            })
+                                        except Exception:
+                                            continue
+                                except Exception as plog_err:
+                                    log_cb(f"  S{si} [WARN] パフォーマンスログ取得失敗: {plog_err}")
+                                # POSTデータをパース→HTMLテーブル化→DOM挿入
+                                if post_entries:
+                                    from urllib.parse import unquote_plus
+                                    last_post = post_entries[-1]  # 直近のPOSTリクエスト
+                                    raw_pd = last_post["postData"]
+                                    # URL-encoded のパース
+                                    pairs = []
+                                    for chunk in raw_pd.split("&"):
+                                        if "=" in chunk:
+                                            k, v = chunk.split("=", 1)
+                                            pairs.append((unquote_plus(k), unquote_plus(v)))
+                                        else:
+                                            pairs.append((unquote_plus(chunk), ""))
+                                    # HTMLテーブル生成（エスケープ付き）
+                                    def _esc(s):
+                                        return s.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
+                                    tbl_rows = "".join(
+                                        f'<tr><td style="border:1px solid #666;padding:6px 10px;font-weight:bold;background:#f5f5f5;white-space:nowrap">{_esc(k)}</td>'
+                                        f'<td style="border:1px solid #666;padding:6px 10px;word-break:break-all">{_esc(v) if v else "<span style=color:#999>(空)</span>"}</td></tr>'
+                                        for k, v in pairs
+                                    )
+                                    post_url = _esc(last_post["url"])
+                                    inject_html = (
+                                        f'<div id="__yshot_post" style="margin:15px;padding:15px;border:3px solid #1565C0;border-radius:8px;background:#E3F2FD;font-family:sans-serif">'
+                                        f'<div style="font-size:16px;font-weight:bold;color:#1565C0;margin-bottom:8px">📡 POST データ (実際の送信値)</div>'
+                                        f'<div style="font-size:11px;color:#555;margin-bottom:10px;word-break:break-all">送信先: {post_url}</div>'
+                                        f'<table style="border-collapse:collapse;width:100%;font-size:13px">'
+                                        f'<tr><th style="border:1px solid #666;padding:6px 10px;background:#1565C0;color:#fff;text-align:left">パラメータ名</th>'
+                                        f'<th style="border:1px solid #666;padding:6px 10px;background:#1565C0;color:#fff;text-align:left">POST値</th></tr>'
+                                        f'{tbl_rows}</table></div>'
+                                    )
+                                    try:
+                                        driver.execute_script(
+                                            "var target=document.querySelector('main')||document.body;"
+                                            "target.insertAdjacentHTML('afterbegin',arguments[0]);",
+                                            inject_html
+                                        )
+                                        time.sleep(0.3)
+                                        log_cb(f"  S{si} POSTデータ {len(pairs)}件 挿入")
+                                    except Exception as inj_err:
+                                        log_cb(f"  S{si} [WARN] POST DOM挿入失敗: {inj_err}")
+                                else:
+                                    log_cb(f"  S{si} [INFO] POSTリクエストが見つかりません")
+                                # fullshot と同じ方法でスクショ
+                                try:
+                                    metrics = driver.execute_cdp_cmd('Page.getLayoutMetrics', {})
+                                    cs = metrics.get('cssContentSize') or metrics.get('contentSize', {})
+                                    cw, ch = cs.get('width', 1280), cs.get('height', 900)
+                                    if ch > 16384: ch = 16384
+                                    result = driver.execute_cdp_cmd('Page.captureScreenshot', {
+                                        'format': 'png', 'captureBeyondViewport': True,
+                                        'clip': {'x': 0, 'y': 0, 'width': cw, 'height': ch, 'scale': 1}
+                                    })
+                                    with open(fp, 'wb') as _f:
+                                        _f.write(_b64.b64decode(result['data']))
+                                except Exception:
+                                    driver.save_screenshot(fp)
+                                # 挿入したDOMを除去（後続テストへの影響防止）
+                                try:
+                                    driver.execute_script("var e=document.getElementById('__yshot_post');if(e)e.remove();")
+                                except Exception:
+                                    pass
                             else: driver.save_screenshot(fp)
                             rel_dir = os.path.basename(tc_outdir) if tc_outdir != outdir else ""
                             log_cb(f"  S{si} スクショ: {rel_dir + '/' if rel_dir else ''}{fn}")
@@ -1403,6 +1672,122 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                 except Exception as sx:
                                     _flog.debug(f"Source save failed: {sx}")
                         except Exception as x: log_cb(f"  S{si} [WARN] スクショ失敗: {x}")
+                    elif st == "検証":
+                        vtype = step.get("verify_type", "attrs")
+                        sel = step.get("selector", "").replace("{パターン}",value).replace("{pattern}",value)
+                        sc += 1
+                        safe_tc = _safe_filename(tc_name, 30)
+                        safe_number = _safe_filename(tc_number, 10) if tc_number else ""
+                        num_prefix = f"{safe_number}_" if safe_number else ""
+                        if len(pats) > 1:
+                            safe_label = _safe_filename(label, 30)
+                            fn = f"{gss:03d}_{num_prefix}{safe_tc}_{safe_label}_ss{sc}.png"
+                        else:
+                            fn = f"{gss:03d}_{num_prefix}{safe_tc}_ss{sc}.png"
+                        fp = os.path.join(tc_outdir, fn)
+                        try:
+                            verify_html = ""
+                            if vtype == "post":
+                                # POST値: パフォーマンスログから収集
+                                import json as _json_mod
+                                post_entries = []
+                                try:
+                                    perf_logs = driver.get_log("performance")
+                                    for entry in perf_logs:
+                                        try:
+                                            msg = _json_mod.loads(entry["message"])["message"]
+                                            if msg.get("method") != "Network.requestWillBeSent": continue
+                                            req = msg.get("params", {}).get("request", {})
+                                            if req.get("method") != "POST": continue
+                                            pd = req.get("postData", "")
+                                            if not pd: continue
+                                            post_entries.append({"url": req.get("url",""), "postData": pd, "contentType": req.get("headers",{}).get("Content-Type","")})
+                                        except Exception: continue
+                                except Exception as plog_err:
+                                    log_cb(f"  S{si} [WARN] パフォーマンスログ取得失敗: {plog_err}")
+                                if post_entries:
+                                    from urllib.parse import unquote_plus
+                                    last_post = post_entries[-1]
+                                    raw_pd = last_post["postData"]
+                                    pairs = []
+                                    for chunk in raw_pd.split("&"):
+                                        if "=" in chunk: k,v = chunk.split("=",1); pairs.append((unquote_plus(k),unquote_plus(v)))
+                                        else: pairs.append((unquote_plus(chunk),""))
+                                    def _esc(s): return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
+                                    tbl_rows = "".join(f'<tr><td style="border:1px solid #666;padding:6px 10px;font-weight:bold;background:#f5f5f5;white-space:nowrap">{_esc(k)}</td><td style="border:1px solid #666;padding:6px 10px;word-break:break-all">{_esc(v) if v else "<span style=color:#999>(空)</span>"}</td></tr>' for k,v in pairs)
+                                    post_url = _esc(last_post["url"])
+                                    verify_html = (f'<div style="margin:15px;padding:15px;border:3px solid #1565C0;border-radius:8px;background:#E3F2FD;font-family:sans-serif">'
+                                        f'<div style="font-size:16px;font-weight:bold;color:#1565C0;margin-bottom:8px">📡 POST データ (実際の送信値)</div>'
+                                        f'<div style="font-size:11px;color:#555;margin-bottom:10px;word-break:break-all">送信先: {post_url}</div>'
+                                        f'<table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th style="border:1px solid #666;padding:6px 10px;background:#1565C0;color:#fff;text-align:left">パラメータ名</th><th style="border:1px solid #666;padding:6px 10px;background:#1565C0;color:#fff;text-align:left">POST値</th></tr>{tbl_rows}</table></div>')
+                                    log_cb(f"  S{si} 検証:POST {len(pairs)}件")
+                                else: log_cb(f"  S{si} [INFO] POSTリクエストなし")
+                            elif vtype in ("state", "attrs") and sel:
+                                # 要素の状態/属性: 元ページから情報を収集
+                                tgt_el = driver.find_element(*_sel_by(sel))
+                                state_info = driver.execute_script("""
+var el=arguments[0];var r={tagName:el.tagName.toLowerCase(),attrs:[],styles:[],dataUrl:''};
+for(var i=0;i<el.attributes.length;i++){var a=el.attributes[i];r.attrs.push([a.name,a.value]);}
+if(typeof el.value!=='undefined'&&el.value!=='')r.attrs.push(['[現在値]',el.value]);
+if(!('value' in el)||el.tagName==='BUTTON'){var tc=(el.textContent||'').trim();if(tc&&tc.length<=200)r.attrs.push(['[textContent]',tc]);else if(tc)r.attrs.push(['[textContent]',tc.substring(0,200)+'…']);}
+if(el.tagName==='IMG'&&el.naturalWidth>0){try{var cv=document.createElement('canvas');cv.width=el.naturalWidth;cv.height=el.naturalHeight;cv.getContext('2d').drawImage(el,0,0);r.dataUrl=cv.toDataURL('image/png');}catch(e){}};
+if(arguments[1]){var cs=window.getComputedStyle(el);var ps=['display','visibility','opacity','width','height','background-image','background-color','color','font-size','border-width','border-style','border-color','position','overflow'];for(var j=0;j<ps.length;j++){var p=ps[j],v=cs.getPropertyValue(p);if(!v||v==='normal'||v==='auto'||v==='0px')continue;if(v==='none'&&({'background-image':1,'background-color':1,'border-style':1,'border-color':1})[p])continue;r.styles.push([p,v]);}}
+return r;""", tgt_el, vtype == "state")
+                                def _esc(s): return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
+                                attr_rows = "".join(f'<tr><td style="border:1px solid #666;padding:6px 10px;font-weight:bold;background:#f5f5f5;white-space:nowrap">{_esc(k)}</td><td style="border:1px solid #666;padding:6px 10px;word-break:break-all">{_esc(v) if v else "<span style=color:#999>(空)</span>"}</td></tr>' for k,v in state_info.get("attrs",[]))
+                                tag_name = _esc(state_info.get("tagName","?")); safe_sel = _esc(sel)
+                                color = "#2E7D32" if vtype == "state" else "#6A1B9A"
+                                bg = "#E8F5E9" if vtype == "state" else "#F3E5F5"
+                                title = "🔍 要素の状態" if vtype == "state" else "🏷 要素の属性"
+                                # img の場合はプレビューを追加（base64埋め込みで認証・CORS問題を回避）
+                                _img_preview = ""
+                                _data_url = state_info.get("dataUrl", "")
+                                if tag_name == "img" and _data_url:
+                                    _img_preview = (f'<div style="margin-bottom:12px;padding:10px;background:#fff;border:1px solid #ccc;border-radius:4px;text-align:center">'
+                                        f'<div style="font-size:11px;color:#888;margin-bottom:6px">画像プレビュー</div>'
+                                        f'<img src="{_data_url}" style="max-width:100%;max-height:400px;border:1px solid #ddd">'
+                                        f'</div>')
+                                verify_html = (f'<div style="margin:15px;padding:15px;border:3px solid {color};border-radius:8px;background:{bg};font-family:sans-serif">'
+                                    f'<div style="font-size:16px;font-weight:bold;color:{color};margin-bottom:8px">{title}</div>'
+                                    f'<div style="font-size:11px;color:#555;margin-bottom:10px;word-break:break-all">&lt;{tag_name}&gt; — {safe_sel}</div>'
+                                    f'{_img_preview}'
+                                    f'<table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th style="border:1px solid #666;padding:6px 10px;background:{color};color:#fff;text-align:left">属性名</th><th style="border:1px solid #666;padding:6px 10px;background:{color};color:#fff;text-align:left">値</th></tr>{attr_rows}</table>')
+                                if vtype == "state" and state_info.get("styles"):
+                                    style_rows = "".join(f'<tr><td style="border:1px solid #666;padding:6px 10px;font-weight:bold;background:#f5f5f5;white-space:nowrap">{_esc(k)}</td><td style="border:1px solid #666;padding:6px 10px;word-break:break-all">{_esc(v)}</td></tr>' for k,v in state_info["styles"])
+                                    verify_html += (f'<div style="font-size:13px;font-weight:bold;color:{color};margin:8px 0 4px">計算済みスタイル</div>'
+                                        f'<table style="border-collapse:collapse;width:100%;font-size:13px"><tr><th style="border:1px solid #666;padding:6px 10px;background:#558B2F;color:#fff;text-align:left">プロパティ</th><th style="border:1px solid #666;padding:6px 10px;background:#558B2F;color:#fff;text-align:left">値</th></tr>{style_rows}</table>')
+                                verify_html += '</div>'
+                                n_info = len(state_info.get("attrs",[])) + len(state_info.get("styles",[]))
+                                _vtype_label = {"state":"要素状態","attrs":"要素属性"}.get(vtype, vtype)
+                                log_cb(f"  S{si} 検証:{_vtype_label} {n_info}件")
+                            # 新タブで検証HTMLを表示 → スクショ → タブを閉じる（元ページに影響なし）
+                            if verify_html:
+                                _orig_handle = driver.current_window_handle
+                                _new_tab_opened = False
+                                try:
+                                    driver.execute_script("window.open('about:blank','_blank');")
+                                    driver.switch_to.window(driver.window_handles[-1])
+                                    _new_tab_opened = True
+                                    _page_html = f'<html><head><meta charset="utf-8"><title>y-shot 検証</title></head><body style="margin:0;background:#fff">{verify_html}</body></html>'
+                                    driver.execute_script("document.write(arguments[0]);document.close();", _page_html)
+                                    time.sleep(0.3)
+                                    try:
+                                        metrics = driver.execute_cdp_cmd('Page.getLayoutMetrics', {})
+                                        cs_m = metrics.get('cssContentSize') or metrics.get('contentSize', {})
+                                        cw, ch = cs_m.get('width', 1280), cs_m.get('height', 900)
+                                        if ch > 16384: ch = 16384
+                                        result = driver.execute_cdp_cmd('Page.captureScreenshot', {'format':'png','captureBeyondViewport':True,'clip':{'x':0,'y':0,'width':cw,'height':ch,'scale':1}})
+                                        with open(fp, 'wb') as _f: _f.write(_b64.b64decode(result['data']))
+                                    except Exception: driver.save_screenshot(fp)
+                                    rel_dir = os.path.basename(tc_outdir) if tc_outdir != outdir else ""
+                                    log_cb(f"  S{si} スクショ: {rel_dir + '/' if rel_dir else ''}{fn}")
+                                finally:
+                                    if _new_tab_opened:
+                                        try: driver.close()
+                                        except Exception: pass
+                                        try: driver.switch_to.window(_orig_handle)
+                                        except Exception: pass
+                        except Exception as x: log_cb(f"  S{si} [WARN] 検証失敗: {x}")
                 done_pats += 1
                 if progress_cb and total_pats > 0:
                     progress_cb(done_pats, total_pats, f"{tc_number} {tc_name}")
@@ -1490,7 +1875,11 @@ def _safe_json_load(filepath, default):
     return default
 
 def load_tests():
-    return _safe_json_load(_data_path(TESTS_FILE), [])
+    tests = _safe_json_load(_data_path(TESTS_FILE), [])
+    for t in tests:
+        if "name" in t and isinstance(t["name"], str):
+            t["name"] = t["name"].replace("\r","").replace("\n","").strip()
+    return tests
 def save_tests(tests):
     _safe_json_save(_data_path(TESTS_FILE), tests)
 def load_pattern_sets():
@@ -1741,8 +2130,10 @@ def _main_inner(page: ft.Page):
         else: color = ft.Colors.GREY_700
         log_list.controls.append(ft.Text(f"[{ts}] {msg}", size=11, selectable=True, font_family="Consolas", color=color))
         if len(log_list.controls) > LOG_MAX_LINES: log_list.controls.pop(0)
-        try: page.update()
-        except Exception: pass
+        try: log_list.update()
+        except Exception:
+            try: page.update()
+            except Exception: pass
     def _log_error(context, exc):
         _flog.error(f"{context}: {exc}\n{traceback.format_exc()}")
         log(f"[ERROR] {context}: {exc}")
@@ -1820,10 +2211,14 @@ def _main_inner(page: ft.Page):
                 if tc.get("_id") == remembered_id:
                     state["selected_test"] = i; break
         refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
-        # Auto-sync browser URL to selected page
-        pg = cur_page()
-        if pg and pg.get("url", ""):
-            browser_url.value = pg["url"]
+        # Auto-sync browser URL: project URL > page URL
+        _proj_url = state["config"].get("project_url", "").strip()
+        if _proj_url:
+            browser_url.value = _proj_url
+        else:
+            pg = cur_page()
+            if pg and pg.get("url", ""):
+                browser_url.value = pg["url"]
         page.update()
 
     def add_page(e):
@@ -2115,7 +2510,9 @@ def _main_inner(page: ft.Page):
                   "_id": _new_tc_id(), "page_id": cur_pid, "number": ""}
         state["tests"].append(new_tc); auto_number_tests()
         state["selected_test"] = len(state["tests"]) - 1
-        refresh_page_dd(False); refresh_test_list(False); refresh_steps()
+        refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
+        try: page.update()
+        except Exception: pass
 
     def copy_test(idx):
         if _guard_running(): return
@@ -2124,7 +2521,9 @@ def _main_inner(page: ft.Page):
             tc["name"] += " (コピー)"; tc["_id"] = _new_tc_id(); tc.pop("_sub_number", None)
             state["tests"].insert(idx + 1, tc); auto_number_tests()
             state["selected_test"] = idx + 1
-            refresh_page_dd(False); refresh_test_list(False); refresh_steps()
+            refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
+            try: page.update()
+            except Exception: pass
 
     def del_test(idx):
         if _guard_running(): return
@@ -2142,8 +2541,10 @@ def _main_inner(page: ft.Page):
                 state["tests"].pop(idx); auto_number_tests()
                 if state["selected_test"] >= len(state["tests"]):
                     state["selected_test"] = len(state["tests"]) - 1  # -1 when empty
-                refresh_page_dd(False); refresh_test_list(False); refresh_steps()
-                refresh_pat_set_list(False); refresh_pats(); close_dlg(dlg)
+                refresh_page_dd(False); refresh_test_list(False); refresh_steps(False)
+                refresh_pat_set_list(False); refresh_pats(False); close_dlg(dlg)
+                try: page.update()
+                except Exception: pass
             except Exception as x: _log_error("del_test", x); close_dlg(dlg)
         content = ft.Column([ft.Text(f"「{name}」を削除しますか？"), del_pat_cb],
                             tight=True, spacing=8) if pat_orphan else ft.Text(f"「{name}」を削除しますか？")
@@ -2374,16 +2775,25 @@ def _main_inner(page: ft.Page):
         nav_url_f = ft.TextField(label="遷移先URL", width=450, value=init.get("url",""),
             hint_text="https://... ({パターン}可)")
         sec_field = ft.TextField(label="秒数", width=120, value=init.get("seconds","1.0"))
-        # スクショモード: key=内部値, text=表示名
-        _SS_MODES = [
-            ("fullpage", "表示範囲のみ"),
-            ("fullshot", "ページ全体 (縦長)"),
-            ("element", "要素のみ"),
-            ("margin", "要素 + 余白"),
+        # スクショモード: key=内部値, text=表示名 (区切り線でグループ化)
+        _ss_options = [
+            ft.dropdown.Option(key="fullpage", text="表示範囲のみ"),
+            ft.dropdown.Option(key="fullshot", text="ページ全体 (縦長)"),
+            ft.Divider(height=1),
+            ft.dropdown.Option(key="element", text="要素のみ"),
+            ft.dropdown.Option(key="margin", text="要素 + 余白"),
         ]
         mode_dd = ft.Dropdown(label="スクショ範囲", width=220, value=init.get("mode","fullpage"),
-            options=[ft.dropdown.Option(key=k, text=t) for k, t in _SS_MODES])
+            options=_ss_options)
         margin_f = ft.TextField(label="マージン(px)", width=120, value=init.get("margin_px","500"))
+        # 検証タイプ
+        _VERIFY_TYPES = [
+            ("post", "POST値"),
+            ("state", "要素の状態"),
+            ("attrs", "要素の属性"),
+        ]
+        verify_dd = ft.Dropdown(label="検証タイプ", width=220, value=init.get("verify_type","attrs"),
+            options=[ft.dropdown.Option(key=k, text=t) for k, t in _VERIFY_TYPES])
         text_f = ft.TextField(label="テキスト", width=450, value=init.get("text",""), multiline=True, min_lines=1, max_lines=3)
         # Scroll controls
         scroll_mode_dd = ft.Dropdown(label="スクロール方法", width=220, value=init.get("scroll_mode","element"),
@@ -2394,13 +2804,14 @@ def _main_inner(page: ft.Page):
         nav_group = ft.Column([nav_url_f], spacing=8, tight=True)
         time_group = ft.Column([sec_field], spacing=8, tight=True)
         ss_group = ft.Column([ft.Row([mode_dd, margin_f], spacing=8)], spacing=8, tight=True)
+        verify_group = ft.Column([verify_dd], spacing=8, tight=True)
         scroll_group = ft.Column([ft.Row([scroll_mode_dd, scroll_px_f], spacing=8)], spacing=8, tight=True)
         text_group = ft.Column([text_f], spacing=8, tight=True)
         def upd(e=None):
             try:
                 t = type_dd.value
                 is_input = (t == "入力")
-                needs_sel = t in ("入力","クリック","ホバー","選択","要素待機") or (t=="スクショ" and mode_dd.value in ("element","margin")) or (t=="スクロール" and scroll_mode_dd.value=="element")
+                needs_sel = t in ("入力","クリック","ホバー","選択","要素待機") or (t=="スクショ" and mode_dd.value in ("element","margin")) or (t=="検証" and verify_dd.value in ("state","attrs")) or (t=="スクロール" and scroll_mode_dd.value=="element")
                 sel_field.visible = needs_sel
                 input_mode_dd.visible = is_input
                 _needs_val = is_input or t == "選択"
@@ -2410,7 +2821,7 @@ def _main_inner(page: ft.Page):
                 if is_input and input_mode_dd.value == "clear":
                     val_mode.visible = False; pat_select.visible = False; val_field.visible = False
                 nav_url_f.visible = (t == "ナビゲーション")
-                sec_field.visible = t in ("待機", "戻る", "更新", "要素待機"); mode_dd.visible = (t=="スクショ")
+                sec_field.visible = t in ("待機", "戻る", "更新", "要素待機"); mode_dd.visible = (t=="スクショ"); verify_dd.visible = (t=="検証")
                 scroll_mode_dd.visible = (t == "スクロール")
                 scroll_px_f.visible = (t == "スクロール" and scroll_mode_dd.value == "pixel")
                 if t == "要素待機": sec_field.label = "タイムアウト(秒)"
@@ -2424,12 +2835,13 @@ def _main_inner(page: ft.Page):
                 nav_group.visible = (t == "ナビゲーション")
                 time_group.visible = t in ("待機", "戻る", "更新", "要素待機")
                 ss_group.visible = (t == "スクショ")
+                verify_group.visible = (t == "検証")
                 scroll_group.visible = (t == "スクロール")
                 text_group.visible = t in ("見出し","コメント")
                 try: page.update()
                 except Exception: pass
             except Exception as x: _log_error("show_step_dlg.upd", x)
-        type_dd.on_select = upd; mode_dd.on_select = upd; val_mode.on_select = upd; input_mode_dd.on_select = upd; scroll_mode_dd.on_select = upd
+        type_dd.on_select = upd; mode_dd.on_select = upd; verify_dd.on_select = upd; val_mode.on_select = upd; input_mode_dd.on_select = upd; scroll_mode_dd.on_select = upd
         # 初期表示を正しく設定
         upd()
         def on_ok(e):
@@ -2495,12 +2907,17 @@ def _main_inner(page: ft.Page):
                     if mode_dd.value == "margin":
                         try: step["margin_px"] = str(int(margin_f.value))
                         except Exception: snack("整数で", ft.Colors.RED_700); return
+                elif t == "検証":
+                    step["verify_type"] = verify_dd.value
+                    s = sel_field.value if hasattr(sel_field,'value') else ""
+                    if verify_dd.value in ("state","attrs") and not s: snack("セレクタ必要", ft.Colors.RED_700); return
+                    if s: step["selector"] = s
                 if idx is not None: tc["steps"][idx] = step
                 else: tc["steps"].append(step)
                 refresh_steps(False); refresh_test_list(); close_dlg(dlg)
             except Exception as x: _log_error("show_step_dlg.on_ok", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("ステップ編集" if idx is not None else "ステップ追加"),
-            content=ft.Column([type_dd, text_group, input_group, nav_group, time_group, scroll_group, ss_group],
+            content=ft.Column([type_dd, text_group, input_group, nav_group, time_group, scroll_group, ss_group, verify_group],
                 tight=True, spacing=12, scroll=ft.ScrollMode.AUTO, width=500),
             actions=[ft.TextButton("OK", on_click=on_ok), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
@@ -2555,25 +2972,30 @@ def _main_inner(page: ft.Page):
         """Collect elements from current DOM state (no page navigation)."""
         drv = state["browser_driver"]
         elems = collect_elements_js(drv, include_hidden=True)
+        _flog.info(f"[要素] メインフレーム: {len(elems)} 要素")
         # Detect iframes and collect their elements too
         from selenium.webdriver.common.by import By
         try:
             iframes = drv.find_elements(By.CSS_SELECTOR, "iframe, frame")
+            _flog.info(f"[要素] iframe検出: {len(iframes)} 件")
             for fi, iframe in enumerate(iframes):
                 frame_id = iframe.get_attribute("id") or iframe.get_attribute("name") or f"frame_{fi}"
                 try:
                     drv.switch_to.frame(iframe)
                     frame_elems = collect_elements_js(drv, include_hidden=True)
+                    _flog.info(f"[要素] iframe[{frame_id}]: {len(frame_elems)} 要素")
                     for fe in frame_elems:
                         fe["hint"] = f"[iframe:{frame_id}] " + fe.get("hint", "")
                         fe["_frame"] = frame_id
                         fe["_frame_index"] = fi
                     elems.extend(frame_elems)
                     drv.switch_to.default_content()
-                except Exception:
+                except Exception as _ifr_err:
+                    _flog.warning(f"[要素] iframe[{frame_id}] 収集失敗: {_ifr_err}")
                     try: drv.switch_to.default_content()
                     except Exception: pass
-        except Exception: pass
+        except Exception as _ifr_outer_err:
+            _flog.warning(f"[要素] iframe検出失敗: {_ifr_outer_err}")
         state["browser_elements"] = list(elems)
         if url:
             bank = state["selector_bank"]
@@ -2818,7 +3240,7 @@ def _main_inner(page: ft.Page):
         # XPathモード: ブラウザからXPath生成
         driver = state["browser_driver"]
         css_sel = el_info["selector"]
-        if css_sel.startswith("//"): return css_sel  # 既にXPath
+        if css_sel.startswith("//") or css_sel.startswith("(/"): return css_sel  # 既にXPath
         if not driver: return css_sel  # ブラウザなしならCSS fallback
         try:
             target = driver.find_element(*_sel_by(css_sel))
@@ -2926,7 +3348,7 @@ def _main_inner(page: ft.Page):
         el = state["browser_elements"][idx]
         sel = el.get("selector", "")
         # XPathセレクタならそのままコピー
-        if sel.startswith("//"):
+        if sel.startswith("//") or sel.startswith("(/"):
             _clipboard_copy(sel)
             snack(f"XPathコピー: {sel[:50]}"); return
         # CSSセレクタからXPathを生成（ブラウザ使用）
@@ -3346,21 +3768,23 @@ def _main_inner(page: ft.Page):
 
     # ── Project Export / Import ──
     def export_project(e):
-        """Export pages, tests, and pattern sets as a single JSON project file."""
+        """Export pages, tests, pattern sets, config, and selector bank as a single JSON project file."""
         try:
             save_all()
+            proj_name = _current_project_name() or "project"
             project_data = {
                 "app": APP_NAME, "version": APP_VERSION,
+                "project_name": proj_name,
                 "pages": state["pages"],
                 "tests": state["tests"],
                 "pattern_sets": state["pattern_sets"],
+                "config": state["config"],
+                "selector_bank": state["selector_bank"],
             }
             outdir = state["config"].get("output_dir", os.path.join(get_app_dir(), "screenshots"))
             os.makedirs(outdir, exist_ok=True)
-            # Build default filename from first page name
-            first_name = state["pages"][0]["name"] if state["pages"] else "project"
             ts = datetime.now().strftime("%Y%m%d%H%M%S")
-            fp = os.path.join(outdir, f"{_safe_filename(first_name, 30)}_{ts}.yshot.json")
+            fp = os.path.join(outdir, f"{_safe_filename(proj_name, 30)}_{ts}.yshot.json")
             with open(fp, "w", encoding="utf-8") as f:
                 json.dump(project_data, f, ensure_ascii=False, indent=2)
             snack(f"エクスポート: {fp}")
@@ -3389,6 +3813,7 @@ def _main_inner(page: ft.Page):
                     for fn2 in os.listdir(fp):
                         if fn2.endswith(".yshot.json"):
                             found_files.append(os.path.join(fp, fn2))
+        found_files = list(dict.fromkeys(os.path.normpath(p) for p in found_files))
         found_files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
 
         path_field = ft.TextField(label="ファイルパス", width=450, hint_text=".yshot.json ファイルのパスを入力",
@@ -3398,17 +3823,9 @@ def _main_inner(page: ft.Page):
                      ft.dropdown.Option(key="merge", text="マージ（現在のデータに追加）"),
                      ft.dropdown.Option(key="new_project", text="新規プロジェクトとしてインポート")])
         preview_text = ft.Text("", size=11, color=ft.Colors.GREY_600)
-        file_list_col = ft.Column(spacing=2, scroll=ft.ScrollMode.AUTO, height=120)
 
-        def _set_path(p):
+        def _update_preview(p):
             path_field.value = p
-            # Highlight selected file
-            for ctrl in file_list_col.controls:
-                if isinstance(ctrl, ft.Container):
-                    is_sel = (ctrl.data == p)
-                    ctrl.bgcolor = ft.Colors.BLUE_50 if is_sel else None
-                    ctrl.border = ft.Border.all(1, ft.Colors.BLUE_300) if is_sel else ft.Border.all(1, ft.Colors.GREY_200)
-            # Preview
             try:
                 with open(p, "r", encoding="utf-8") as pf:
                     pd = json.load(pf)
@@ -3416,31 +3833,37 @@ def _main_inner(page: ft.Page):
                 n_tests = len(pd.get("tests", []))
                 n_pats = len(pd.get("pattern_sets", {}))
                 ver = pd.get("version", "?")
+                pname = pd.get("project_name", "")
+                has_config = "設定あり" if pd.get("config") else "設定なし"
                 urls = [pg.get("url","") for pg in pd.get("pages",[]) if pg.get("url","")]
-                url_hint = urls[0][:40] + "..." if urls and len(urls[0]) > 40 else (urls[0] if urls else "URL未設定")
-                preview_text.value = f"v{ver} | {n_pages}ページ, {n_tests}テスト, {n_pats}パターン | {url_hint}"
+                proj_url = pd.get("config", {}).get("project_url", "")
+                url_hint = proj_url[:40] if proj_url else (urls[0][:40] if urls else "URL未設定")
+                if len(url_hint) >= 40: url_hint += "..."
+                name_hint = f"「{pname}」 " if pname else ""
+                preview_text.value = f"{name_hint}v{ver} | {n_pages}ページ, {n_tests}テスト, {n_pats}パターン, {has_config} | {url_hint}"
             except Exception:
                 preview_text.value = "プレビュー読込失敗"
-            page.update()
+            try: page.update()
+            except Exception: pass
+
+        def _on_file_select(e):
+            if file_radio.value:
+                _update_preview(file_radio.value)
 
         if found_files:
-            for fp in found_files[:10]:
-                fn = os.path.basename(fp)
-                file_list_col.controls.append(
-                    ft.Container(
-                        ft.Text(fn, size=12),
-                        padding=ft.Padding(10, 6, 10, 6), border_radius=4,
-                        border=ft.Border.all(1, ft.Colors.GREY_200),
-                        on_click=lambda e, p=fp: _set_path(p), data=fp, ink=True))
+            file_radio = ft.RadioGroup(
+                content=ft.Column([
+                    ft.Radio(value=fp, label=os.path.basename(fp)) for fp in found_files[:10]
+                ], spacing=2, scroll=ft.ScrollMode.AUTO, height=140),
+                value=found_files[0],
+                on_change=_on_file_select)
+            _update_preview(found_files[0])
         else:
-            file_list_col.controls.append(ft.Text("検出されたプロジェクトファイルなし", size=11, color=ft.Colors.GREY_500))
-
-        # Auto-preview first file
-        if found_files: _set_path(found_files[0])
+            file_radio = ft.Column([ft.Text("検出されたプロジェクトファイルなし", size=11, color=ft.Colors.GREY_500)])
 
         def on_ok(e):
             try:
-                fp = path_field.value.strip()
+                fp = (hasattr(file_radio, 'value') and file_radio.value or "").strip() or path_field.value.strip()
                 if not fp or not os.path.isfile(fp):
                     snack("ファイルが見つかりません", ft.Colors.RED_700); return
                 with open(fp, "r", encoding="utf-8") as f:
@@ -3451,11 +3874,18 @@ def _main_inner(page: ft.Page):
                 imp_pages = data.get("pages", [])
                 imp_tests = data.get("tests", [])
                 imp_pats = data.get("pattern_sets", {})
+                imp_config = {k: v for k, v in data.get("config", {}).items() if k != "output_dir"}
+                imp_selbank = data.get("selector_bank", {})
+                # Sanitize: strip \r\n from names (common with Windows CRLF data)
+                for _t in imp_tests:
+                    if "name" in _t: _t["name"] = _t["name"].replace("\r","").replace("\n","").strip()
+                for _p in imp_pages:
+                    if "name" in _p: _p["name"] = _p["name"].replace("\r","").replace("\n","").strip()
 
                 if mode_dd.value == "new_project":
                     # Create a new project and import data into it
                     save_all()
-                    proj_name = os.path.basename(fp).replace(".yshot.json", "") or "Imported"
+                    proj_name = data.get("project_name") or os.path.basename(fp).replace(".yshot.json", "") or "Imported"
                     new_id = _new_project_id(_projects_registry)
                     dir_name = _safe_dir_name(proj_name)
                     base_dir = dir_name; counter = 1
@@ -3470,7 +3900,12 @@ def _main_inner(page: ft.Page):
                     state["pages"] = imp_pages
                     state["tests"] = imp_tests
                     state["pattern_sets"] = imp_pats
-                    state["selector_bank"] = {}
+                    state["selector_bank"] = imp_selbank
+                    # 新規プロジェクトでは旧configをクリアし、output_dirだけ現マシンの値を保持
+                    kept_output_dir = state["config"].get("output_dir", "")
+                    state["config"] = dict(imp_config)
+                    if kept_output_dir:
+                        state["config"]["output_dir"] = kept_output_dir
                     _reinit_id_counters()
                     _ensure_default_page()
                     auto_number_tests()
@@ -3492,13 +3927,24 @@ def _main_inner(page: ft.Page):
                     state["pages"] = imp_pages
                     state["tests"] = imp_tests
                     state["pattern_sets"] = imp_pats
+                    if "config" in data:
+                        state["config"].update(imp_config)
+                    if "selector_bank" in data:
+                        state["selector_bank"] = imp_selbank
                 else:
-                    # Merge: remap IDs to avoid collision
+                    # Merge: remap IDs and page numbers to avoid collision
+                    _reinit_id_counters()  # カウンタを現状に合わせてからID生成する
+                    # 既存ページの最大番号を取得して続き番号を振る
+                    max_page_num = 0
+                    for pg in state["pages"]:
+                        try: max_page_num = max(max_page_num, int(pg.get("number", 0)))
+                        except (ValueError, TypeError): pass
                     page_id_map = {}
-                    for pg in imp_pages:
+                    for i, pg in enumerate(imp_pages):
                         old_id = pg["_id"]
                         new_id = _new_page_id()
                         pg["_id"] = new_id
+                        pg["number"] = str(max_page_num + 1 + i)
                         page_id_map[old_id] = new_id
                     for tc in imp_tests:
                         tc["_id"] = _new_tc_id()
@@ -3524,6 +3970,11 @@ def _main_inner(page: ft.Page):
                             old_pat = tc.get("pattern")
                             if old_pat in pat_name_map:
                                 tc["pattern"] = pat_name_map[old_pat]
+                    # Merge selector bank (import側で上書きしない、既存を優先)
+                    if imp_selbank:
+                        for url, sels in imp_selbank.items():
+                            if url not in state["selector_bank"]:
+                                state["selector_bank"][url] = sels
 
                 _reinit_id_counters()
                 _ensure_default_page()
@@ -3544,9 +3995,13 @@ def _main_inner(page: ft.Page):
                 _log_error("import_project", x); snack(f"インポート失敗: {x}", ft.Colors.RED_600)
 
         dlg = ft.AlertDialog(title=ft.Text("プロジェクトインポート"),
-            content=ft.Column([path_field, preview_text, mode_dd,
-                ft.Text("検出されたファイル:", size=11, weight=ft.FontWeight.BOLD),
-                file_list_col], tight=True, spacing=10, width=500),
+            content=ft.Column([
+                ft.Text("ファイルを選択:", size=12, weight=ft.FontWeight.BOLD),
+                file_radio,
+                preview_text,
+                mode_dd,
+                path_field,
+            ], tight=True, spacing=10, width=500),
             actions=[ft.TextButton("インポート", on_click=on_ok),
                      ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
@@ -3603,7 +4058,11 @@ def _main_inner(page: ft.Page):
             progress.value = current / total if total > 0 else None
             label = f"{current}/{total} パターン"
             if tc_label: label += f" — {tc_label}"
-            progress_label.value = label; page.update()
+            progress_label.value = label
+            try: progress.update(); progress_label.update()
+            except Exception:
+                try: page.update()
+                except Exception: pass
         def on_done(outdir=None):
             state["running"] = False
             run_btn.disabled = False; run_single_btn.disabled = False; run_page_btn.disabled = False
@@ -3645,6 +4104,8 @@ def _main_inner(page: ft.Page):
 
     # ── Build controls ──
     _init_browser_url = cfg.get("browser_url","")
+    if not _init_browser_url:
+        _init_browser_url = state["config"].get("project_url", "").strip()
     if not _init_browser_url:
         _init_pg = cur_page()
         if _init_pg: _init_browser_url = _init_pg.get("url", "")
@@ -3971,7 +4432,7 @@ def _main_inner(page: ft.Page):
                             ft.Button("テンプレート", icon=ft.Icons.FOLDER_OPEN, on_click=load_template),
                             ft.Button("文字max", icon=ft.Icons.STRAIGHTEN, on_click=gen_input_check, tooltip="max_length境界値(文字)"),
                             ft.Button("数値max", icon=ft.Icons.PIN, on_click=gen_numeric_check, tooltip="max_length境界値(半角数値)"),
-                            ft.Button("CSVエクスポート", icon=ft.Icons.DOWNLOAD, on_click=export_csv)], spacing=4)],
+                            ft.Button("CSVエクスポート", icon=ft.Icons.FILE_UPLOAD, on_click=export_csv)], spacing=4)],
                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             ft.Container(pat_items, expand=True, padding=ft.Padding(4,4,4,4),
                 border=ft.Border.all(1, ft.Colors.GREY_200), border_radius=6),

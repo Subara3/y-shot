@@ -28,7 +28,7 @@ def _setup_logger():
 _flog = _setup_logger()
 
 APP_NAME = "y-diff"
-APP_VERSION = "1.4"
+APP_VERSION = "1.5"
 
 # ============================================================
 # Constants
@@ -74,60 +74,86 @@ _NOISE_PATTERNS = [
     # "php_warning" by classify_line() so they remain visible for VU review.
 ]
 
+# Pre-compiled patterns for normalize() — avoids recompilation on each call
+_RE_TRAILING_WS = re.compile(r'[ \t]+$', re.M)
+_RE_BLANK_LINES = re.compile(r'\n{3,}')
+_RE_EMPTY_LINES = re.compile(r'^\s*\n', re.M)
+_RE_GTM_BLOCK = re.compile(r'<script>\s*\(function\(w,\s*d,\s*s,\s*l,\s*i\).*?</script>', re.S)
+_RE_SCRIPT = re.compile(r'<script\b[^>]*>.*?</script>', re.S)
+_RE_PRE = re.compile(r'<pre\b[^>]*>.*?</pre>', re.S)
+_RE_CODE = re.compile(r'<code\b[^>]*>.*?</code>', re.S)
+_RE_JS_IF = re.compile(r'if\s*\(')
+_RE_JS_FUNC = re.compile(r'\s*\(\s*function\s*\(')
+_RE_JS_SEMI = re.compile(r'\)\s*;\s*')
+_RE_JS_ELSE = re.compile(r'\}\s*else\s*\{')
+_RE_JS_BRACE = re.compile(r'\)\s*\{')
+_RE_JS_COMMA = re.compile(r',\s+')
+_RE_JS_PAREN_L = re.compile(r'\(\s+')
+_RE_JS_PAREN_R = re.compile(r'\s+\)')
+_RE_JS_QUOTE_L = re.compile(r"\(\s*'")
+_RE_JS_QUOTE_R = re.compile(r"'\s*\)")
+_RE_COLLAPSE_WS = re.compile(r'\s+')
+_RE_EMPTY_SCRIPT = re.compile(r'<script[^>]*>\s*</script>')
+_RE_EMPTY_STYLE = re.compile(r'<style[^>]*>\s*</style>')
+_RE_CLOSE_STRUCT = re.compile(r'</(head|body|html)>')
+_RE_BLOCK_SPLIT = re.compile(r'><(?=(html|head|body|div|p|form|table|tr|td|th|ul|ol|li|section|article|nav|header|footer|main|aside|h[1-6]|script|style|link|meta|hr|br|noscript|iframe|input|select|textarea|button|label|img|a\b|span)\b)')
+_RE_COMMENT_OPEN = re.compile(r'><!--')
+_RE_COMMENT_CLOSE = re.compile(r'--><')
+_RE_NOISE_REMNANT = re.compile(r'<!-- __(?:TRACKING|GTM_BLOCK|GTM_NS)__ -->')
+_RE_GTM_COMMENT = re.compile(r'/\* __GTM[^*]*\*/')
+
 def normalize(html):
     s = html.replace('\r\n', '\n').replace('\r', '\n')
     s = s.replace('\t', '  ')
-    s = re.sub(r'[ \t]+$', '', s, flags=re.M)
-    s = re.sub(r'\n{3,}', '\n\n', s)
-    s = re.sub(r'^\s*\n', '', s, flags=re.M)
+    s = _RE_TRAILING_WS.sub('', s)
+    s = _RE_BLANK_LINES.sub('\n\n', s)
+    s = _RE_EMPTY_LINES.sub('', s)
     # 1. Noise patterns FIRST (before tag joining, so line-based patterns still work)
     for pat, repl in _NOISE_PATTERNS:
         s = pat.sub(repl, s)
     # 2. Remove entire GTM/tracking script blocks (multiline, greedy but bounded)
-    s = re.sub(r'<script>\s*\(function\(w,\s*d,\s*s,\s*l,\s*i\).*?</script>', '<!-- __GTM_BLOCK__ -->', s, flags=re.S)
+    s = _RE_GTM_BLOCK.sub('<!-- __GTM_BLOCK__ -->', s)
     # 3. Protect <script>, <pre>, <code> content — replace with placeholders before whitespace normalization
     _protected = []
     def _protect(m):
         _protected.append(m.group(0))
         return f'__PROTECTED_{len(_protected)-1}__'
-    s = re.sub(r'<script\b[^>]*>.*?</script>', _protect, s, flags=re.S)
-    s = re.sub(r'<pre\b[^>]*>.*?</pre>', _protect, s, flags=re.S)
-    s = re.sub(r'<code\b[^>]*>.*?</code>', _protect, s, flags=re.S)
+    s = _RE_SCRIPT.sub(_protect, s)
+    s = _RE_PRE.sub(_protect, s)
+    s = _RE_CODE.sub(_protect, s)
     # 4. JS formatting normalization (only for non-protected HTML)
-    s = re.sub(r'if\s*\(', 'if(', s)                              # if ( → if(
-    s = re.sub(r'\s*\(\s*function\s*\(', '(function(', s)
-    s = re.sub(r'\)\s*;\s*', ');', s)
-    s = re.sub(r'\}\s*else\s*\{', '}else{', s)
-    s = re.sub(r'\)\s*\{', '){', s)
-    s = re.sub(r',\s+', ',', s)
-    s = re.sub(r'\(\s+', '(', s)
-    s = re.sub(r'\s+\)', ')', s)
-    s = re.sub(r'\(\s*\'', "('", s)                               # ( ' → ('
-    s = re.sub(r'\'\s*\)', "')", s)                               # ' ) → ')
+    s = _RE_JS_IF.sub('if(', s)
+    s = _RE_JS_FUNC.sub('(function(', s)
+    s = _RE_JS_SEMI.sub(');', s)
+    s = _RE_JS_ELSE.sub('}else{', s)
+    s = _RE_JS_BRACE.sub('){', s)
+    s = _RE_JS_COMMA.sub(',', s)
+    s = _RE_JS_PAREN_L.sub('(', s)
+    s = _RE_JS_PAREN_R.sub(')', s)
+    s = _RE_JS_QUOTE_L.sub("('", s)
+    s = _RE_JS_QUOTE_R.sub("')", s)
     # 5. Collapse all whitespace (tabs, newlines, spaces) into single spaces
-    s = re.sub(r'\s+', ' ', s)
+    s = _RE_COLLAPSE_WS.sub(' ', s)
     # 6. Clean up spaces around tags
-    s = re.sub(r'> <', '><', s)
+    s = s.replace('> <', '><')
     # Restore protected blocks
     for i, block in enumerate(_protected):
-        # Normalize only basic whitespace within protected blocks (not aggressive)
         block = block.replace('\r\n', '\n').replace('\r', '\n')
-        block = re.sub(r'[ \t]+$', '', block, flags=re.M)
+        block = _RE_TRAILING_WS.sub('', block)
         s = s.replace(f'__PROTECTED_{i}__', block)
-    # 6. Remove empty script/style tags (browser-injected remnants)
-    s = re.sub(r'<script[^>]*>\s*</script>', '', s)
-    s = re.sub(r'<style[^>]*>\s*</style>', '', s)
-    # 7. Remove standalone closing tags for structural elements (they're implicit in HTML5)
-    s = re.sub(r'</(head|body|html)>', '', s)
-    # 8. Split into lines at block-level OPENING tag boundaries for readable diff
-    s = re.sub(r'><(?=(html|head|body|div|p|form|table|tr|td|th|ul|ol|li|section|article|nav|header|footer|main|aside|h[1-6]|script|style|link|meta|hr|br|noscript|iframe|input|select|textarea|button|label|img|a\b|span)\b)', '>\n<', s)
-    # Also split before HTML comments
-    s = re.sub(r'><!--', '>\n<!--', s)
-    s = re.sub(r'--><', '-->\n<', s)
-    # 6. Remove all noise placeholder remnants
-    s = re.sub(r'<!-- __(?:TRACKING|GTM_BLOCK|GTM_NS)__ -->', '', s)
-    s = re.sub(r'/\* __GTM[^*]*\*/', '', s)
-    s = re.sub(r'^\s*\n', '', s, flags=re.M)
+    # 7. Remove empty script/style tags (browser-injected remnants)
+    s = _RE_EMPTY_SCRIPT.sub('', s)
+    s = _RE_EMPTY_STYLE.sub('', s)
+    # 8. Remove standalone closing tags for structural elements
+    s = _RE_CLOSE_STRUCT.sub('', s)
+    # 9. Split into lines at block-level OPENING tag boundaries for readable diff
+    s = _RE_BLOCK_SPLIT.sub('>\n<', s)
+    s = _RE_COMMENT_OPEN.sub('>\n<!--', s)
+    s = _RE_COMMENT_CLOSE.sub('-->\n<', s)
+    # 10. Remove all noise placeholder remnants
+    s = _RE_NOISE_REMNANT.sub('', s)
+    s = _RE_GTM_COMMENT.sub('', s)
+    s = _RE_EMPTY_LINES.sub('', s)
     return s
 
 def _extract_text_content(html_line):
@@ -219,8 +245,8 @@ def compare_images(path_a, path_b):
     """Compare two PNG images. Returns (same: bool, diff_pct: float, diff_img_path: str|None)."""
     try:
         from PIL import Image, ImageChops, ImageDraw, ImageFilter
-        img_a = Image.open(path_a).convert("RGB")
-        img_b = Image.open(path_b).convert("RGB")
+        _img_a_raw = Image.open(path_a); img_a = _img_a_raw.convert("RGB"); _img_a_raw.close()
+        _img_b_raw = Image.open(path_b); img_b = _img_b_raw.convert("RGB"); _img_b_raw.close()
         if img_a.size != img_b.size:
             # Generate side-by-side for size mismatch
             diff_dir = os.path.dirname(path_b)
@@ -320,31 +346,35 @@ def read_file(path):
     except Exception as x:
         return f"<!-- ERROR: {x} -->"
 
+# Pre-compiled noise detection patterns for compute_diff (avoid recompilation per line)
+_NOISE_MARKER_PAT = re.compile(r'__(?:NORM|D4|D2|T2|TS|NONCE|CACHE|TRACKING|GTM|UUID|VER|ADS|TW_ID|GTM_BLOCK|GTM_INIT|GTM_PUSH|GTM_END|GTM_NS)__')
+_NOISE_STRIP_PAT = re.compile(r'__(?:D4|D2|T2|TS|NORM|NONCE|CACHE|UUID|VER|TRACKING|GTM|GTM_BLOCK|GTM_INIT|GTM_PUSH|GTM_END|GTM_NS|ADS|TW_ID)__')
+
+def _is_noise(text_a, text_b=None):
+    """Check if a change is noise. For replace ops, both lines must be noise-only."""
+    if not ('__' in (text_a or '')):
+        return False
+    if not _NOISE_MARKER_PAT.search(text_a or ''):
+        return False
+    if text_b is not None:
+        struct_a = _NOISE_STRIP_PAT.sub('##', text_a or '')
+        struct_b = _NOISE_STRIP_PAT.sub('##', text_b or '')
+        if struct_a != struct_b:
+            return False
+    return True
+
+def compute_diff_normalized(norm_a, norm_b):
+    """Compute diff from already-normalized text (avoids double normalization)."""
+    return _compute_diff_lines(norm_a.splitlines(keepends=True), norm_b.splitlines(keepends=True))
+
 def compute_diff(text_a, text_b):
-    lines_a = normalize(text_a).splitlines(keepends=True)
-    lines_b = normalize(text_b).splitlines(keepends=True)
+    return _compute_diff_lines(normalize(text_a).splitlines(keepends=True), normalize(text_b).splitlines(keepends=True))
+
+def _compute_diff_lines(lines_a, lines_b):
     sm = difflib.SequenceMatcher(None, lines_a, lines_b)
     ops = []
     stats = {"same": 0, "add": 0, "del": 0, "change": 0, "noise": 0, "php_warning": 0}
     cat_counts = {"form": 0, "content": 0, "structural": 0, "noise": 0, "php_warning": 0}
-    def _is_noise(text_a, text_b=None):
-        """Check if a change is noise. For replace ops, both lines must be noise-only."""
-        if not ('__' in (text_a or '')):
-            return False
-        markers = ('__NORM__','__D4__','__D2__','__T2__','__TS__','__NONCE__','__CACHE__',
-             '__TRACKING__','__GTM__','__UUID__','__VER__',
-             '__ADS__','__TW_ID__','__GTM_BLOCK__','__GTM_FID__')
-        has_marker = any(m in (text_a or '') for m in markers)
-        if not has_marker:
-            return False
-        if text_b is not None and has_marker:
-            import re as _re
-            strip_pat = _re.compile(r'__(?:D4|D2|T2|TS|NORM|NONCE|CACHE|UUID|VER)__')
-            struct_a = strip_pat.sub('##', text_a or '')
-            struct_b = strip_pat.sub('##', text_b or '')
-            if struct_a != struct_b:
-                return False
-        return True
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == 'equal':
             for k in range(i2 - i1):
@@ -637,13 +667,15 @@ def main(page: ft.Page):
                     pb = _get_file_path(files_b[k], src)
                     if pa and pb:
                         ta = read_file(pa); tb = read_file(pb)
-                        if normalize(ta) == normalize(tb):
+                        na = normalize(ta); nb = normalize(tb)
+                        if na == nb:
                             status = "same"
                             stats = {"same": len(ta.splitlines()), "add":0, "del":0, "change":0, "noise":0, "php_warning":0}
                             cat_counts = {}
                         else:
                             status = "diff"
-                            # diff計算は選択時に遅延実行（スキャン高速化）
+                            # 正規化済みテキストをキャッシュ（compute_diffで再利用）
+                            diff_cache[k] = ("_normalized", na, nb)
                     else:
                         status = "same"
                 matched.append({"key": k, "in_a": in_a, "in_b": in_b, "status": status, "stats": stats, "cat_counts": cat_counts})
@@ -748,8 +780,10 @@ def main(page: ft.Page):
                 if m["status"] == "same": icon = ft.Icon(ft.Icons.CHECK, size=14, color=ft.Colors.GREEN_500)
                 elif m["status"] == "diff": icon = ft.Icon(ft.Icons.COMPARE_ARROWS, size=14, color=ft.Colors.ORANGE_600)
                 else: icon = ft.Icon(ft.Icons.ARROW_FORWARD if m["in_a"] else ft.Icons.ARROW_BACK, size=14, color=ft.Colors.GREY_500)
-                mark_color = dict((o[0], o[2]) for o in MARK_OPTIONS).get(mark, ft.Colors.GREY_400)
-                mark_icon = ft.Icon(MARK_ICONS.get(mark, ft.Icons.RADIO_BUTTON_UNCHECKED), size=12, color=mark_color)
+                item_review = state["review"].get(m["key"], {})
+                item_mark = item_review.get("mark", "unreviewed")
+                mark_color = dict((o[0], o[2]) for o in MARK_OPTIONS).get(item_mark, ft.Colors.GREY_400)
+                mark_icon = ft.Icon(MARK_ICONS.get(item_mark, ft.Icons.RADIO_BUTTON_UNCHECKED), size=12, color=mark_color)
                 sub_parts = []
                 if state["view_mode"] == "image":
                     if "diff_pct" in m and m["diff_pct"] >= 0:
@@ -763,8 +797,8 @@ def main(page: ft.Page):
                     if m.get("cat_counts"):
                         for c in ("php_warning", "form", "content", "structural"):
                             if m["cat_counts"].get(c, 0): sub_parts.append(f"{c}:{m['cat_counts'][c]}")
-                note = review.get("note", "")
-                if note: sub_parts.append(f"memo:{note[:15]}")
+                item_note = item_review.get("note", "")
+                if item_note: sub_parts.append(f"memo:{item_note[:15]}")
                 subtitle = " | ".join(sub_parts) if sub_parts else ("一致" if m["status"] == "same" else ("差分あり" if m["status"] == "diff" else ""))
                 display_name = m["key"]
                 if len(display_name) > 50: display_name = "..." + display_name[-47:]
@@ -856,16 +890,22 @@ def main(page: ft.Page):
                 if update: page.update()
                 return
             # Use cached diff if available
-            if key in state["diff_cache"]:
-                ops, stats, cat_counts = state["diff_cache"][key]
+            cached = state["diff_cache"].get(key)
+            if cached and cached[0] != "_normalized":
+                ops, stats, cat_counts = cached
             else:
-                fa, fb = state["files_a"], state["files_b"]
-                src = state["src_type"]
-                fa_entry = fa.get(key, {}); fb_entry = fb.get(key, {})
-                pa = _get_file_path(fa_entry, src)
-                pb = _get_file_path(fb_entry, src)
-                ta = read_file(pa) if pa else ""; tb = read_file(pb) if pb else ""
-                ops, stats, cat_counts = compute_diff(ta, tb)
+                # スキャン時にキャッシュされた正規化テキストがあれば再利用
+                if cached and cached[0] == "_normalized":
+                    na, nb = cached[1], cached[2]
+                    ops, stats, cat_counts = compute_diff_normalized(na, nb)
+                else:
+                    fa, fb = state["files_a"], state["files_b"]
+                    src = state["src_type"]
+                    fa_entry = fa.get(key, {}); fb_entry = fb.get(key, {})
+                    pa = _get_file_path(fa_entry, src)
+                    pb = _get_file_path(fb_entry, src)
+                    ta = read_file(pa) if pa else ""; tb = read_file(pb) if pb else ""
+                    ops, stats, cat_counts = compute_diff(ta, tb)
                 state["diff_cache"][key] = (ops, stats, cat_counts)
                 # matchedリストのstats/cat_countsも更新
                 if m: m["stats"] = stats; m["cat_counts"] = cat_counts
@@ -880,6 +920,7 @@ def main(page: ft.Page):
                 cats = " | ".join(f"{c}:{n}" for c, n in cat_counts.items() if n > 0 and c != "noise")
                 if cats: summary += f" | {cats}"
             diff_summary.value = summary
+            diff_summary.color = ft.Colors.GREY_600
             visible_indices = set()
             for i, op in enumerate(ops):
                 if op[0] != '=':
@@ -1030,17 +1071,30 @@ def main(page: ft.Page):
         except Exception as x: _flog.error(f"on_note_change: {x}")
 
     def _find_diff_file(direction):
-        """Find next/prev file with diff status. direction: 1=next, -1=prev."""
+        """Find next/prev file with diff status, respecting active filters. direction: 1=next, -1=prev."""
         matched = state["img_matched"] if state["view_mode"] == "image" else state["matched"]
         if not matched: return None
+        try: filter_mark = mark_filter_dd.value
+        except Exception: filter_mark = "all"
+        try: filter_status = status_filter_dd.value
+        except Exception: filter_status = "all"
+        # フィルタ適用済みリストを作成
+        visible = []
+        for m in matched:
+            rv = state["review"].get(m["key"], {})
+            mk = rv.get("mark", "unreviewed")
+            if filter_mark and filter_mark != "all" and mk != filter_mark: continue
+            if filter_status and filter_status != "all" and m["status"] != filter_status: continue
+            visible.append(m)
+        if not visible: return None
         sel = state["selected_key"]
-        idx = next((i for i, m in enumerate(matched) if m["key"] == sel), -1)
+        idx = next((i for i, m in enumerate(visible) if m["key"] == sel), -1)
         start = idx + direction
-        end = len(matched) if direction > 0 else -1
-        if start < 0 or start >= len(matched): return None
+        end = len(visible) if direction > 0 else -1
+        if start < 0 or start >= len(visible): return None
         for i in range(start, end, direction):
-            if 0 <= i < len(matched) and matched[i].get("status") == "diff":
-                return matched[i]["key"]
+            if 0 <= i < len(visible) and visible[i].get("status") == "diff":
+                return visible[i]["key"]
         return None
 
     def on_next(e):
@@ -1066,15 +1120,20 @@ def main(page: ft.Page):
     # B3: Mark all same files as OK
     def mark_all_same_ok(e):
         count = 0
-        for m in state["matched"]:
-            if m["status"] == "same":
-                state["review"].setdefault(m["key"], {})["mark"] = "ok"
-                count += 1
+        # ソースと画像の両方を対象にする
+        for items in [state["matched"], state["img_matched"]]:
+            for m in items:
+                if m["status"] == "same":
+                    r = state["review"].setdefault(m["key"], {})
+                    if r.get("mark", "unreviewed") == "unreviewed":
+                        r["mark"] = "ok"
+                        count += 1
         save_review(state["folder_b"], state["review"])
         refresh_file_list(); snack(f"一致ファイル {count} 件を OK にマーク")
 
     # B6: Enhanced report (HTML format)
     def export_report(e):
+        from html import escape as _h
         ts = datetime.now().strftime('%Y-%m-%d %H:%M')
         total = len(state["matched"])
         reviewed = sum(1 for m in state["matched"] if state["review"].get(m["key"], {}).get("mark", "unreviewed") != "unreviewed")
@@ -1088,7 +1147,7 @@ def main(page: ft.Page):
             '.stats{display:flex;gap:20px;margin:12px 0;font-size:14px}',
             '</style></head><body>',
             f'<h1>y-diff レビューレポート</h1>',
-            f'<p>日時: {ts}<br>ベース: {state["folder_a"]}<br>比較: {state["folder_b"]}</p>',
+            f'<p>日時: {ts}<br>ベース: {_h(state["folder_a"])}<br>比較: {_h(state["folder_b"])}</p>',
             f'<div class="stats"><span>合計: {total}</span><span>レビュー済: {reviewed}/{total}</span></div>',
         ]
         for mark_key, mark_label, _ in MARK_OPTIONS:
@@ -1101,7 +1160,7 @@ def main(page: ft.Page):
                 diff_str = f"変更{s.get('change',0)} 追加{s.get('add',0)} 削除{s.get('del',0)}" if s else "-"
                 cc = m.get("cat_counts") or {}
                 cat_str = ", ".join(f"{c}:{n}" for c, n in cc.items() if n > 0) if cc else "-"
-                html_parts.append(f'<tr><td>{m["key"]}</td><td>{diff_str}</td><td>{cat_str}</td><td>{note}</td></tr>')
+                html_parts.append(f'<tr><td>{_h(m["key"])}</td><td>{_h(diff_str)}</td><td>{_h(cat_str)}</td><td>{_h(note)}</td></tr>')
             html_parts.append('</table>')
         html_parts.append('</body></html>')
         report_dir = os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv else __file__))

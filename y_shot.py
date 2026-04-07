@@ -4087,10 +4087,11 @@ def _main_inner(page: ft.Page):
             actions=[ft.TextButton("実行", on_click=on_yes), ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
     def run_single(idx):
-        if 0 <= idx < len(state["tests"]):
-            tc = state["tests"][idx]
-            label = f"【{tc.get('number','')}_{tc.get('name','')}】"
-            _do_run([tc], label)
+        if not (0 <= idx < len(state["tests"])):
+            snack("テストケースを選択してください", ft.Colors.ORANGE_700); return
+        tc = state["tests"][idx]
+        label = f"【{tc.get('number','')}_{tc.get('name','')}】"
+        _do_run([tc], label)
     def stop_click(e):
         ev = state.get("stop_event")
         if ev: ev.set(); stop_btn.disabled = True; log("[中断] 中断リクエスト送信..."); page.update()

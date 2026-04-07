@@ -27,7 +27,7 @@ from urllib.parse import urlparse, urlunparse
 import flet as ft
 
 APP_NAME = "y-shot"
-APP_VERSION = "2.6"
+APP_VERSION = "2.7"
 APP_AUTHOR = "Yuri Norimatsu"
 
 # ── Constants ──
@@ -71,6 +71,11 @@ def _sel_by(selector):
     if selector.startswith("//") or selector.startswith("(/"):
         return (By.XPATH, selector)
     return (By.CSS_SELECTOR, selector)
+
+def _safe_float(val, default=1.0):
+    """float変換 — 不正値はdefaultにフォールバック"""
+    try: return float(val)
+    except (ValueError, TypeError): return default
 
 # ── JS-based bulk element collection (replaces per-element round-trips) ──
 _JS_COLLECT_ELEMENTS = """
@@ -850,23 +855,23 @@ def step_short(step):
     if t == "見出し": return step.get("text","")
     if t == "コメント": return step.get("text","")
     if t == "入力":
-        v = step.get("value","{パターン}")
+        v = step.get("value") or "{パターン}"
         if len(v) > 20: v = v[:17]+"..."
-        sel = step.get("selector","")
+        sel = step.get("selector") or ""
         if len(sel) > 20: sel = sel[:17]+"..."
         mode_label = {"append": "[追記]", "clear": "[クリア]"}.get(step.get("input_mode",""), "")
         return f"{sel} \u2190 {v} {mode_label}".strip()
     if t == "クリック":
-        sel = step.get("selector","")
+        sel = step.get("selector") or ""
         if sel == "{パターン}": return "{パターン} (全パターン)"
         return sel[:30]+"..." if len(sel) > 30 else sel
     if t == "ホバー":
-        sel = step.get("selector","")
+        sel = step.get("selector") or ""
         return sel[:30]+"..." if len(sel) > 30 else sel
     if t == "選択":
-        sel = step.get("selector","")
+        sel = step.get("selector") or ""
         if len(sel) > 20: sel = sel[:17]+"..."
-        v = step.get("value","")
+        v = step.get("value") or ""
         if len(v) > 15: v = v[:12]+"..."
         return f"{sel} \u2190 [{v}]"
     if t == "戻る": return f"ブラウザバック +{step.get('seconds','1.0')}秒"
@@ -875,7 +880,7 @@ def step_short(step):
     if t == "アラートキャンセル": return "ダイアログキャンセル"
     if t == "セッション削除": return "Cookie/セッション全削除"
     if t == "ナビゲーション":
-        url = step.get("url","")
+        url = step.get("url") or ""
         return url[:40]+"..." if len(url) > 40 else url
     if t == "待機": return f"{step.get('seconds','1.0')}秒"
     if t == "スクロール":
@@ -886,7 +891,7 @@ def step_short(step):
         if len(sel) > 25: sel = sel[:22]+"..."
         return f"→ {sel}"
     if t == "要素待機":
-        sel = step.get("selector",""); timeout = step.get("seconds","10")
+        sel = step.get("selector") or ""; timeout = step.get("seconds") or "10"
         if len(sel) > 25: sel = sel[:22]+"..."
         return f"{sel} (最大{timeout}秒)"
     if t == "スクショ":
@@ -898,8 +903,8 @@ def step_short(step):
             return {"post":"POST値","state":"要素状態","attrs":"要素属性"}.get(m, m)
         return "要素のみ"
     if t == "検証":
-        m = step.get("verify_type","attrs")
-        sel = step.get("selector","")
+        m = step.get("verify_type") or "attrs"
+        sel = step.get("selector") or ""
         label = {"post":"POST値","state":"要素状態","attrs":"要素属性"}.get(m, m)
         if sel:
             if len(sel) > 25: sel = sel[:22]+"..."
@@ -1232,6 +1237,11 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         # (skip for alert steps — switch_to.default_content() auto-dismisses confirm dialogs)
                         try: driver.switch_to.default_content()
                         except Exception: pass
+                    # 空セレクタの事前チェック（セレクタ必須のステップ）
+                    _needs_sel = st in ("入力", "クリック", "ホバー", "選択", "要素待機")
+                    if _needs_sel and not step.get("selector", "").strip():
+                        log_cb(f"  S{si} [WARN] セレクタ未設定 — スキップ ({st})")
+                        _step_failed = True; continue
                     if st == "入力":
                         sel = step.get("selector","")
                         iv = step.get("value","{パターン}").replace("{パターン}",value).replace("{pattern}",value)
@@ -1302,13 +1312,13 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                     elif st == "戻る":
                         try:
                             driver.back()
-                            s = float(step.get("seconds","1.0")); time.sleep(s)
+                            s = _safe_float(step.get("seconds","1.0")); time.sleep(s)
                             log_cb(f"  S{si} 戻る (+{s}秒)")
                         except Exception as x: log_cb(f"  S{si} [WARN] 戻る失敗: {x}")
                     elif st == "更新":
                         try:
                             driver.refresh()
-                            s = float(step.get("seconds","1.0")); time.sleep(s)
+                            s = _safe_float(step.get("seconds","1.0")); time.sleep(s)
                             log_cb(f"  S{si} 更新 (+{s}秒)")
                         except Exception as x: log_cb(f"  S{si} [WARN] 更新失敗: {x}")
                     elif st == "セッション削除":
@@ -1320,16 +1330,18 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         _accept = (st == "アラートOK")
                         try:
                             alert = None
+                            _last_ae = None
                             for _retry in range(20):
                                 try:
                                     alert = driver.switch_to.alert
                                     break
                                 except Exception as _ae:
+                                    _last_ae = _ae
                                     if _retry == 0:
                                         log_cb(f"  S{si} [DEBUG] アラート待機中... ({type(_ae).__name__})")
                                     time.sleep(0.5)
                             if alert is None:
-                                raise Exception("アラートが見つかりません (10秒待機)")
+                                raise Exception(f"アラートが見つかりません (20回リトライ, 最終エラー: {_last_ae})")
                             if _accept: alert.accept()
                             else: alert.dismiss()
                             log_cb(f"  S{si} {'確認OK' if _accept else '確認×'}")
@@ -1351,7 +1363,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                 driver.execute_script("window.scrollTo(0,0);")
                                 log_cb(f"  S{si} スクロール: 先頭")
                             elif sm == "pixel":
-                                px = int(step.get("scroll_px", "0"))
+                                px = int(_safe_float(step.get("scroll_px", "0"), 0))
                                 driver.execute_script(f"window.scrollTo(0,{px});")
                                 log_cb(f"  S{si} スクロール: {px}px")
                             else:
@@ -1362,10 +1374,10 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             time.sleep(0.3)
                         except Exception as x: log_cb(f"  S{si} [WARN] スクロール失敗: {x}")
                     elif st == "待機":
-                        s = float(step.get("seconds","1.0")); time.sleep(s); log_cb(f"  S{si} 待機: {s}秒")
+                        s = _safe_float(step.get("seconds","1.0")); time.sleep(s); log_cb(f"  S{si} 待機: {s}秒")
                     elif st == "要素待機":
                         sel = step.get("selector","")
-                        timeout = float(step.get("seconds","10"))
+                        timeout = _safe_float(step.get("seconds","10"), 10.0)
                         try:
                             WebDriverWait(driver, timeout).until(EC.visibility_of_element_located(_sel_by(sel)))
                             log_cb(f"  S{si} 要素待機OK: {sel}")
@@ -1407,7 +1419,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                     log_cb("  [WARN] Pillow未インストール: marginモードはfullpageにフォールバック")
                                     driver.save_screenshot(fp)
                                 else:
-                                    mg = int(step.get("margin_px",500))
+                                    mg = int(_safe_float(step.get("margin_px",500), 500))
                                     tgt = driver.find_element(*_sel_by(sel))
                                     driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});",tgt)
                                     time.sleep(0.3)
@@ -1417,7 +1429,10 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                     d = driver.execute_script("return window.devicePixelRatio||1;")
                                     x1,y1 = max(0,int(r["x"]*d)-mg), max(0,int(r["y"]*d)-mg)
                                     x2,y2 = min(img.width,int((r["x"]+r["w"])*d)+mg), min(img.height,int((r["y"]+r["h"])*d)+mg)
-                                    if x2>x1 and y2>y1: img.crop((x1,y1,x2,y2)).save(fp)
+                                    if x2>x1 and y2>y1:
+                                        img.crop((x1,y1,x2,y2)).save(fp)
+                                    else:
+                                        log_cb(f"  S{si} [WARN] マージンcrop無効 (rect={x1},{y1},{x2},{y2}) — 元画像を使用")
                             elif mode == "fullshot":
                                 # Preload lazy images: force-load + scroll to trigger loaders
                                 try:
@@ -1856,12 +1871,18 @@ def _safe_json_save(filepath, data):
     """Atomic JSON save: write to .tmp, backup old file, then rename."""
     tmp = filepath + ".tmp"
     bak = filepath + ".backup"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    if os.path.isfile(filepath):
-        try: os.replace(filepath, bak)
-        except Exception: pass
-    os.replace(tmp, filepath)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        if os.path.isfile(filepath):
+            try: os.replace(filepath, bak)
+            except Exception: pass
+        os.replace(tmp, filepath)
+    except Exception:
+        # tmpファイルが残らないようにクリーンアップ
+        try: os.remove(tmp)
+        except OSError: pass
+        raise
 
 def _safe_json_load(filepath, default):
     """Load JSON with backup recovery on corruption."""
@@ -1869,7 +1890,10 @@ def _safe_json_load(filepath, default):
         if os.path.isfile(p):
             try:
                 with open(p, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                if p.endswith(".backup"):
+                    _flog.warning(f"[WARN] メインファイル破損のためバックアップから復元: {filepath}")
+                return data
             except (json.JSONDecodeError, Exception):
                 continue
     return default
@@ -2087,12 +2111,13 @@ def _main_inner(page: ft.Page):
         _invalidate_idx()  # data may have changed before this call
         for pg in state["pages"]:
             pnum = pg["number"]
-            next_sub = int(pg.get("start_number", 1))
+            next_sub = int(_safe_float(pg.get("start_number", 1), 1))
             page_tests = tests_for_page(pg["_id"])
             for tc in page_tests:
                 forced = tc.get("_sub_number")
                 if forced is not None:
-                    next_sub = int(forced)
+                    try: next_sub = int(forced)
+                    except (ValueError, TypeError): pass
                 tc["number"] = f"{pnum}-{next_sub}"
                 next_sub += 1
 
@@ -2118,7 +2143,7 @@ def _main_inner(page: ft.Page):
         def do_save():
             with _save_lock:
                 try: save_all()
-                except Exception: pass
+                except Exception as x: _flog.error(f"auto-save failed: {x}")
         _save_timer[0] = threading.Timer(SAVE_DELAY_SEC, do_save)
         _save_timer[0].daemon = True; _save_timer[0].start()
 
@@ -2231,12 +2256,12 @@ def _main_inner(page: ft.Page):
         def on_ok(e):
             try:
                 name = nf.value.strip(); num = numf.value.strip()
-                if not name: snack("名前入力", ft.Colors.RED_700); return
-                if not num: snack("番号入力", ft.Colors.RED_700); return
+                if not name: snack("ページ名を入力してください", ft.Colors.RED_700); return
+                if not num: snack("ページ番号を入力してください", ft.Colors.RED_700); return
                 if any(p["number"] == num for p in state["pages"]):
                     snack(f"番号 {num} は既に使用されています", ft.Colors.RED_700); return
                 try: start = int(startf.value.strip() or "1")
-                except ValueError: snack("開始番号は整数で", ft.Colors.RED_700); return
+                except ValueError: snack("開始番号は整数で入力してください", ft.Colors.RED_700); return
                 new_pg = {"_id": _new_page_id(), "name": name, "number": num, "start_number": start,
                           "url": url_f.value.strip()}
                 state["pages"].append(new_pg)
@@ -2261,12 +2286,12 @@ def _main_inner(page: ft.Page):
         def on_ok(e):
             try:
                 name = nf.value.strip(); num = numf.value.strip()
-                if not name: snack("名前入力", ft.Colors.RED_700); return
-                if not num: snack("番号入力", ft.Colors.RED_700); return
+                if not name: snack("ページ名を入力してください", ft.Colors.RED_700); return
+                if not num: snack("ページ番号を入力してください", ft.Colors.RED_700); return
                 if num != pg["number"] and any(p["number"] == num for p in state["pages"]):
                     snack(f"番号 {num} は既に使用されています", ft.Colors.RED_700); return
                 try: start = int(startf.value.strip() or "1")
-                except ValueError: snack("開始番号は整数で", ft.Colors.RED_700); return
+                except ValueError: snack("開始番号は整数で入力してください", ft.Colors.RED_700); return
                 pg["name"] = name; pg["number"] = num; pg["start_number"] = start
                 pg["url"] = url_f.value.strip()
                 auto_number_tests()
@@ -2385,7 +2410,7 @@ def _main_inner(page: ft.Page):
                     ft.Text("＋ボタンでテストケースを追加", size=12, color=ft.Colors.GREY_500, text_align=ft.TextAlign.CENTER)],
                     horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=8),
                 padding=ft.Padding(20, 40, 20, 20), key="empty"))
-        for tc in page_tests:
+        for page_idx, tc in enumerate(page_tests):
             global_idx = _find_test_idx(tc.get("_id", ""))
             selected = (global_idx == state["selected_test"])
             pat = tc.get("pattern","")
@@ -2399,6 +2424,8 @@ def _main_inner(page: ft.Page):
             num_color = ft.Colors.ORANGE_700 if is_forced else ft.Colors.BLUE_600
             card = ft.Container(
                 ft.Row([
+                    ft.ReorderableDragHandle(content=ft.Icon(ft.Icons.DRAG_INDICATOR, size=16, color=ft.Colors.GREY_400),
+                                             mouse_cursor=ft.MouseCursor.GRAB),
                     ft.Text(tc_number, size=11, color=num_color, weight=ft.FontWeight.BOLD, width=50),
                     ft.Column([
                         ft.Text(tc.get("name",""), weight=ft.FontWeight.BOLD, size=12,
@@ -2419,7 +2446,7 @@ def _main_inner(page: ft.Page):
                 ], vertical_alignment=ft.CrossAxisAlignment.CENTER, spacing=4),
                 bgcolor=ft.Colors.BLUE_50 if selected else None,
                 ink=True, ink_color=ft.Colors.BLUE_100,
-                padding=ft.Padding(8, 6, 36, 6), border_radius=6,
+                padding=ft.Padding(8, 6, 4, 6), border_radius=6,
                 border=ft.Border.all(2, ft.Colors.BLUE_300) if selected else ft.Border.all(1, ft.Colors.GREY_200),
                 on_click=lambda e, tid=tc_id: select_test(_find_test_idx(tid)),
                 key=tc_id)
@@ -2476,7 +2503,7 @@ def _main_inner(page: ft.Page):
 
     def _update_test_highlight():
         """Update visual selection state on existing cards without rebuilding.
-        Container structure: Container > Row > [Text(num), Column > [Text(name), Text(sub)], PopupMenu]"""
+        Container structure: Container(key=tc_id) > Row > [DragHandle, Text(num), Column > [Text(name), Text(sub)], PopupMenu]"""
         sel_tc = state["tests"][state["selected_test"]] if 0 <= state["selected_test"] < len(state["tests"]) else None
         sel_id = sel_tc.get("_id") if sel_tc else None
         for ctrl in test_list.controls:
@@ -2485,8 +2512,8 @@ def _main_inner(page: ft.Page):
             ctrl.bgcolor = ft.Colors.BLUE_50 if is_sel else None
             ctrl.border = ft.Border.all(2, ft.Colors.BLUE_300) if is_sel else ft.Border.all(1, ft.Colors.GREY_200)
             try:
-                row = ctrl.content
-                name_txt = row.controls[1].controls[0]  # Column > first Text
+                row = ctrl.content  # Row
+                name_txt = row.controls[2].controls[0]  # [0]=DragHandle, [1]=Text(num), [2]=Column > [0]=Text(name)
                 name_txt.color = ft.Colors.BLUE_800 if is_sel else ft.Colors.BLACK
             except (AttributeError, IndexError):
                 pass
@@ -2699,11 +2726,13 @@ def _main_inner(page: ft.Page):
     def paste_step(e):
         if _guard_running(): return
         tc = cur_test()
-        if not tc: snack("テストケースを選択", ft.Colors.ORANGE_700); return
+        if not tc: snack("テストケースを選択してください", ft.Colors.ORANGE_700); return
         s = state.get("_copied_step")
         if not s: snack("コピーされたステップなし", ft.Colors.ORANGE_700); return
         tc["steps"].append(copy.deepcopy(s))
         refresh_steps(False); refresh_test_list()
+        try: step_reorder.scroll_to(offset=-1, duration=200)
+        except Exception: pass
         snack(f"ステップを貼り付け: {step_short(s)}")
 
     def del_step(idx):
@@ -2850,7 +2879,7 @@ def _main_inner(page: ft.Page):
                 if t in ("見出し","コメント"): step["text"] = text_f.value
                 elif t in ("入力","クリック","ホバー","選択"):
                     s = sel_field.value if hasattr(sel_field,'value') else ""
-                    if not s: snack("セレクタを入力", ft.Colors.RED_700); return
+                    if not s: snack("セレクタを入力してください", ft.Colors.RED_700); return
                     step["selector"] = s
                     if t == "入力":
                         step["input_mode"] = input_mode_dd.value
@@ -2859,7 +2888,7 @@ def _main_inner(page: ft.Page):
                             else:
                                 pn = pat_select.value
                                 if not pn or pn not in state["pattern_sets"]:
-                                    snack("パターンセットを選択", ft.Colors.RED_700); return
+                                    snack("パターンセットを選択してください", ft.Colors.RED_700); return
                                 existing = tc.get("pattern")
                                 if existing and existing != pn:
                                     snack(f"このテストには既に「{existing}」が設定されています（1テスト1パターン）", ft.Colors.RED_700); return
@@ -2869,51 +2898,54 @@ def _main_inner(page: ft.Page):
                         else:
                             pn = pat_select.value
                             if not pn or pn not in state["pattern_sets"]:
-                                snack("パターンセットを選択", ft.Colors.RED_700); return
+                                snack("パターンセットを選択してください", ft.Colors.RED_700); return
                             existing = tc.get("pattern")
                             if existing and existing != pn:
                                 snack(f"このテストには既に「{existing}」が設定されています（1テスト1パターン）", ft.Colors.RED_700); return
                             step["value"] = "{パターン}"; tc["pattern"] = pn
                 elif t in ("戻る", "更新"):
                     try: step["seconds"] = str(float(sec_field.value))
-                    except Exception: snack("秒数を正しく", ft.Colors.RED_700); return
+                    except Exception: snack("秒数を正しく入力してください", ft.Colors.RED_700); return
                 elif t == "ナビゲーション":
                     url = nav_url_f.value.strip()
-                    if not url: snack("URLを入力", ft.Colors.RED_700); return
+                    if not url: snack("URLを入力してください", ft.Colors.RED_700); return
                     step["url"] = url
                 elif t == "待機":
                     try: step["seconds"] = str(float(sec_field.value))
-                    except Exception: snack("秒数を正しく", ft.Colors.RED_700); return
+                    except Exception: snack("秒数を正しく入力してください", ft.Colors.RED_700); return
                 elif t == "要素待機":
                     s = sel_field.value if hasattr(sel_field,'value') else ""
-                    if not s: snack("セレクタを入力", ft.Colors.RED_700); return
+                    if not s: snack("セレクタを入力してください", ft.Colors.RED_700); return
                     step["selector"] = s
                     try: step["seconds"] = str(float(sec_field.value or "10"))
-                    except Exception: snack("秒数を正しく", ft.Colors.RED_700); return
+                    except Exception: snack("秒数を正しく入力してください", ft.Colors.RED_700); return
                 elif t == "スクロール":
                     step["scroll_mode"] = scroll_mode_dd.value
                     if scroll_mode_dd.value == "element":
                         s = sel_field.value if hasattr(sel_field,'value') else ""
-                        if not s: snack("セレクタを入力", ft.Colors.RED_700); return
+                        if not s: snack("セレクタを入力してください", ft.Colors.RED_700); return
                         step["selector"] = s
                     elif scroll_mode_dd.value == "pixel":
                         try: step["scroll_px"] = str(int(scroll_px_f.value or "0"))
-                        except Exception: snack("整数で入力", ft.Colors.RED_700); return
+                        except Exception: snack("整数で入力してください", ft.Colors.RED_700); return
                 elif t == "スクショ":
                     step["mode"] = mode_dd.value
                     s = sel_field.value if hasattr(sel_field,'value') else ""
-                    if mode_dd.value in ("element","margin") and not s: snack("セレクタ必要", ft.Colors.RED_700); return
+                    if mode_dd.value in ("element","margin") and not s: snack("セレクタを入力してください", ft.Colors.RED_700); return
                     if s: step["selector"] = s
                     if mode_dd.value == "margin":
                         try: step["margin_px"] = str(int(margin_f.value))
-                        except Exception: snack("整数で", ft.Colors.RED_700); return
+                        except Exception: snack("整数で入力してください", ft.Colors.RED_700); return
                 elif t == "検証":
                     step["verify_type"] = verify_dd.value
                     s = sel_field.value if hasattr(sel_field,'value') else ""
-                    if verify_dd.value in ("state","attrs") and not s: snack("セレクタ必要", ft.Colors.RED_700); return
+                    if verify_dd.value in ("state","attrs") and not s: snack("セレクタを入力してください", ft.Colors.RED_700); return
                     if s: step["selector"] = s
                 if idx is not None: tc["steps"][idx] = step
-                else: tc["steps"].append(step)
+                else:
+                    tc["steps"].append(step)
+                    try: step_reorder.scroll_to(offset=-1, duration=200)
+                    except Exception: pass
                 refresh_steps(False); refresh_test_list(); close_dlg(dlg)
             except Exception as x: _log_error("show_step_dlg.on_ok", x); close_dlg(dlg)
         dlg = ft.AlertDialog(title=ft.Text("ステップ編集" if idx is not None else "ステップ追加"),
@@ -2933,7 +2965,7 @@ def _main_inner(page: ft.Page):
         page.update()
     def load_page_click(e):
         url = browser_url.value
-        if not url: snack("URL入力", ft.Colors.RED_700); return
+        if not url: snack("URLを入力してください", ft.Colors.RED_700); return
         _el_loading_start("ブラウザ起動中...")
         page.run_thread(do_load_page, url)
     def do_load_page(url):
@@ -3012,7 +3044,7 @@ def _main_inner(page: ft.Page):
         log(f"[要素] DOM再取得 {len(elems)} 要素" + (f" (checkbox/radio: {len(cb_radio)}件, ヒントあり: {len(cb_with_hint)}件)" if cb_radio else ""))
     def reload_dom_click(e):
         """Re-collect elements from current DOM without navigating."""
-        if not state["browser_driver"]: snack("ブラウザ未起動", ft.Colors.ORANGE_700); return
+        if not state["browser_driver"]: snack("先にページを読み込んでください", ft.Colors.ORANGE_700); return
         _el_loading_start("DOM再取得中...")
         try:
             _do_collect_elements()
@@ -3251,9 +3283,9 @@ def _main_inner(page: ft.Page):
 
     def quick_add(stype):
         tc = cur_test()
-        if not tc: snack("テストケースを選択", ft.Colors.ORANGE_700); return
+        if not tc: snack("テストケースを選択してください", ft.Colors.ORANGE_700); return
         idx = state["selected_el"]
-        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素をクリック", ft.Colors.ORANGE_700); return
+        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素を選択してください", ft.Colors.ORANGE_700); return
         el_info = state["browser_elements"][idx]; sel = _resolve_el_selector(el_info)
         tag = el_info.get("tag", ""); etype = el_info.get("type", "").lower()
         actual_type = stype
@@ -3266,14 +3298,16 @@ def _main_inner(page: ft.Page):
         if "_frame" in el_info: step["_frame"] = el_info["_frame"]; step["_frame_index"] = el_info.get("_frame_index", 0)
         if actual_type in ("入力", "選択"): step["value"] = ""
         tc["steps"].append(step); refresh_steps(False); refresh_test_list()
+        try: step_reorder.scroll_to(offset=-1, duration=200)
+        except Exception: pass
         if converted:
             snack(f"要素に合わせて「{actual_type}」に変更: {sel}", ft.Colors.BLUE_600)
         else:
             snack(f"{actual_type}: {sel}")
     def quick_add_all_options(e):
-        if not state["browser_driver"]: snack("ページ読込必要", ft.Colors.ORANGE_700); return
+        if not state["browser_driver"]: snack("先にページを読み込んでください", ft.Colors.ORANGE_700); return
         idx = state["selected_el"]
-        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素をクリック", ft.Colors.ORANGE_700); return
+        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素を選択してください", ft.Colors.ORANGE_700); return
         el_info = state["browser_elements"][idx]; tag = el_info.get("tag", ""); etype = el_info.get("type", "").lower()
         if tag != "select" and etype != "radio": snack("セレクトボックスまたはラジオボタンを選択", ft.Colors.ORANGE_700); return
         step_type, options = collect_element_options(state["browser_driver"], el_info)
@@ -3314,8 +3348,8 @@ def _main_inner(page: ft.Page):
         open_dlg(dlg)
     def capture_form(e):
         tc = cur_test()
-        if not tc: snack("テストケースを選択", ft.Colors.ORANGE_700); return
-        if not state["browser_driver"]: snack("ページ読込必要", ft.Colors.ORANGE_700); return
+        if not tc: snack("テストケースを選択してください", ft.Colors.ORANGE_700); return
+        if not state["browser_driver"]: snack("先にページを読み込んでください", ft.Colors.ORANGE_700); return
         try:
             fs = capture_form_values(state["browser_driver"])
             if not fs: snack("フォーム値なし", ft.Colors.ORANGE_700); return
@@ -3334,7 +3368,7 @@ def _main_inner(page: ft.Page):
     def copy_el_selector(e):
         """選択中の要素のセレクタをクリップボードにコピー（モードに連動）"""
         idx = state["selected_el"]
-        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素を選択", ft.Colors.ORANGE_700); return
+        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素を選択してください", ft.Colors.ORANGE_700); return
         el_info = state["browser_elements"][idx]
         sel = _resolve_el_selector(el_info)
         if sel:
@@ -3344,7 +3378,7 @@ def _main_inner(page: ft.Page):
     def copy_el_xpath(e):
         """選択中の要素のXPathをクリップボードにコピー"""
         idx = state["selected_el"]
-        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素を選択", ft.Colors.ORANGE_700); return
+        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素を選択してください", ft.Colors.ORANGE_700); return
         el = state["browser_elements"][idx]
         sel = el.get("selector", "")
         # XPathセレクタならそのままコピー
@@ -3353,7 +3387,7 @@ def _main_inner(page: ft.Page):
             snack(f"XPathコピー: {sel[:50]}"); return
         # CSSセレクタからXPathを生成（ブラウザ使用）
         driver = state["browser_driver"]
-        if not driver: snack("ブラウザ未起動", ft.Colors.ORANGE_700); return
+        if not driver: snack("先にページを読み込んでください", ft.Colors.ORANGE_700); return
         try:
             target = driver.find_element(*_sel_by(sel))
             if target:
@@ -3368,18 +3402,18 @@ def _main_inner(page: ft.Page):
     def copy_el_id(e):
         """選択中の要素のID/nameをクリップボードにコピー"""
         idx = state["selected_el"]
-        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素を選択", ft.Colors.ORANGE_700); return
+        if idx < 0 or idx >= len(state["browser_elements"]): snack("要素を選択してください", ft.Colors.ORANGE_700); return
         el = state["browser_elements"][idx]
         val = el.get("id") or el.get("name") or ""
         if val:
             _clipboard_copy(val)
             snack(f"コピー: {val}")
         else:
-            snack("ID/nameなし", ft.Colors.ORANGE_700)
+            snack("この要素にはID/name属性がありません", ft.Colors.ORANGE_700)
 
     def test_selector_dlg(e):
         """Open a dialog to test CSS/XPath selectors by highlighting matches in the browser."""
-        if not state["browser_driver"]: snack("ブラウザ未起動", ft.Colors.ORANGE_700); return
+        if not state["browser_driver"]: snack("先にページを読み込んでください", ft.Colors.ORANGE_700); return
         # Pre-fill with selected element's selector
         init_sel = ""
         idx = state["selected_el"]
@@ -3472,8 +3506,8 @@ def _main_inner(page: ft.Page):
         def on_ok(e):
             try:
                 n = nf.value.strip()
-                if not n: snack("名前入力", ft.Colors.RED_700); return
-                if n in state["pattern_sets"]: snack("既に存在", ft.Colors.RED_700); return
+                if not n: snack("パターンセット名を入力してください", ft.Colors.RED_700); return
+                if n in state["pattern_sets"]: snack("同名のパターンセットが既に存在します", ft.Colors.RED_700); return
                 state["pattern_sets"][n] = []; state["selected_pat_set"] = n
                 refresh_pat_set_list(False); refresh_pats(); close_dlg(dlg)
             except Exception as x: _log_error("add_pat_set", x); close_dlg(dlg)
@@ -3487,8 +3521,8 @@ def _main_inner(page: ft.Page):
         def on_ok(e):
             try:
                 new_name = nf.value.strip()
-                if not new_name: snack("名前入力", ft.Colors.RED_700); return
-                if new_name != old_name and new_name in state["pattern_sets"]: snack("既に存在", ft.Colors.RED_700); return
+                if not new_name: snack("パターンセット名を入力してください", ft.Colors.RED_700); return
+                if new_name != old_name and new_name in state["pattern_sets"]: snack("同名のパターンセットが既に存在します", ft.Colors.RED_700); return
                 if new_name != old_name:
                     new_ps = {}
                     for k, v in state["pattern_sets"].items(): new_ps[new_name if k == old_name else k] = v
@@ -3575,7 +3609,7 @@ def _main_inner(page: ft.Page):
         vf = ft.TextField(label="入力値", width=400, value=init.get("value",""), multiline=True, min_lines=3, max_lines=6)
         def on_ok(e):
             try:
-                if not lf.value: snack("ラベル入力", ft.Colors.RED_700); return
+                if not lf.value: snack("ラベルを入力してください", ft.Colors.RED_700); return
                 p = {"label": lf.value, "value": vf.value}
                 if idx is not None: pats[idx] = p
                 else: pats.append(p)
@@ -3613,7 +3647,7 @@ def _main_inner(page: ft.Page):
     def paste_pat(e):
         if _guard_running(): return
         name = state["selected_pat_set"]
-        if not name or name not in state["pattern_sets"]: snack("パターンセットを選択", ft.Colors.ORANGE_700); return
+        if not name or name not in state["pattern_sets"]: snack("パターンセットを選択してください", ft.Colors.ORANGE_700); return
         p = state.get("_copied_pat")
         if not p: snack("コピーされたパターンなし", ft.Colors.ORANGE_700); return
         state["pattern_sets"][name].append(copy.deepcopy(p))
@@ -3622,7 +3656,7 @@ def _main_inner(page: ft.Page):
 
     def export_csv(e):
         name = state["selected_pat_set"]
-        if not name or name not in state["pattern_sets"]: snack("パターンセットを選択", ft.Colors.ORANGE_700); return
+        if not name or name not in state["pattern_sets"]: snack("パターンセットを選択してください", ft.Colors.ORANGE_700); return
         pats = state["pattern_sets"][name]
         if not pats: snack("パターンなし", ft.Colors.ORANGE_700); return
         outdir = state["config"].get("output_dir", os.path.join(get_app_dir(), "screenshots"))
@@ -3632,7 +3666,7 @@ def _main_inner(page: ft.Page):
 
     def load_template(e):
         name = state["selected_pat_set"]
-        if not name: snack("パターンセットを選択", ft.Colors.ORANGE_700); return
+        if not name: snack("パターンセットを選択してください", ft.Colors.ORANGE_700); return
         td = get_templates_dir()
         csvs = sorted([f for f in os.listdir(td) if f.lower().endswith(".csv")]) if td else []
         csv_cache = {f: load_csv(os.path.join(td, f)) for f in csvs} if td else {}
@@ -4281,7 +4315,7 @@ def _main_inner(page: ft.Page):
                           on_select=on_page_dd_change)
     page_info_label = ft.Text("", size=10, color=ft.Colors.GREY_500)
 
-    test_list = ft.ReorderableListView(controls=[], on_reorder=on_test_reorder, spacing=3, expand=True)
+    test_list = ft.ReorderableListView(controls=[], on_reorder=on_test_reorder, spacing=3, expand=True, show_default_drag_handles=False)
     step_reorder = ft.ReorderableListView(controls=[], on_reorder=on_reorder, spacing=1, expand=True)
     log_list = ft.ListView(spacing=1, auto_scroll=True, height=130)
     _log_expanded = [False]

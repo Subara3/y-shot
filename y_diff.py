@@ -260,7 +260,11 @@ def compare_images(path_a, path_b):
             draw = ImageDraw.Draw(canvas)
             draw.text((5, 5), f"旧: {img_a.size[0]}x{img_a.size[1]}", fill=(0, 0, 200))
             draw.text((img_a.size[0] + 25, 5), f"新: {img_b.size[0]}x{img_b.size[1]}", fill=(200, 0, 0))
-            canvas.save(diff_path)
+            try:
+                canvas.save(diff_path)
+            except Exception as _se:
+                _flog.error(f"diff image save failed: {_se}")
+                diff_path = None
             return False, 100.0, diff_path
         diff = ImageChops.difference(img_a, img_b)
         pixels = img_a.size[0] * img_a.size[1]
@@ -642,10 +646,10 @@ def main(page: ft.Page):
             # Fallback matching: if keys differ only by numeric prefix, remap
             stripped_a = {_strip_num_prefix(k): k for k in files_a}
             stripped_b = {_strip_num_prefix(k): k for k in files_b}
-            for sk, orig_a in stripped_a.items():
+            for sk, orig_a in list(stripped_a.items()):
                 if orig_a not in files_b and sk in stripped_b:
                     orig_b = stripped_b[sk]
-                    if orig_b not in files_a:
+                    if orig_b not in files_a and orig_a in files_a and orig_b in files_b:
                         # Remap: use the stripped key as the common key
                         files_a[sk] = files_a.pop(orig_a)
                         files_b[sk] = files_b.pop(orig_b)

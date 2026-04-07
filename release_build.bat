@@ -25,9 +25,9 @@ copy docs\partner_sample.yshot.json release\y-shot\
 
 REM ZIP作成
 echo [3/3] ZIP作成中...
-if exist release\y-shot_v2.6.zip del release\y-shot_v2.6.zip
-powershell -Command "Compress-Archive -Path 'release\y-shot' -DestinationPath 'release\y-shot_v2.6.zip'"
+if exist release\y-shot_v2.7.zip del release\y-shot_v2.7.zip
+powershell -Command "Compress-Archive -Path 'release\y-shot' -DestinationPath 'release\y-shot_v2.7.zip'"
 
 echo.
-echo === 完了: release\y-shot_v2.6.zip ===
+echo === 完了: release\y-shot_v2.7.zip ===
 pause

@@ -3692,7 +3692,8 @@ def _main_inner(page: ft.Page):
             if not fp: return  # cancelled
             if not fp.lower().endswith(".csv"):
                 fp += ".csv"
-            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            _dir = os.path.dirname(fp)
+            if _dir: os.makedirs(_dir, exist_ok=True)
             save_csv(fp, pats); snack(f"エクスポート: {fp}")
         except Exception as x:
             _log_error("export_csv", x); snack(f"CSVエクスポート失敗: {x}", ft.Colors.RED_600)
@@ -3860,7 +3861,8 @@ def _main_inner(page: ft.Page):
                 "config": state["config"],
                 "selector_bank": state["selector_bank"],
             }
-            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            _dir = os.path.dirname(fp)
+            if _dir: os.makedirs(_dir, exist_ok=True)
             with open(fp, "w", encoding="utf-8") as f:
                 json.dump(project_data, f, ensure_ascii=False, indent=2)
             snack(f"エクスポート: {fp}")

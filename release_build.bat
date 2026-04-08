@@ -6,7 +6,7 @@ echo === y-shot 配布パッケージ作成 ===
 
 REM ビルド
 echo [1/3] ビルド中...
-py -m PyInstaller y-shot.spec --noconfirm
+C:\Users\2260008\AppData\Local\Python\bin\python.exe -m PyInstaller y-shot.spec --noconfirm
 if errorlevel 1 (echo ビルド失敗 & pause & exit /b 1)
 
 REM リリースフォルダ作成
@@ -19,7 +19,7 @@ mkdir release\y-shot\docs
 copy dist\y-shot.exe release\y-shot\
 copy dist\y-diff.exe release\y-shot\
 copy templates\入力チェック_基本.csv release\y-shot\templates\
-copy docs\y-shot_manual.docx release\y-shot\docs\
+copy docs\y-shot_manual.md release\y-shot\docs\
 copy docs\wine_search_sample.yshot.json release\y-shot\
 copy docs\partner_sample.yshot.json release\y-shot\
 

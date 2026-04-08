@@ -27,7 +27,7 @@ from urllib.parse import urlparse, urlunparse
 import flet as ft
 
 APP_NAME = "y-shot"
-APP_VERSION = "2.7"
+APP_VERSION = "3.0"
 APP_AUTHOR = "Yuri Norimatsu"
 
 # ── Constants ──
@@ -1277,9 +1277,35 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                     elif st == "クリック":
                         sel = step.get("selector","").replace("{パターン}",value).replace("{pattern}",value)
                         try:
-                            _el = WebDriverWait(driver,10).until(EC.element_to_be_clickable(_sel_by(sel)))
+                            try:
+                                _el = WebDriverWait(driver,10).until(EC.element_to_be_clickable(_sel_by(sel)))
+                            except Exception:
+                                # Fallback: hidden input や zero-size label 等
+                                _el = WebDriverWait(driver,3).until(EC.presence_of_element_located(_sel_by(sel)))
                             driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", _el)
-                            _el.click()
+                            # Selenium native click: label→radio紐づけ等のブラウザ標準動作を確実に発火
+                            # JS click fallback: overlay被り等でinterceptされる場合の保険
+                            try:
+                                _el.click()
+                            except Exception:
+                                driver.execute_script("arguments[0].click();", _el)
+                            # label→hidden input fallback: CSS カスタムラジオ/チェックボックス対策
+                            # label クリックで for 先の input が checked にならない場合、JS で強制チェック
+                            # クリックでページ遷移した場合は stale element になるので無視
+                            try:
+                                driver.execute_script("""
+                                    var el = arguments[0];
+                                    if (el.tagName === 'LABEL' && el.htmlFor) {
+                                        var input = document.getElementById(el.htmlFor);
+                                        if (input && (input.type === 'radio' || input.type === 'checkbox') && !input.checked) {
+                                            input.checked = true;
+                                            input.dispatchEvent(new Event('change', {bubbles: true}));
+                                            input.dispatchEvent(new Event('input', {bubbles: true}));
+                                        }
+                                    }
+                                """, _el)
+                            except Exception:
+                                pass  # ページ遷移後は stale → 無視
                             log_cb(f"  S{si} クリック: {sel}")
                         except Exception as x:
                             log_cb(f"  S{si} [WARN] クリック失敗: {x}")
@@ -2021,9 +2047,14 @@ def _main_inner(page: ft.Page):
     page.title = f"{APP_NAME} - Web Screenshot Tool"
     page.window.width = 1500; page.window.height = 900
     # Set window icon to ebi
-    _icon_path = os.path.join(get_bundle_dir(), "assets", "shot_icon.ico")
-    if not os.path.isfile(_icon_path): _icon_path = os.path.join(get_app_dir(), "assets", "shot_icon.ico")
-    if os.path.isfile(_icon_path):
+    # Flet window icon: .ico が必須 (Windows only, 公式仕様)
+    for _icon_ext in ("shot_icon.ico", "shot_icon.png"):
+        _icon_path = os.path.join(get_bundle_dir(), "assets", _icon_ext)
+        if not os.path.isfile(_icon_path): _icon_path = os.path.join(get_app_dir(), "assets", _icon_ext)
+        if os.path.isfile(_icon_path): break
+    else:
+        _icon_path = None
+    if _icon_path and os.path.isfile(_icon_path):
         try: page.window.icon = _icon_path
         except Exception: pass
     page.theme_mode = ft.ThemeMode.LIGHT
@@ -2248,7 +2279,10 @@ def _main_inner(page: ft.Page):
 
     def add_page(e):
         if _guard_running(): return
+        used_nums = {p["number"] for p in state["pages"]}
         next_num = str(len(state["pages"]) + 1)
+        while next_num in used_nums:
+            next_num = str(int(next_num) + 1)
         nf = ft.TextField(label="ページ名", width=350, value=f"ページ{next_num}")
         url_f = ft.TextField(label="起点URL", width=450, hint_text="このページの起点URL")
         numf = ft.TextField(label="ページ番号", width=100, value=next_num)
@@ -2461,12 +2495,16 @@ def _main_inner(page: ft.Page):
 
     _reorder_dedup = {}
     def _is_dup_reorder(handler, old, new):
-        """Flet fires on_reorder twice per drag. Block same (handler, old, new) within 0.5s."""
+        """Flet fires on_reorder twice per drag. Block same (handler, old, new) within 0.1s."""
         now = time.time()
         key = (handler, old, new)
         prev = _reorder_dedup.get(key)
-        if prev and now - prev < 0.5: return True
-        _reorder_dedup[key] = now; return False
+        if prev and now - prev < 0.1: return True
+        _reorder_dedup[key] = now
+        if len(_reorder_dedup) > 50:
+            stale = [k for k, v in _reorder_dedup.items() if now - v > 1.0]
+            for k in stale: del _reorder_dedup[k]
+        return False
 
     def on_test_reorder(e):
         try:
@@ -2478,6 +2516,9 @@ def _main_inner(page: ft.Page):
             if not (0 <= old < len(page_tests) and 0 <= new <= len(page_tests)): return
             if old == new: return
             _flog.debug(f"on_test_reorder: old={old} new={new} len={len(page_tests)}")
+            # 並び替え前に選択テストのIDを記録
+            sel_idx = state["selected_test"]
+            sel_id = state["tests"][sel_idx].get("_id") if 0 <= sel_idx < len(state["tests"]) else None
             # Build new page order: pop from old, insert at new
             old_tc = page_tests[old]
             new_order = list(page_tests)
@@ -2497,6 +2538,12 @@ def _main_inner(page: ft.Page):
             if not page_inserted:
                 result.extend(new_order)
             state["tests"] = result
+            # 選択テストのインデックスをIDで復元
+            if sel_id:
+                for i, t in enumerate(state["tests"]):
+                    if t.get("_id") == sel_id:
+                        state["selected_test"] = i
+                        break
             auto_number_tests()
             refresh_test_list(False); refresh_page_dd(False); schedule_save(); page.update()
         except Exception as x: _log_error("on_test_reorder", x)
@@ -3654,15 +3701,27 @@ def _main_inner(page: ft.Page):
         refresh_pats(False); refresh_pat_set_list(False); refresh_test_list()
         snack(f"パターンを貼り付け: {p.get('label','')}")
 
-    def export_csv(e):
+    async def export_csv(e):
         name = state["selected_pat_set"]
         if not name or name not in state["pattern_sets"]: snack("パターンセットを選択してください", ft.Colors.ORANGE_700); return
         pats = state["pattern_sets"][name]
         if not pats: snack("パターンなし", ft.Colors.ORANGE_700); return
-        outdir = state["config"].get("output_dir", os.path.join(get_app_dir(), "screenshots"))
-        os.makedirs(outdir, exist_ok=True)
-        fp = os.path.join(outdir, f"{_safe_filename(name, 50)}.csv")
-        save_csv(fp, pats); snack(f"エクスポート: {fp}")
+        default_name = f"{_safe_filename(name, 50)}.csv"
+        initial_dir = state["config"].get("output_dir", os.path.join(get_app_dir(), "screenshots"))
+        try:
+            fp = await _export_file_picker.save_file(
+                dialog_title="CSVエクスポート先を選択",
+                file_name=default_name,
+                initial_directory=initial_dir,
+                allowed_extensions=["csv"],
+            )
+            if not fp: return  # cancelled
+            if not fp.lower().endswith(".csv"):
+                fp += ".csv"
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            save_csv(fp, pats); snack(f"エクスポート: {fp}")
+        except Exception as x:
+            _log_error("export_csv", x); snack(f"CSVエクスポート失敗: {x}", ft.Colors.RED_600)
 
     def load_template(e):
         name = state["selected_pat_set"]
@@ -3801,11 +3860,23 @@ def _main_inner(page: ft.Page):
         open_dlg(dlg)
 
     # ── Project Export / Import ──
-    def export_project(e):
+    async def export_project(e):
         """Export pages, tests, pattern sets, config, and selector bank as a single JSON project file."""
         try:
             save_all()
             proj_name = _current_project_name() or "project"
+            ts = datetime.now().strftime("%Y%m%d%H%M%S")
+            default_name = f"{_safe_filename(proj_name, 30)}_{ts}.yshot.json"
+            initial_dir = state["config"].get("output_dir", os.path.join(get_app_dir(), "screenshots"))
+            fp = await _export_file_picker.save_file(
+                dialog_title="プロジェクトエクスポート先を選択",
+                file_name=default_name,
+                initial_directory=initial_dir,
+                allowed_extensions=["json"],
+            )
+            if not fp: return  # cancelled
+            if not fp.endswith(".yshot.json"):
+                fp += ".yshot.json"
             project_data = {
                 "app": APP_NAME, "version": APP_VERSION,
                 "project_name": proj_name,
@@ -3815,10 +3886,7 @@ def _main_inner(page: ft.Page):
                 "config": state["config"],
                 "selector_bank": state["selector_bank"],
             }
-            outdir = state["config"].get("output_dir", os.path.join(get_app_dir(), "screenshots"))
-            os.makedirs(outdir, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d%H%M%S")
-            fp = os.path.join(outdir, f"{_safe_filename(proj_name, 30)}_{ts}.yshot.json")
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
             with open(fp, "w", encoding="utf-8") as f:
                 json.dump(project_data, f, ensure_ascii=False, indent=2)
             snack(f"エクスポート: {fp}")
@@ -3826,85 +3894,51 @@ def _main_inner(page: ft.Page):
         except Exception as x:
             _log_error("export_project", x); snack(f"エクスポート失敗: {x}", ft.Colors.RED_600)
 
-    def import_project(e):
-        """Import a .yshot.json project file via file picker dialog."""
-        # Scan for available project files
-        search_dirs = [
-            state["config"].get("output_dir", os.path.join(get_app_dir(), "screenshots")),
-            get_app_dir(),
-            os.path.join(get_app_dir(), "docs"),
-            get_projects_dir(),
-        ]
-        found_files = []
-        for d in search_dirs:
-            if not os.path.isdir(d): continue
-            for fn in os.listdir(d):
-                fp = os.path.join(d, fn)
-                if fn.endswith(".yshot.json"):
-                    found_files.append(fp)
-                elif os.path.isdir(fp):
-                    # 1階層のサブディレクトリも探索
-                    for fn2 in os.listdir(fp):
-                        if fn2.endswith(".yshot.json"):
-                            found_files.append(os.path.join(fp, fn2))
-        found_files = list(dict.fromkeys(os.path.normpath(p) for p in found_files))
-        found_files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    async def import_project(e):
+        """Import a .yshot.json project file via OS file picker + confirmation dialog."""
+        initial_dir = state["config"].get("output_dir", os.path.join(get_app_dir(), "screenshots"))
+        _import_picker = ft.FilePicker()
+        picked = await _import_picker.pick_files(
+            dialog_title="インポートするプロジェクトファイルを選択",
+            initial_directory=initial_dir,
+            allowed_extensions=["json"],
+            allow_multiple=False,
+        )
+        if not picked: return
+        fp = picked[0].path
 
-        path_field = ft.TextField(label="ファイルパス", width=450, hint_text=".yshot.json ファイルのパスを入力",
-                                  value=found_files[0] if found_files else "")
-        mode_dd = ft.Dropdown(label="インポート方法", width=350, value="replace",
+        # Read and validate
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except json.JSONDecodeError:
+            snack("JSONパースエラー", ft.Colors.RED_600); return
+        except Exception as x:
+            snack(f"ファイル読込失敗: {x}", ft.Colors.RED_600); return
+        if "pages" not in data or "tests" not in data:
+            snack("無効なプロジェクトファイルです", ft.Colors.RED_700); return
+
+        # Build preview
+        n_pages = len(data.get("pages", []))
+        n_tests = len(data.get("tests", []))
+        n_pats = len(data.get("pattern_sets", {}))
+        ver = data.get("version", "?")
+        pname = data.get("project_name", "")
+        has_config = "設定あり" if data.get("config") else "設定なし"
+        proj_url = data.get("config", {}).get("project_url", "")
+        urls = [pg.get("url","") for pg in data.get("pages",[]) if pg.get("url","")]
+        url_hint = proj_url[:40] if proj_url else (urls[0][:40] if urls else "URL未設定")
+        if len(url_hint) >= 40: url_hint += "..."
+        name_hint = f"「{pname}」 " if pname else ""
+        preview_str = f"{name_hint}v{ver} | {n_pages}ページ, {n_tests}テスト, {n_pats}パターン, {has_config} | {url_hint}"
+
+        mode_dd = ft.Dropdown(label="インポート方法", width=350, value="new_project",
             options=[ft.dropdown.Option(key="replace", text="置換（現在のデータを上書き）"),
                      ft.dropdown.Option(key="merge", text="マージ（現在のデータに追加）"),
                      ft.dropdown.Option(key="new_project", text="新規プロジェクトとしてインポート")])
-        preview_text = ft.Text("", size=11, color=ft.Colors.GREY_600)
 
-        def _update_preview(p):
-            path_field.value = p
+        def on_ok(ev):
             try:
-                with open(p, "r", encoding="utf-8") as pf:
-                    pd = json.load(pf)
-                n_pages = len(pd.get("pages", []))
-                n_tests = len(pd.get("tests", []))
-                n_pats = len(pd.get("pattern_sets", {}))
-                ver = pd.get("version", "?")
-                pname = pd.get("project_name", "")
-                has_config = "設定あり" if pd.get("config") else "設定なし"
-                urls = [pg.get("url","") for pg in pd.get("pages",[]) if pg.get("url","")]
-                proj_url = pd.get("config", {}).get("project_url", "")
-                url_hint = proj_url[:40] if proj_url else (urls[0][:40] if urls else "URL未設定")
-                if len(url_hint) >= 40: url_hint += "..."
-                name_hint = f"「{pname}」 " if pname else ""
-                preview_text.value = f"{name_hint}v{ver} | {n_pages}ページ, {n_tests}テスト, {n_pats}パターン, {has_config} | {url_hint}"
-            except Exception:
-                preview_text.value = "プレビュー読込失敗"
-            try: page.update()
-            except Exception: pass
-
-        def _on_file_select(e):
-            if file_radio.value:
-                _update_preview(file_radio.value)
-
-        if found_files:
-            file_radio = ft.RadioGroup(
-                content=ft.Column([
-                    ft.Radio(value=fp, label=os.path.basename(fp)) for fp in found_files[:10]
-                ], spacing=2, scroll=ft.ScrollMode.AUTO, height=140),
-                value=found_files[0],
-                on_change=_on_file_select)
-            _update_preview(found_files[0])
-        else:
-            file_radio = ft.Column([ft.Text("検出されたプロジェクトファイルなし", size=11, color=ft.Colors.GREY_500)])
-
-        def on_ok(e):
-            try:
-                fp = (hasattr(file_radio, 'value') and file_radio.value or "").strip() or path_field.value.strip()
-                if not fp or not os.path.isfile(fp):
-                    snack("ファイルが見つかりません", ft.Colors.RED_700); return
-                with open(fp, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if "pages" not in data or "tests" not in data:
-                    snack("無効なプロジェクトファイルです", ft.Colors.RED_700); return
-
                 imp_pages = data.get("pages", [])
                 imp_tests = data.get("tests", [])
                 imp_pats = data.get("pattern_sets", {})
@@ -4023,19 +4057,15 @@ def _main_inner(page: ft.Page):
                 snack(f"インポート完了 ({len(imp_pages)}ページ, {len(imp_tests)}テスト)")
                 log(f"[プロジェクト] インポート: {fp} (v{src_ver}, {mode_dd.value})")
                 close_dlg(dlg)
-            except json.JSONDecodeError:
-                snack("JSONパースエラー", ft.Colors.RED_600)
             except Exception as x:
                 _log_error("import_project", x); snack(f"インポート失敗: {x}", ft.Colors.RED_600)
 
         dlg = ft.AlertDialog(title=ft.Text("プロジェクトインポート"),
             content=ft.Column([
-                ft.Text("ファイルを選択:", size=12, weight=ft.FontWeight.BOLD),
-                file_radio,
-                preview_text,
+                ft.Text(os.path.basename(fp), size=12, weight=ft.FontWeight.BOLD),
+                ft.Text(preview_str, size=11, color=ft.Colors.GREY_600),
                 mode_dd,
-                path_field,
-            ], tight=True, spacing=10, width=500),
+            ], tight=True, spacing=10, width=400),
             actions=[ft.TextButton("インポート", on_click=on_ok),
                      ft.TextButton("キャンセル", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg)
@@ -4478,6 +4508,9 @@ def _main_inner(page: ft.Page):
         destinations=[ft.NavigationBarDestination(icon=ft.Icons.LIST_ALT, label="テストケース"),
                       ft.NavigationBarDestination(icon=ft.Icons.DATASET, label="パターンセット")],
         selected_index=0, on_change=on_nav)
+
+    # ── File picker for export dialogs ──
+    _export_file_picker = ft.FilePicker()
 
     page.appbar = ft.AppBar(title=ft.Text(APP_NAME, weight=ft.FontWeight.BOLD), center_title=False,
         bgcolor=ft.Colors.BLUE_50,

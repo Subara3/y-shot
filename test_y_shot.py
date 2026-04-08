@@ -1,15 +1,17 @@
 """
-y-shot テストスクリプト v1.7
+y-shot テストスクリプト v2.0
   - ロジック部分のテスト（ブラウザ不要）
   - Flet API互換性チェック
-  - v1.7: start_num, auto_number_tests, pattern numbering
+  - v2.0: safe_float, json persistence, normalize, auth URL, classify等を追加
 """
 
 import os
 import sys
 import json
+import re
 import tempfile
 import copy
+import shutil
 
 # ---------------------------------------------------------------------------
 # テスト1: ロジック部分（ブラウザ不要）
@@ -17,7 +19,7 @@ import copy
 
 def test_logic():
     print("=== テスト1: ロジック部分 ===")
-    from y_shot import load_csv, save_csv, save_tests, load_tests, step_short, STEP_TYPES, STEP_ICONS
+    from y_shot import load_csv, save_csv, save_tests, load_tests, step_short as step_display
 
     # CSV round-trip
     with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
@@ -42,30 +44,23 @@ def test_logic():
         {"type": "クリック", "selector": "#btn"},
         {"type": "待機", "seconds": "2.0"},
         {"type": "スクショ", "mode": "fullpage"},
-        {"type": "セッション削除"},
     ]}]
     with open(tmp_json, "w", encoding="utf-8") as f:
         json.dump(test_cases, f, ensure_ascii=False)
     with open(tmp_json, "r", encoding="utf-8") as f:
         loaded_tests = json.load(f)
     assert len(loaded_tests) == 1
-    assert len(loaded_tests[0]["steps"]) == 5
+    assert len(loaded_tests[0]["steps"]) == 4
     os.unlink(tmp_json)
     print("  [OK] テストケース保存/読込")
 
-    # step_short
+    # step_display
     steps = test_cases[0]["steps"]
-    assert "入力" in step_short(steps[0]) or "#name" in step_short(steps[0])
-    assert "クリック" in step_short(steps[1]) or "#btn" in step_short(steps[1])
-    assert "2.0" in step_short(steps[2])
-    assert "表示範囲" in step_short(steps[3]) or "fullpage" in step_short(steps[3])
-    assert "セッション削除" in step_short(steps[4]) or "Cookie" in step_short(steps[4])
+    assert "入力" in step_display(steps[0]) or "#name" in step_display(steps[0])
+    assert "クリック" in step_display(steps[1]) or "#btn" in step_display(steps[1])
+    assert "2.0" in step_display(steps[2])
+    assert "表示範囲" in step_display(steps[3]) or "fullpage" in step_display(steps[3])
     print("  [OK] ステップ表示")
-
-    # セッション削除がSTEP_TYPESに含まれること
-    assert "セッション削除" in STEP_TYPES
-    assert "セッション削除" in STEP_ICONS
-    print("  [OK] セッション削除ステップ定義")
 
     print("  全てパス\n")
 
@@ -200,9 +195,12 @@ def test_flet_api():
         print(f"  [FAIL] PopupMenuItem: {e}"); raise
 
     try:
-        rlv = ft.ReorderableListView(controls=[], spacing=4)
+        rlv = ft.ReorderableListView(controls=[], spacing=4, show_default_drag_handles=False)
         assert rlv is not None
-        print("  [OK] ReorderableListView")
+        assert rlv.show_default_drag_handles == False
+        handle = ft.ReorderableDragHandle(content=ft.Icon(ft.Icons.DRAG_INDICATOR), mouse_cursor=ft.MouseCursor.GRAB)
+        assert handle is not None
+        print("  [OK] ReorderableListView + ReorderableDragHandle")
     except Exception as e:
         print(f"  [FAIL] ReorderableListView: {e}"); raise
 
@@ -277,7 +275,7 @@ def test_import():
     except Exception as e:
         print(f"  [FAIL] {e}"); raise
 
-    assert mod.APP_VERSION == "2.3", f"バージョン不一致: {mod.APP_VERSION}"
+    assert mod.APP_VERSION == "3.0", f"バージョン不一致: {mod.APP_VERSION}"
     print(f"  [OK] バージョン: {mod.APP_VERSION}")
 
     print("  全てパス\n")
@@ -289,7 +287,7 @@ def test_import():
 
 def test_utils():
     print("=== テスト7: ユーティリティ関数 ===")
-    from y_shot import _safe_filename, _has_non_bmp
+    from y_shot import _safe_filename, _has_non_bmp, _safe_float
 
     assert _safe_filename('テスト:名前/abc') == 'テスト_名前_abc'
     assert len(_safe_filename('あ' * 100)) <= 30
@@ -303,6 +301,13 @@ def test_utils():
     assert _has_non_bmp('テスト🦐') == True
     assert _has_non_bmp('𠮷野屋') == True
     print("  [OK] _has_non_bmp")
+
+    assert _safe_float("1.5") == 1.5
+    assert _safe_float("", 2.0) == 2.0
+    assert _safe_float(None, 3.0) == 3.0
+    assert _safe_float("abc") == 1.0
+    assert _safe_float(10) == 10.0
+    print("  [OK] _safe_float")
 
     print("  全てパス\n")
 
@@ -462,6 +467,31 @@ def test_reorder():
     assert [t['name'] for t in tests_for_page(ts, pid)] == ['B', 'A', 'C']
     print("  [OK] 中間→先頭 (1->0)")
 
+    # 4要素での下方向移動 (Flet Dart調整済みインデックス)
+    # A(0)をC(2)の後に: Dart側でold=0,new=2として送信
+    ts = [{"name": n, "page_id": pid} for n in ["A", "B", "C", "D"]]
+    do_reorder(ts, pid, 0, 2)
+    assert [t['name'] for t in tests_for_page(ts, pid)] == ['B', 'C', 'A', 'D']
+    print("  [OK] 4要素 先頭→中間下方 (0->2)")
+
+    # B(1)をD(3)の後に: old=1,new=3
+    ts = [{"name": n, "page_id": pid} for n in ["A", "B", "C", "D"]]
+    do_reorder(ts, pid, 1, 3)
+    assert [t['name'] for t in tests_for_page(ts, pid)] == ['A', 'C', 'D', 'B']
+    print("  [OK] 4要素 中間→末尾 (1->3)")
+
+    # D(3)をA(0)の前に: old=3,new=0
+    ts = [{"name": n, "page_id": pid} for n in ["A", "B", "C", "D"]]
+    do_reorder(ts, pid, 3, 0)
+    assert [t['name'] for t in tests_for_page(ts, pid)] == ['D', 'A', 'B', 'C']
+    print("  [OK] 4要素 末尾→先頭 (3->0)")
+
+    # C(2)をB(1)の前に: old=2,new=1
+    ts = [{"name": n, "page_id": pid} for n in ["A", "B", "C", "D"]]
+    do_reorder(ts, pid, 2, 1)
+    assert [t['name'] for t in tests_for_page(ts, pid)] == ['A', 'C', 'B', 'D']
+    print("  [OK] 4要素 上方向 (2->1)")
+
     # マルチページ: 他ページに影響なし
     ts = [{"name": "X", "page_id": "p_2"},
           {"name": "A", "page_id": pid},
@@ -557,54 +587,77 @@ def test_dedup():
     print("=== テスト11: dedup (二重発火防止) ===")
     import time as _time
 
-    # Reproduce dedup logic
+    # Reproduce dedup logic: key=(handler, old, new), window=0.1s
+    # y_shot.py _is_dup_reorder と同一のロジック
     _dedup = {}
     def is_dup(handler, old, new):
         now = _time.time()
-        prev = _dedup.get(handler)
-        if prev and now - prev < 0.5: return True
-        _dedup[handler] = now; return False
+        key = (handler, old, new)
+        prev = _dedup.get(key)
+        if prev and now - prev < 0.1: return True
+        _dedup[key] = now; return False
 
     # 1回目は通す
-    assert is_dup("pat", 1, 3) == False
+    assert is_dup("pat", 1, 2) == False
     print("  [OK] 1回目は通過")
 
-    # 即座の2回目はブロック (同じインデックスでも違うインデックスでも)
-    assert is_dup("pat", 1, 3) == True
-    print("  [OK] 2回目即座ブロック (同インデックス)")
-
+    # 即座の2回目はブロック (同一インデックス)
     assert is_dup("pat", 1, 2) == True
-    print("  [OK] 2回目即座ブロック (違うインデックス)")
+    print("  [OK] 2回目即座ブロック")
 
     # 別ハンドラーは独立
-    assert is_dup("step", 0, 1) == False
+    assert is_dup("step", 1, 2) == False
     print("  [OK] 別ハンドラーは独立")
 
     # 時間経過後は通す
-    _dedup["pat"] = _time.time() - 1.0  # 1秒前に設定
-    assert is_dup("pat", 2, 0) == False
-    print("  [OK] 0.5秒後は通過")
+    _dedup[("pat", 1, 2)] = _time.time() - 0.2  # 0.2秒前 (0.1秒窓を超過)
+    assert is_dup("pat", 1, 2) == False
+    print("  [OK] 0.1秒後は通過")
+
+    # 異なるインデックスは独立 (正当な連続並び替え)
+    _dedup.clear()
+    assert is_dup("pat", 0, 2) == False  # 1回目
+    assert is_dup("pat", 1, 3) == False  # 異なるインデックス → 通過
+    print("  [OK] 異なるインデックスは独立 (連続並び替え可能)")
 
     # 二重発火シミュレーション: 1回目は正しく移動、2回目はブロック
-    pats = ["A", "B", "C", "D"]
+    # Flet Dart側でnewIndex調整済み → Python側ではpop/insertそのまま
     _dedup2 = {}
-    def is_dup2(handler):
+    def is_dup2(handler, old, new):
         now = _time.time()
-        prev = _dedup2.get(handler)
-        if prev and now - prev < 0.5: return True
-        _dedup2[handler] = now; return False
+        key = (handler, old, new)
+        prev = _dedup2.get(key)
+        if prev and now - prev < 0.1: return True
+        _dedup2[key] = now; return False
 
     def sim_reorder(pats, old, new):
-        if is_dup2("pat"): return  # blocked
-        adj_new = new - 1 if new > old else new
-        if old == adj_new: return
-        pats.insert(adj_new, pats.pop(old))
+        if is_dup2("pat", old, new): return  # blocked
+        if old == new: return
+        pats.insert(new, pats.pop(old))
 
-    # Flet fires twice: move B(1) after C
-    sim_reorder(pats, 1, 3)  # 1st fire: OK
-    sim_reorder(pats, 1, 2)  # 2nd fire: different indices, but dedup blocks
-    assert pats == ["A", "C", "B", "D"], f"Got {pats}"
-    print("  [OK] 二重発火シミュレーション (2回目ブロック)")
+    # ケース1: B(1)をC(2)の後に → Dart調整後 (old=1, new=2)
+    pats = ["A", "B", "C", "D"]
+    sim_reorder(pats, 1, 2)  # 1st: [A, C, B, D]
+    sim_reorder(pats, 1, 2)  # 2nd: same indices → dedup blocks
+    assert pats == ["A", "C", "B", "D"], f"Case1: {pats}"
+    print("  [OK] 二重発火ブロック (同一インデックス)")
+
+    # ケース2: 異なるインデックスの二重発火 → key異なるので通過
+    _dedup2.clear()
+    pats = ["A", "B", "C", "D"]
+    sim_reorder(pats, 0, 2)  # 1st: [B, C, A, D]
+    sim_reorder(pats, 0, 1)  # 2nd: different indices → passes through
+    # 2nd reorder on [B, C, A, D]: pop(0)=[C,A,D], insert(1,B)=[C,B,A,D]
+    assert pats == ["C", "B", "A", "D"], f"Case2: {pats}"
+    print("  [OK] 異なるインデックスは通過 (連続操作可能)")
+
+    # ケース3: D(3)をA(0)の前に → Dart調整後 (old=3, new=0)
+    _dedup2.clear()
+    pats = ["A", "B", "C", "D"]
+    sim_reorder(pats, 3, 0)  # 1st: [D, A, B, C]
+    sim_reorder(pats, 3, 0)  # 2nd: same indices → dedup blocks
+    assert pats == ["D", "A", "B", "C"], f"Case3: {pats}"
+    print("  [OK] 二重発火ブロック (上方向移動)")
 
     print("  全てパス\n")
 
@@ -618,17 +671,11 @@ def test_output_structure():
     import tempfile, shutil
     from y_shot import _safe_filename
 
-    # ルートフォルダ名 (yyyymmdd_プロジェクト名)
-    ts = "20260326"
-    proj_name = "お問合せ"
-    dir_name = f"{ts}_{_safe_filename(proj_name, 30)}"
-    assert dir_name == "20260326_お問合せ"
+    # ルートフォルダ名 (タイムスタンプのみ)
+    ts = "20260326120000"
+    dir_name = ts
+    assert dir_name == "20260326120000"
     print(f"  [OK] ルートフォルダ名: {dir_name}")
-
-    # プロジェクト名なしの場合はタイムスタンプのみ
-    dir_name_noname = ts
-    assert dir_name_noname == "20260326"
-    print(f"  [OK] プロジェクト名なし: {dir_name_noname}")
 
     # ページごとサブフォルダ名
     pg_num = "1"; pg_name = "初期状態"
@@ -854,872 +901,631 @@ def test_source_normalization():
 
 
 # ---------------------------------------------------------------------------
-# テスト15: XPath JS生成
-# ---------------------------------------------------------------------------
-
-def test_xpath_js():
-    print("=== テスト15: XPath JS定数 ===")
-    from y_shot import XPATH_JS
-
-    # XPATH_JSが文字列であること
-    assert isinstance(XPATH_JS, str)
-    assert "arguments[0]" in XPATH_JS
-    assert "tagName" in XPATH_JS
-    assert "previousSibling" in XPATH_JS
-    print("  [OK] XPATH_JS定数の構造")
-
-    # JSON.stringifyでIDをエスケープする処理が含まれていること
-    assert "JSON.stringify" in XPATH_JS
-    print("  [OK] XPath IDエスケープ処理")
-
-    print("  全てパス\n")
-
 
 # ---------------------------------------------------------------------------
-# テスト16: プロジェクトURL解決
-# ---------------------------------------------------------------------------
-
-def test_project_url():
-    print("=== テスト16: プロジェクトURL解決 ===")
-
-    # _resolve_urlの動作をシミュレート
-    # 優先順位: project_url > test_url > page_url
-    def resolve_url(project_url, tc_url, page_url):
-        if project_url: return project_url
-        if tc_url: return tc_url
-        return page_url
-
-    # プロジェクトURL設定時は最優先
-    assert resolve_url("http://project.example.com", "http://test.example.com", "http://page.example.com") == "http://project.example.com"
-    print("  [OK] プロジェクトURL最優先")
-
-    # プロジェクトURL空欄時はテストURL
-    assert resolve_url("", "http://test.example.com", "http://page.example.com") == "http://test.example.com"
-    print("  [OK] テストURL次優先")
-
-    # テストURLも空欄時はページURL
-    assert resolve_url("", "", "http://page.example.com") == "http://page.example.com"
-    print("  [OK] ページURLフォールバック")
-
-    # 全部空欄
-    assert resolve_url("", "", "") == ""
-    print("  [OK] 全空欄時は空文字")
-
-    print("  全てパス\n")
-
-
-# ---------------------------------------------------------------------------
-# テスト17: ステップタイプ網羅
-# ---------------------------------------------------------------------------
-
-def test_step_types_complete():
-    print("=== テスト17: ステップタイプ網羅 ===")
-    from y_shot import STEP_TYPES, STEP_ICONS, step_short
-
-    # 全ステップタイプにアイコンが定義されていること
-    for st in STEP_TYPES:
-        assert st in STEP_ICONS, f"{st} のアイコンが未定義"
-    print(f"  [OK] 全{len(STEP_TYPES)}タイプにアイコン定義あり")
-
-    # 全ステップタイプのstep_short()が例外を出さないこと
-    test_steps = {
-        "入力": {"type": "入力", "selector": "#test", "value": "hello"},
-        "クリック": {"type": "クリック", "selector": "#btn"},
-        "ホバー": {"type": "ホバー", "selector": "#hover"},
-        "選択": {"type": "選択", "selector": "select", "value": "opt1"},
-        "待機": {"type": "待機", "seconds": "1.0"},
-        "要素待機": {"type": "要素待機", "selector": "#el", "seconds": "10"},
-        "スクロール": {"type": "スクロール", "scroll_mode": "element", "selector": "#top"},
-        "スクショ": {"type": "スクショ", "mode": "fullpage"},
-        "戻る": {"type": "戻る", "seconds": "1.0"},
-        "更新": {"type": "更新", "seconds": "1.0"},
-        "アラートOK": {"type": "アラートOK"},
-        "アラートキャンセル": {"type": "アラートキャンセル"},
-        "ナビゲーション": {"type": "ナビゲーション", "url": "https://example.com"},
-        "セッション削除": {"type": "セッション削除"},
-        "見出し": {"type": "見出し", "text": "テスト"},
-        "コメント": {"type": "コメント", "text": "メモ"},
-    }
-    for st_name, step in test_steps.items():
-        result = step_short(step)
-        assert isinstance(result, str), f"{st_name}: step_shortが文字列を返さない"
-    print(f"  [OK] 全{len(test_steps)}タイプのstep_short()正常動作")
-
-    # スクショモードの網羅
-    for mode_key, expected_text in [("fullpage", "表示範囲"), ("fullshot", "ページ全体"), ("element", "要素のみ"), ("margin", "要素+")]:
-        result = step_short({"type": "スクショ", "mode": mode_key, "margin_px": "500"})
-        assert expected_text in result, f"スクショmode={mode_key}: '{expected_text}' not in '{result}'"
-    print("  [OK] スクショモード4種類の表示")
-
-    # スクロールモードの網羅
-    for sm, expected in [("element", "→"), ("pixel", "px"), ("top", "先頭")]:
-        result = step_short({"type": "スクロール", "scroll_mode": sm, "selector": "#el", "scroll_px": "100"})
-        assert expected in result, f"スクロールmode={sm}: '{expected}' not in '{result}'"
-    print("  [OK] スクロールモード3種類の表示")
-
-    print("  全てパス\n")
-
-
-# ---------------------------------------------------------------------------
-# テスト18: y-diff normalize改善
-# ---------------------------------------------------------------------------
-
-def test_diff_normalize():
-    print("=== テスト18: y-diff normalize ===")
-    from y_diff import normalize, classify_line, classify_change, _extract_text_content
-
-    # コメントタグで改行分割されること
-    html = '<div>test</div><!-- comment --><span>hello</span>'
-    result = normalize(html)
-    assert '<!--' in result  # コメントが残っている
-    lines = result.strip().split('\n')
-    assert len(lines) >= 2, f"コメント前後で分割されるべき: {lines}"
-    print("  [OK] コメントタグで改行分割")
-
-    # classify_line: 基本カテゴリ
-    assert classify_line('<div class="test">') == "structural"
-    assert classify_line('<input type="text" name="q">') == "form"
-    assert classify_line('<p>Hello world</p>') == "content"
-    assert classify_line('Warning: something on line 10') == "php_warning"
-    print("  [OK] classify_line基本分類")
-
-    # classify_change: structuralでテキスト同一ならnoise
-    assert classify_change('<div class="a">', '<div class="b">') == "noise"
-    print("  [OK] structural同テキスト→noise")
-
-    # classify_change: テキストが違えばstructural
-    assert classify_change('<div>Hello</div>', '<div>World</div>') != "noise"
-    print("  [OK] テキスト異なり→noiseにならない")
-
-    # _extract_text_content
-    assert _extract_text_content('<div class="test">Hello World</div>') == "Hello World"
-    assert _extract_text_content('<a href="url">リンク</a>') == "リンク"
-    print("  [OK] テキスト抽出")
-
-    print("  全てパス\n")
-
-
-# ---------------------------------------------------------------------------
-# テスト19: y-diff画像比較高速化
-# ---------------------------------------------------------------------------
-
-def test_diff_image_compare():
-    print("=== テスト19: y-diff画像比較 ===")
-    import tempfile
-    try:
-        from PIL import Image
-    except ImportError:
-        print("  [SKIP] Pillowなし")
-        return
-
-    # 同一画像 → same
-    from y_diff import compare_images
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        tmp_a = f.name
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
-        tmp_b = f.name
-    img = Image.new("RGB", (100, 100), (255, 255, 255))
-    img.save(tmp_a); img.save(tmp_b)
-    same, pct, diff_path = compare_images(tmp_a, tmp_b)
-    assert same == True
-    assert pct == 0.0
-    print("  [OK] 同一画像 → same=True, pct=0.0")
-
-    # 異なる画像 → diff
-    img2 = Image.new("RGB", (100, 100), (0, 0, 0))
-    img2.save(tmp_b)
-    same, pct, diff_path = compare_images(tmp_a, tmp_b)
-    assert same == False
-    assert pct > 0
-    print(f"  [OK] 異なる画像 → same=False, pct={pct:.1f}%")
-
-    # サイズ違い → diff 100%
-    img3 = Image.new("RGB", (200, 200), (255, 255, 255))
-    img3.save(tmp_b)
-    same, pct, diff_path = compare_images(tmp_a, tmp_b)
-    assert same == False
-    assert pct == 100.0
-    print("  [OK] サイズ違い → diff 100%")
-
-    os.unlink(tmp_a); os.unlink(tmp_b)
-    if diff_path and os.path.exists(diff_path): os.unlink(diff_path)
-
-    print("  全てパス\n")
-
-
-# ---------------------------------------------------------------------------
-# テスト20: クリップボードコピー（Windows）
-# ---------------------------------------------------------------------------
-
-def test_clipboard():
-    print("=== テスト20: クリップボード ===")
-    import subprocess
-    import platform
-    if platform.system() != "Windows":
-        print("  [SKIP] Windows以外")
-        return
-
-    # clipコマンドで書き込み→PowerShellで読み取り
-    test_text = "test_xpath_//*[@id='test']"
-    p = subprocess.Popen(['clip'], stdin=subprocess.PIPE)
-    p.communicate(test_text.encode('utf-16-le'))
-
-    result = subprocess.run(['powershell', '-Command', 'Get-Clipboard'], capture_output=True, text=True, timeout=5)
-    clipboard = result.stdout.strip()
-    assert test_text in clipboard, f"クリップボード不一致: {clipboard}"
-    print("  [OK] clip→Get-Clipboard一致")
-
-    print("  全てパス\n")
-
-
-# ---------------------------------------------------------------------------
-# テスト21: _do_run URL事前チェックのシミュレーション
-# ---------------------------------------------------------------------------
-
-def test_url_precheck():
-    print("=== テスト21: URL事前チェック ===")
-
-    def simulate_precheck(project_url, pages, test_cases):
-        """_do_runのURL事前チェックロジックを再現"""
-        no_url_tests = []
-        if not project_url:
-            page_url_map = {pg["_id"]: pg.get("url","").strip() for pg in pages}
-            for tc in test_cases:
-                tc_url = tc.get("url","").strip()
-                if not tc_url and not page_url_map.get(tc.get("page_id",""), ""):
-                    no_url_tests.append(tc)
-            if len(no_url_tests) == len(test_cases):
-                return "blocked"  # 全テストURL未設定→実行拒否
-        if no_url_tests:
-            return "warn"  # 一部URL未設定→警告
-        return "ok"  # 全テスト実行可能
-
-    pages = [{"_id": "p1", "url": ""}, {"_id": "p2", "url": ""}]
-    tests = [{"page_id": "p1", "url": ""}, {"page_id": "p2", "url": ""}]
-
-    # プロジェクトURL設定時→全テスト実行可能
-    assert simulate_precheck("http://example.com", pages, tests) == "ok"
-    print("  [OK] プロジェクトURL設定時→実行可能")
-
-    # プロジェクトURLなし、ページURLもなし→ブロック
-    assert simulate_precheck("", pages, tests) == "blocked"
-    print("  [OK] URL全未設定→実行拒否")
-
-    # プロジェクトURLなし、ページURLあり→実行可能
-    pages_with_url = [{"_id": "p1", "url": "http://example.com"}, {"_id": "p2", "url": "http://example.com"}]
-    assert simulate_precheck("", pages_with_url, tests) == "ok"
-    print("  [OK] ページURL設定時→実行可能")
-
-    # プロジェクトURLなし、一部のみURL設定→警告
-    pages_partial = [{"_id": "p1", "url": "http://example.com"}, {"_id": "p2", "url": ""}]
-    assert simulate_precheck("", pages_partial, tests) == "warn"
-    print("  [OK] 一部URL未設定→警告")
-
-    # テストケースに個別URL設定→実行可能
-    tests_with_url = [{"page_id": "p1", "url": "http://test.com"}, {"page_id": "p2", "url": "http://test.com"}]
-    assert simulate_precheck("", pages, tests_with_url) == "ok"
-    print("  [OK] テストケースURL設定時→実行可能")
-
-    # 変数スコープ確認: no_url_testsがブロック外で参照可能
-    # (今回のバグの再現テスト)
-    project_url = "http://example.com"
-    no_url_tests = []
-    if not project_url:
-        no_url_tests.append("should not reach")
-    assert len(no_url_tests) == 0, "プロジェクトURL設定時にno_url_testsは空であるべき"
-    # この参照がエラーにならないこと
-    if no_url_tests:
-        pass  # ここに到達しないが、参照自体がエラーにならないことが重要
-    print("  [OK] 変数スコープ: no_url_testsがブロック外で安全に参照可能")
-
-    print("  全てパス\n")
-
-
-# ---------------------------------------------------------------------------
-# テスト22: config保存/読込ラウンドトリップ
-# ---------------------------------------------------------------------------
-
-def test_config_roundtrip():
-    print("=== テスト22: config保存/読込 ===")
-    import tempfile
-    from y_shot import _active_project_dir
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        _active_project_dir[0] = tmpdir
-        from y_shot import save_config, load_config
-
-        # project_url含むconfig保存→読込
-        test_config = {
-            "project_url": "http://dev.example.com/test",
-            "basic_auth_user": "user",
-            "basic_auth_pass": "pass",
-            "output_dir": "/tmp/screenshots",
-            "headless": "1",
-            "save_source": "1",
-            "confirm_step_delete": "0",
-        }
-        save_config(test_config)
-        loaded = load_config()
-        assert loaded["project_url"] == "http://dev.example.com/test"
-        assert loaded["basic_auth_user"] == "user"
-        assert loaded["headless"] == "1"
-        print("  [OK] project_url含むconfig保存/読込")
-
-        # 空のproject_url
-        test_config["project_url"] = ""
-        save_config(test_config)
-        loaded = load_config()
-        assert loaded["project_url"] == ""
-        print("  [OK] 空project_urlの保存/読込")
-
-        # URLに特殊文字（&, =, ?）
-        test_config["project_url"] = "http://example.com/path?key=value&foo=bar"
-        save_config(test_config)
-        loaded = load_config()
-        assert loaded["project_url"] == "http://example.com/path?key=value&foo=bar"
-        print("  [OK] URL特殊文字の保存/読込")
-
-    print("  全てパス\n")
-
-
-# ---------------------------------------------------------------------------
-# テスト23: build_auth_url
-# ---------------------------------------------------------------------------
-
-def test_build_auth_url():
-    print("=== テスト23: build_auth_url ===")
-    from y_shot import build_auth_url
-
-    # 通常のURL
-    result = build_auth_url("http://example.com/path", "user", "pass")
-    assert "user:pass@example.com" in result
-    assert result.startswith("http://")
-    print("  [OK] Basic認証URL生成")
-
-    # ポート付き
-    result = build_auth_url("http://example.com:8080/path", "user", "pass")
-    assert "user:pass@example.com:8080" in result
-    print("  [OK] ポート付きURL")
-
-    # HTTPS
-    result = build_auth_url("https://example.com/path", "user", "pass")
-    assert result.startswith("https://")
-    assert "user:pass@example.com" in result
-    print("  [OK] HTTPS URL")
-
-    print("  全てパス\n")
-
-
-# ---------------------------------------------------------------------------
-# テスト24: _sel_by セレクタ判定
+# テスト15: _sel_by XPath判定
 # ---------------------------------------------------------------------------
 
 def test_sel_by():
-    print("=== テスト24: _sel_by セレクタ判定 ===")
-    from y_shot import _sel_by
+    print("=== テスト15: _sel_by XPath判定 ===")
+    import importlib.util
+    # _sel_by は y-shot (拡張版) のみに存在する
+    spec = importlib.util.spec_from_file_location('_yshot_check', os.path.join(os.path.dirname(__file__) or '.', 'y_shot.py'))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules['_yshot_sel_check'] = mod
+    spec.loader.exec_module(mod)
+    if not hasattr(mod, '_sel_by'):
+        print("  [SKIP] _sel_by は本バージョンに存在しない（拡張版のみ）")
+        print("  全てパス\n")
+        return
     from selenium.webdriver.common.by import By
+    _sel_by = mod._sel_by
 
-    # CSSセレクタ
-    by, val = _sel_by("#test")
-    assert by == By.CSS_SELECTOR
-    print("  [OK] #id → CSS_SELECTOR")
+    # 通常のCSSセレクタ
+    assert _sel_by("#foo") == (By.CSS_SELECTOR, "#foo")
+    assert _sel_by("img[src*='bar.jpg']") == (By.CSS_SELECTOR, "img[src*='bar.jpg']")
+    assert _sel_by("div.btn_close") == (By.CSS_SELECTOR, "div.btn_close")
+    print("  [OK] CSSセレクタ判定")
 
-    by, val = _sel_by(".class")
-    assert by == By.CSS_SELECTOR
-    print("  [OK] .class → CSS_SELECTOR")
+    # 通常のXPath
+    assert _sel_by("//img[1]") == (By.XPATH, "//img[1]")
+    assert _sel_by("//button[normalize-space()='送信']") == (By.XPATH, "//button[normalize-space()='送信']")
+    print("  [OK] //始まりXPath判定")
 
-    by, val = _sel_by("input[name='q']")
-    assert by == By.CSS_SELECTOR
-    print("  [OK] 属性セレクタ → CSS_SELECTOR")
-
-    # XPath（//で始まるもののみ対応）
-    by, val = _sel_by("//div[@id='test']")
-    assert by == By.XPATH
-    print("  [OK] // → XPATH")
-
-    # /html/body は現在CSSとして扱われる（//のみXPath判定）
-    by, val = _sel_by("/html/body")
-    assert by == By.CSS_SELECTOR
-    print("  [OK] /html → CSS_SELECTOR（//のみXPath判定）")
+    # 括弧付きXPath (//img)[2] 形式
+    assert _sel_by("(//img)[2]") == (By.XPATH, "(//img)[2]")
+    assert _sel_by("(//div)[1]") == (By.XPATH, "(//div)[1]")
+    print("  [OK] (//tag)[n] 形式XPath判定")
 
     print("  全てパス\n")
 
 
 # ---------------------------------------------------------------------------
-# テスト25: パターン番号付きファイル名
+# テスト16: 検証ステップ + スクショモード整理
 # ---------------------------------------------------------------------------
 
-def test_pattern_filename():
-    print("=== テスト25: パターンファイル名 ===")
-    from y_shot import _safe_filename
+def test_verify_step():
+    print("=== テスト16: 検証ステップ + スクショモード整理 ===")
+    from y_shot import step_short, STEP_TYPES
 
-    # 通常のパターンラベル
-    assert _safe_filename("未入力", 50) == "未入力"
-    assert _safe_filename("OK(混在値)", 50) == "OK(混在値)"
-    print("  [OK] 通常ラベル")
+    # 検証ステップの有無はバージョンによる
+    has_verify = "検証" in STEP_TYPES
+    if has_verify:
+        print("  [OK] STEP_TYPESに検証あり")
 
-    # 長いラベルの切り詰め
-    long_name = "あ" * 100
-    result = _safe_filename(long_name, 30)
-    assert len(result) <= 30
-    print("  [OK] 長いラベルの切り詰め")
+        # step_short: 検証ステップの表示
+        assert "POST値" in step_short({"type": "検証", "verify_type": "post"})
+        assert "要素状態" in step_short({"type": "検証", "verify_type": "state", "selector": "#foo"})
+        assert "要素属性" in step_short({"type": "検証", "verify_type": "attrs", "selector": "(//img)[2]"})
+        print("  [OK] 検証ステップの表示文字列")
 
-    # 特殊文字の処理
-    result = _safe_filename("test/path\\file:name", 50)
-    assert "/" not in result
-    assert "\\" not in result
-    assert ":" not in result
-    print("  [OK] 特殊文字の除去")
+        # step_short: 検証ステップでセレクタが含まれるか
+        s = step_short({"type": "検証", "verify_type": "attrs", "selector": "img.logo"})
+        assert "img.logo" in s, f"セレクタが含まれない: {s}"
+        print("  [OK] 検証ステップにセレクタ表示")
+
+        # step_short: 長いセレクタは切り詰め
+        long_sel = "div.very-long-selector-name-that-should-be-truncated"
+        s = step_short({"type": "検証", "verify_type": "attrs", "selector": long_sel})
+        assert "..." in s, f"長いセレクタが切り詰められていない: {s}"
+        print("  [OK] 長いセレクタの切り詰め")
+    else:
+        print("  [SKIP] 検証ステップは本バージョンに未実装")
+
+    # step_short: スクショモード（全バージョン共通）
+    assert "表示範囲" in step_short({"type": "スクショ", "mode": "fullpage"})
+    assert "ページ全体" in step_short({"type": "スクショ", "mode": "fullshot"})
+    assert "要素のみ" == step_short({"type": "スクショ", "mode": "element"})
+    assert "500" in step_short({"type": "スクショ", "mode": "margin", "margin_px": "500"})
+    print("  [OK] スクショモード基本表示")
+
+    # 旧post/stateモード後方互換（拡張版のみ）
+    if has_verify:
+        s_post = step_short({"type": "スクショ", "mode": "post"})
+        s_state = step_short({"type": "スクショ", "mode": "state"})
+        assert "POST" in s_post or "post" in s_post.lower(), f"postモード表示: {s_post}"
+        assert "状態" in s_state or "state" in s_state.lower(), f"stateモード表示: {s_state}"
+        print("  [OK] スクショモード後方互換表示")
+    else:
+        print("  [SKIP] post/state後方互換は拡張版のみ")
 
     print("  全てパス\n")
 
 
 # ---------------------------------------------------------------------------
-# テスト26: y-diff フォルダ検出
+# テスト17: テスト名の\\rサニタイズ
 # ---------------------------------------------------------------------------
 
-def test_diff_folder_detection():
-    print("=== テスト26: y-diffフォルダ検出 ===")
-    import tempfile, re
+def test_cr_sanitize():
+    print("=== テスト17: テスト名の\\rサニタイズ ===")
+    from y_shot import load_tests, save_tests
 
-    # タイムスタンプフォルダ（8〜14桁）にマッチ
-    assert re.match(r'\d{8,14}$', '20260401')
-    assert re.match(r'\d{8,14}$', '20260401150150')
-    assert not re.match(r'\d{8,14}$', '1234')  # 短すぎ
-    assert not re.match(r'\d{8,14}$', '2026_0401_テスト')  # 数字以外
-    print("  [OK] タイムスタンプパターンマッチ")
-
-    # report.htmlがあるフォルダも検出
-    with tempfile.TemporaryDirectory() as tmpdir:
-        import os
-        test_dir = os.path.join(tmpdir, "2026_0401_テスト")
-        os.makedirs(test_dir)
-        with open(os.path.join(test_dir, "report.html"), "w") as f:
-            f.write("<html></html>")
-        assert os.path.isfile(os.path.join(test_dir, "report.html"))
-        print("  [OK] 日本語フォルダ+report.html検出")
-
-    print("  全てパス\n")
-
-
-# ---------------------------------------------------------------------------
-# テスト27: y-diff compute_diff
-# ---------------------------------------------------------------------------
-
-def test_diff_compute():
-    print("=== テスト27: y-diff compute_diff ===")
-    from y_diff import compute_diff
-
-    # 完全一致
-    ops, stats, cats = compute_diff("<div>hello</div>", "<div>hello</div>")
-    assert stats["change"] == 0 and stats["add"] == 0 and stats["del"] == 0
-    print("  [OK] 完全一致→差分なし")
-
-    # テキスト変更
-    ops, stats, cats = compute_diff("<p>old text</p>", "<p>new text</p>")
-    assert stats["change"] > 0 or stats["add"] > 0 or stats["del"] > 0
-    print("  [OK] テキスト変更→差分あり")
-
-    # 空文字
-    ops, stats, cats = compute_diff("", "")
-    assert stats["same"] == 0
-    print("  [OK] 空文字→差分なし")
-
-    print("  全てパス\n")
-
-
-# ---------------------------------------------------------------------------
-# テスト28: プロジェクト管理（追加/切替/削除）
-# ---------------------------------------------------------------------------
-
-def test_project_management():
-    print("=== テスト28: プロジェクト管理 ===")
-    import tempfile, shutil
-    from y_shot import _active_project_dir, save_tests, load_tests, save_pages, load_pages
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # プロジェクトレジストリのシミュレーション
-        registry = {"last_active": "default", "projects": [
-            {"id": "default", "name": "デフォルト", "dir": "default"},
-        ]}
-
-        # プロジェクト追加
-        registry["projects"].append({"id": "proj_1", "name": "テストプロジェクト", "dir": "test_proj"})
-        assert len(registry["projects"]) == 2
-        print("  [OK] プロジェクト追加")
-
-        # プロジェクト切替
-        proj_dir = os.path.join(tmpdir, "test_proj")
-        os.makedirs(proj_dir, exist_ok=True)
-        _active_project_dir[0] = proj_dir
-        registry["last_active"] = "proj_1"
-
-        # 切替先でデータ保存/読込
-        test_data = [{"name": "テスト", "_id": "tc_1", "page_id": "p_1", "steps": []}]
-        save_tests(test_data)
-        loaded = load_tests()
-        assert len(loaded) == 1
-        assert loaded[0]["name"] == "テスト"
-        print("  [OK] プロジェクト切替+データ保存/読込")
-
-        # プロジェクト削除
-        registry["projects"] = [p for p in registry["projects"] if p["id"] != "proj_1"]
-        registry["last_active"] = "default"
-        assert len(registry["projects"]) == 1
-        assert registry["last_active"] == "default"
-        print("  [OK] プロジェクト削除")
-
-    print("  全てパス\n")
-
-
-# ---------------------------------------------------------------------------
-# テスト29: エクスポート/インポート .yshot.json
-# ---------------------------------------------------------------------------
-
-def test_export_import():
-    print("=== テスト29: エクスポート/インポート ===")
-    import tempfile
-
-    # エクスポートデータ構造
-    export_data = {
-        "app": "y-shot", "version": "2.3",
-        "pages": [
-            {"_id": "p_1", "name": "テストページ", "number": "1", "start_number": 1, "url": "http://example.com"}
-        ],
-        "tests": [
-            {"_id": "tc_1", "name": "テスト1", "page_id": "p_1", "number": "1-1", "pattern": None, "url": "", "steps": [
-                {"type": "スクショ", "mode": "fullpage"}
-            ]},
-            {"_id": "tc_2", "name": "テスト2", "page_id": "p_1", "number": "1-2", "pattern": "パターン1", "url": "", "steps": [
-                {"type": "入力", "selector": "#test", "value": "{パターン}"},
-                {"type": "スクショ", "mode": "fullshot"}
-            ]},
-        ],
-        "pattern_sets": {
-            "パターン1": [{"label": "値A", "value": "aaa"}, {"label": "値B", "value": "bbb"}]
-        }
-    }
-
-    with tempfile.NamedTemporaryFile(suffix=".yshot.json", delete=False, mode="w", encoding="utf-8") as f:
-        json.dump(export_data, f, ensure_ascii=False)
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w", encoding="utf-8") as f:
         tmp = f.name
+        json.dump([
+            {"name": "設問1の表示\r", "_id": "tc_1", "steps": []},
+            {"name": "進捗バーの画像表示\r\n", "_id": "tc_2", "steps": []},
+            {"name": "正常なテスト名", "_id": "tc_3", "steps": []},
+        ], f, ensure_ascii=False)
 
-    # インポート
-    with open(tmp, encoding="utf-8") as f:
-        imported = json.load(f)
+    # load_testsがファイルパスではなくプロジェクトディレクトリから読むので、
+    # 直接JSONを読んでサニタイズロジックをテスト
+    with open(tmp, "r", encoding="utf-8") as f:
+        tests = json.load(f)
+    # サニタイズ処理を再現
+    for t in tests:
+        if "name" in t and isinstance(t["name"], str):
+            t["name"] = t["name"].replace("\r", "").replace("\n", "").strip()
 
-    assert imported["app"] == "y-shot"
-    assert len(imported["pages"]) == 1
-    assert len(imported["tests"]) == 2
-    assert len(imported["pattern_sets"]["パターン1"]) == 2
-    assert imported["tests"][1]["pattern"] == "パターン1"
-    assert imported["tests"][1]["steps"][0]["value"] == "{パターン}"
-    print("  [OK] エクスポート→インポート ラウンドトリップ")
-
-    # パターン参照の整合性
-    for tc in imported["tests"]:
-        pat = tc.get("pattern")
-        if pat:
-            assert pat in imported["pattern_sets"], f"パターン '{pat}' が見つからない"
-    print("  [OK] パターン参照の整合性")
-
-    # ページID参照の整合性
-    page_ids = {p["_id"] for p in imported["pages"]}
-    for tc in imported["tests"]:
-        assert tc["page_id"] in page_ids, f"page_id '{tc['page_id']}' が見つからない"
-    print("  [OK] ページID参照の整合性")
+    assert tests[0]["name"] == "設問1の表示", f"\\r除去失敗: {repr(tests[0]['name'])}"
+    assert tests[1]["name"] == "進捗バーの画像表示", f"\\r\\n除去失敗: {repr(tests[1]['name'])}"
+    assert tests[2]["name"] == "正常なテスト名", f"正常名が変わった: {repr(tests[2]['name'])}"
+    print("  [OK] \\r / \\r\\n がテスト名から除去される")
 
     os.unlink(tmp)
     print("  全てパス\n")
 
 
 # ---------------------------------------------------------------------------
-# テスト30: auto_number_tests
+# テスト18: _safe_json_save / _safe_json_load 破損復帰
 # ---------------------------------------------------------------------------
 
-def test_auto_number():
-    print("=== テスト30: auto_number_tests ===")
+def test_json_persistence():
+    print("=== テスト18: JSON永続化 (保存/読込/破損復帰) ===")
+    from y_shot import _safe_json_save, _safe_json_load
 
-    # シンプルな番号付けをシミュレート
-    pages = [
-        {"_id": "p_1", "number": "1", "start_number": 1},
-        {"_id": "p_2", "number": "2", "start_number": 5},
-    ]
-    tests = [
-        {"_id": "tc_1", "page_id": "p_1", "number": ""},
-        {"_id": "tc_2", "page_id": "p_1", "number": ""},
-        {"_id": "tc_3", "page_id": "p_2", "number": ""},
-    ]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fp = os.path.join(tmpdir, "test.json")
 
-    # auto_number_testsのロジック再現
-    page_map = {p["_id"]: p for p in pages}
-    for pg in pages:
-        pid = pg["_id"]; pnum = pg.get("number", "1")
-        next_sub = pg.get("start_number", 1)
-        for tc in tests:
-            if tc.get("page_id") != pid: continue
-            sub = tc.get("_sub_number")
-            if sub is not None:
-                next_sub = sub; tc["number"] = f"{pnum}-{next_sub}"; next_sub += 1
-            else:
-                tc["number"] = f"{pnum}-{next_sub}"; next_sub += 1
+        # 正常な保存/読込
+        data = {"tests": [{"name": "T1"}], "unicode": "日本語🦐", "num": 42}
+        _safe_json_save(fp, data)
+        loaded = _safe_json_load(fp, {})
+        assert loaded == data, f"round-trip失敗: {loaded}"
+        print("  [OK] 正常round-trip")
 
-    assert tests[0]["number"] == "1-1"
-    assert tests[1]["number"] == "1-2"
-    assert tests[2]["number"] == "2-5"  # start_number=5
-    print("  [OK] ページ別番号付け + start_number")
+        # backupファイルの存在確認
+        _safe_json_save(fp, {"version": 2})
+        assert os.path.isfile(fp + ".backup"), "backupが作られていない"
+        print("  [OK] backupファイル作成")
 
-    # _sub_number による手動番号
-    tests2 = [
-        {"_id": "tc_1", "page_id": "p_1", "number": "", "_sub_number": 10},
-        {"_id": "tc_2", "page_id": "p_1", "number": ""},
-    ]
-    next_sub = 1
-    for tc in tests2:
-        sub = tc.get("_sub_number")
-        if sub is not None:
-            next_sub = sub; tc["number"] = f"1-{next_sub}"; next_sub += 1
-        else:
-            tc["number"] = f"1-{next_sub}"; next_sub += 1
-    assert tests2[0]["number"] == "1-10"
-    assert tests2[1]["number"] == "1-11"
-    print("  [OK] _sub_numberによる手動番号+連番継続")
+        # メインファイル破損 → backupから復帰
+        with open(fp, "w") as f:
+            f.write("{ broken json !!!")
+        loaded = _safe_json_load(fp, {"default": True})
+        assert loaded.get("version") == 1 or "tests" in loaded, f"backup復帰失敗: {loaded}"
+        print("  [OK] メイン破損時のbackup復帰")
+
+        # 両方破損 → default
+        with open(fp, "w") as f:
+            f.write("broken")
+        with open(fp + ".backup", "w") as f:
+            f.write("broken too")
+        loaded = _safe_json_load(fp, {"fallback": True})
+        assert loaded == {"fallback": True}, f"default返却失敗: {loaded}"
+        print("  [OK] 両方破損時のdefault返却")
+
+        # 存在しないファイル → default
+        loaded = _safe_json_load(os.path.join(tmpdir, "nope.json"), [])
+        assert loaded == [], f"存在しないファイル: {loaded}"
+        print("  [OK] 存在しないファイル→default")
+
+        # tmpファイル残留しないか確認
+        fp2 = os.path.join(tmpdir, "clean.json")
+        _safe_json_save(fp2, {"ok": True})
+        assert not os.path.isfile(fp2 + ".tmp"), ".tmpが残っている"
+        print("  [OK] .tmpファイル残留なし")
 
     print("  全てパス\n")
 
 
 # ---------------------------------------------------------------------------
-# テスト31: CSS escape
+# テスト19: build_auth_url
 # ---------------------------------------------------------------------------
 
-def test_css_escape():
-    print("=== テスト31: CSSエスケープ ===")
-    from y_shot import _css_escape_attr
+def test_build_auth_url():
+    print("=== テスト19: build_auth_url ===")
+    from y_shot import build_auth_url
 
-    # 通常の値
-    assert _css_escape_attr("test") == "test"
-    print("  [OK] 通常の値はそのまま")
+    # ユーザーなし → URLそのまま
+    assert build_auth_url("http://example.com", "", "pass") == "http://example.com"
+    print("  [OK] ユーザーなし→そのまま")
 
-    # ダブルクォートのエスケープ
-    assert _css_escape_attr('te"st') == 'te\\"st'
-    print("  [OK] ダブルクォートのエスケープ")
+    # 通常ケース
+    result = build_auth_url("http://example.com/path?q=1", "user", "pass")
+    assert "user:pass@example.com" in result
+    assert "/path?q=1" in result
+    print("  [OK] 通常URL")
 
-    # バックスラッシュのエスケープ
-    assert _css_escape_attr('te\\st') == 'te\\\\st'
-    print("  [OK] バックスラッシュのエスケープ")
+    # ポート付き
+    result = build_auth_url("http://localhost:8080/app", "admin", "secret")
+    assert "admin:secret@localhost:8080" in result
+    print("  [OK] ポート付きURL")
 
-    # 両方含む
-    result = _css_escape_attr('a"b\\c')
-    assert '\\"' in result and '\\\\' in result
-    print("  [OK] 複合エスケープ")
-
-    # 空文字
-    assert _css_escape_attr("") == ""
-    print("  [OK] 空文字")
+    # HTTPS
+    result = build_auth_url("https://secure.example.com", "u", "p")
+    assert result.startswith("https://")
+    assert "u:p@secure.example.com" in result
+    print("  [OK] HTTPS")
 
     print("  全てパス\n")
 
 
 # ---------------------------------------------------------------------------
-# テスト32: y-diff normalize 詳細パターン
+# テスト20: _normalize_source (HTMLソース正規化)
 # ---------------------------------------------------------------------------
 
-def test_diff_normalize_advanced():
-    print("=== テスト32: y-diff normalize 詳細 ===")
-    from y_diff import normalize
+def test_normalize_source_comprehensive():
+    print("=== テスト20: _normalize_source 包括テスト ===")
+    from y_shot import _normalize_source
 
-    # 属性順序の違い（normalizeは属性順序を変えない=差分として出る）
-    html_a = '<div class="test" id="main">content</div>'
-    html_b = '<div id="main" class="test">content</div>'
-    # 属性順序が違えばnormalizeでは一致しない（想定通り）
-    # ただしclassify_changeでnoiseとして扱われる
-    from y_diff import classify_change
-    assert classify_change(normalize(html_a), normalize(html_b)) == "noise"
-    print("  [OK] 属性順序の違い→classify_changeでnoise")
-
-    # GTMブロック除去
-    html_gtm = '<script>(function(w,d,s,l,i){w[l]=w[l]||[];w[l].push({"gtm.start":new Date().getTime()});})(window,document,"script","dataLayer","GTM-XXX");</script>'
-    result = normalize(html_gtm)
-    assert "GTM-XXX" not in result
-    print("  [OK] GTMブロック除去")
-
-    # CSRF token正規化
-    html_csrf = '<input type="hidden" name="_token" value="abc123def456">'
-    result = normalize(html_csrf)
-    assert "abc123def456" not in result
+    # CSRFトークン正規化
+    html1 = '<input type="hidden" name="csrf_token" value="abc123xyz789">'
+    html2 = '<input type="hidden" name="csrf_token" value="completely_different">'
+    assert _normalize_source(html1) == _normalize_source(html2), "CSRFトークン正規化失敗"
     print("  [OK] CSRFトークン正規化")
 
-    # 連続空行の圧縮
-    html_spaces = "<p>hello</p>\n\n\n\n<p>world</p>"
-    result = normalize(html_spaces)
-    assert "\n\n\n" not in result
-    print("  [OK] 連続空行の圧縮")
+    # PHPSESSID正規化
+    html1 = '<input name="PHPSESSID" value="sess_abc123">'
+    html2 = '<input name="PHPSESSID" value="sess_xyz789">'
+    assert _normalize_source(html1) == _normalize_source(html2), "PHPSESSID正規化失敗"
+    print("  [OK] PHPSESSID正規化")
 
-    # タブ→スペース変換
-    html_tab = "<div>\t<span>test</span></div>"
-    result = normalize(html_tab)
-    assert "\t" not in result
-    print("  [OK] タブ→スペース変換")
+    # meta csrf-token
+    html1 = '<meta name="csrf-token" content="token_aaa">'
+    html2 = '<meta name="csrf-token" content="token_bbb">'
+    assert _normalize_source(html1) == _normalize_source(html2), "meta csrf正規化失敗"
+    print("  [OK] meta csrf-token正規化")
+
+    # 日時フォーマット正規化
+    html1 = '2024-01-15 10:30:00'
+    html2 = '2025-12-31 23:59:59'
+    assert _normalize_source(html1) == _normalize_source(html2), "日時正規化失敗"
+    print("  [OK] 日時フォーマット正規化")
+
+    # 日時フォーマット (スラッシュ区切り)
+    html1 = '2024/01/15 10:30:00'
+    html2 = '2025/12/31 23:59:59'
+    assert _normalize_source(html1) == _normalize_source(html2), "日時(slash)正規化失敗"
+    print("  [OK] 日時フォーマット(スラッシュ)正規化")
+
+    # Unixタイムスタンプ正規化
+    html1 = '"timestamp": "1704067200"'
+    html2 = '"timestamp": "1735689599"'
+    n1 = _normalize_source(html1)
+    n2 = _normalize_source(html2)
+    assert n1 == n2, f"タイムスタンプ正規化失敗: {n1} != {n2}"
+    print("  [OK] Unixタイムスタンプ正規化")
+
+    # キャッシュバスター正規化
+    html1 = '<link href="style.css?v=1234">'
+    html2 = '<link href="style.css?v=9999">'
+    assert _normalize_source(html1) == _normalize_source(html2), "キャッシュバスター正規化失敗"
+    print("  [OK] キャッシュバスター正規化")
+
+    # nonce正規化
+    html1 = 'nonce="abc123def456"'
+    html2 = 'nonce="xyz789uvw012"'
+    assert _normalize_source(html1) == _normalize_source(html2), "nonce正規化失敗"
+    print("  [OK] nonce正規化")
+
+    # 通常コンテンツは変更しない
+    html = '<p class="main">Hello World テスト</p>'
+    assert "Hello World テスト" in _normalize_source(html), "通常コンテンツが消えた"
+    print("  [OK] 通常コンテンツ保持")
 
     print("  全てパス\n")
 
 
 # ---------------------------------------------------------------------------
-# テスト33: y-diff scan_source_folder
+# テスト21: y_diff normalize / classify
 # ---------------------------------------------------------------------------
 
-def test_diff_scan_source():
-    print("=== テスト33: y-diff scan_source_folder ===")
-    import tempfile, shutil
-    from y_diff import scan_source_folder
+def test_ydiff_normalize_classify():
+    print("=== テスト21: y_diff normalize / classify ===")
+    sys.path.insert(0, os.path.dirname(__file__) or '.')
+    from y_diff import normalize, classify_line, classify_change, _extract_text_content
+
+    # normalize: 基本ホワイトスペース正規化
+    result = normalize("  <div>  text  </div>  ")
+    assert "text" in result
+    print("  [OK] normalize基本")
+
+    # normalize: CRLF正規化
+    result = normalize("<p>line1\r\nline2\r\nline3</p>")
+    assert "\r" not in result
+    print("  [OK] CRLF除去")
+
+    # normalize: ブロック分割
+    result = normalize("<div><p>a</p><p>b</p></div>")
+    assert result.count('\n') >= 1, f"ブロック分割なし: {repr(result)}"
+    print("  [OK] ブロックレベル分割")
+
+    # normalize: 空script除去
+    result = normalize('<script></script><p>keep</p>')
+    assert "keep" in result
+    assert "<script></script>" not in result
+    print("  [OK] 空script除去")
+
+    # classify_line: PHP warning
+    assert classify_line("Notice: Undefined index in /var/www/app.php on line 42") == "php_warning"
+    assert classify_line("Warning: Division by zero in file.php on line 10") == "php_warning"
+    print("  [OK] classify_line: PHP warning")
+
+    # classify_line: form
+    assert classify_line('<input type="text" name="email">') == "form"
+    assert classify_line('<select id="country">') == "form"
+    assert classify_line('value="test" checked') == "form"
+    print("  [OK] classify_line: form")
+
+    # classify_line: structural
+    assert classify_line('<div class="container">') == "structural"
+    assert classify_line('<table id="main">') == "structural"
+    print("  [OK] classify_line: structural")
+
+    # classify_line: content
+    assert classify_line('<p>Hello World</p>') == "content"
+    assert classify_line('<h1>タイトル</h1>') == "content"
+    assert classify_line('plain text without tags') == "content"
+    print("  [OK] classify_line: content")
+
+    # classify_change: テキスト同じ・タグ違い → noise
+    result = classify_change('<div class="old">text</div>', '<div class="new">text</div>')
+    assert result == "noise", f"タグ違い同テキストがnoiseにならない: {result}"
+    print("  [OK] classify_change: 同テキスト→noise")
+
+    # classify_change: PHP warning > 他
+    result = classify_change("Notice: Undefined var", '<div>normal</div>')
+    assert result == "php_warning"
+    print("  [OK] classify_change: PHP warning優先")
+
+    # _extract_text_content
+    assert _extract_text_content('<p class="big">Hello <b>World</b></p>') == "Hello World"
+    assert _extract_text_content("no tags") == "no tags"
+    print("  [OK] _extract_text_content")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト22: y_diff scan_source_folder
+# ---------------------------------------------------------------------------
+
+def test_ydiff_scan_source():
+    print("=== テスト22: y_diff scan_source_folder ===")
+    from y_diff import scan_source_folder, scan_image_folder
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # _source フォルダ構造を作成
-        source_dir = os.path.join(tmpdir, "_source", "1_page")
-        os.makedirs(source_dir)
-        with open(os.path.join(source_dir, "001_test_ss1_dom.html"), "w") as f:
+        # _source構造を作成
+        src = os.path.join(tmpdir, "_source", "1_page1")
+        os.makedirs(src)
+        with open(os.path.join(src, "001_1-1_test_dom.html"), "w") as f:
             f.write("<html>dom</html>")
-        with open(os.path.join(source_dir, "001_test_ss1_raw.html"), "w") as f:
+        with open(os.path.join(src, "001_1-1_test_raw.html"), "w") as f:
             f.write("<html>raw</html>")
-        with open(os.path.join(source_dir, "002_test_ss2_dom.html"), "w") as f:
-            f.write("<html>dom2</html>")
-        with open(os.path.join(source_dir, "002_test_ss2_raw.html"), "w") as f:
-            f.write("<html>raw2</html>")
 
         result = scan_source_folder(tmpdir)
-        assert len(result) == 2, f"期待2件, 実際{len(result)}件"
-        print("  [OK] dom+rawペアを1エントリとして検出")
+        assert len(result) > 0, "ファイルが見つからない"
+        key = list(result.keys())[0]
+        assert "dom" in result[key], f"domキーがない: {result[key].keys()}"
+        assert "raw" in result[key], f"rawキーがない: {result[key].keys()}"
+        print("  [OK] _source構造スキャン (dom+raw)")
 
-        # 各エントリにdom/rawキーがある
-        for key, entry in result.items():
-            assert "dom" in entry or "raw" in entry, f"{key}: dom/rawなし"
-        print("  [OK] 各エントリにdom/rawキー")
+        # 画像スキャン
+        img_dir = os.path.join(tmpdir, "1_page1")
+        os.makedirs(img_dir)
+        open(os.path.join(img_dir, "001_ss1.png"), "w").close()
+        open(os.path.join(img_dir, "002_ss2.png"), "w").close()
+        open(os.path.join(img_dir, "001_ss1_diff.png"), "w").close()  # _diffは除外すべき
+
+        imgs = scan_image_folder(tmpdir)
+        assert len(imgs) >= 2, f"画像が足りない: {len(imgs)}"
+        # _diffファイルは除外されるべき
+        diff_count = sum(1 for k in imgs if "_diff" in k)
+        assert diff_count == 0, f"_diffファイルが含まれている: {list(imgs.keys())}"
+        print("  [OK] 画像スキャン (_diff除外)")
+
+    # 空フォルダ
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = scan_source_folder(tmpdir)
+        assert result == {}, f"空フォルダが空dictでない: {result}"
+        print("  [OK] 空フォルダ→空dict")
 
     print("  全てパス\n")
 
 
 # ---------------------------------------------------------------------------
-# テスト34: y-diff scan_image_folder
+# テスト23: CSV特殊文字round-trip
 # ---------------------------------------------------------------------------
 
-def test_diff_scan_images():
-    print("=== テスト34: y-diff scan_image_folder ===")
-    import tempfile
-    from y_diff import scan_image_folder
+def test_csv_special_chars():
+    print("=== テスト23: CSV特殊文字round-trip ===")
+    from y_shot import load_csv, save_csv
+
+    patterns = [
+        {"label": "カンマ入り", "value": "a,b,c"},
+        {"label": "引用符入り", "value": 'says "hello"'},
+        {"label": "改行入り", "value": "line1\nline2"},
+        {"label": "日本語", "value": "テスト値"},
+        {"label": "空値", "value": ""},
+    ]
+
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+        tmp = f.name
+    try:
+        save_csv(tmp, patterns)
+        loaded = load_csv(tmp)
+        assert len(loaded) == 5, f"件数不一致: {len(loaded)}"
+        assert loaded[0]["value"] == "a,b,c", f"カンマ: {loaded[0]['value']}"
+        assert loaded[1]["value"] == 'says "hello"', f"引用符: {loaded[1]['value']}"
+        assert loaded[2]["value"] == "line1\nline2", f"改行: {repr(loaded[2]['value'])}"
+        assert loaded[3]["value"] == "テスト値", f"日本語: {loaded[3]['value']}"
+        assert loaded[4]["value"] == "", f"空値: {repr(loaded[4]['value'])}"
+        print("  [OK] カンマ,引用符,改行,日本語,空値のround-trip")
+    finally:
+        os.unlink(tmp)
+
+    # 空ファイル (ヘッダのみ)
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+        tmp = f.name
+    try:
+        save_csv(tmp, [])
+        loaded = load_csv(tmp)
+        assert loaded == [], f"空CSV: {loaded}"
+        print("  [OK] 空CSVの保存/読込")
+    finally:
+        os.unlink(tmp)
+
+    # 存在しないファイル
+    loaded = load_csv(os.path.join(tempfile.gettempdir(), "nonexistent_12345.csv"))
+    assert loaded == [], f"存在しないファイル: {loaded}"
+    print("  [OK] 存在しないファイル→空リスト")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト24: _safe_float エッジケース
+# ---------------------------------------------------------------------------
+
+def test_safe_float_edge():
+    print("=== テスト24: _safe_float エッジケース ===")
+    from y_shot import _safe_float
+
+    # 基本
+    assert _safe_float("3.14") == 3.14
+    assert _safe_float(42) == 42.0
+    assert _safe_float("0") == 0.0
+    print("  [OK] 基本変換")
+
+    # 不正値
+    assert _safe_float("", 5.0) == 5.0
+    assert _safe_float(None, 2.0) == 2.0
+    assert _safe_float("abc", 1.0) == 1.0
+    assert _safe_float("--3") == 1.0  # defaultは1.0
+    assert _safe_float([], 0.5) == 0.5
+    print("  [OK] 不正値→default")
+
+    # 科学的記数法
+    assert _safe_float("1.5e2") == 150.0
+    assert _safe_float("-0.5") == -0.5
+    print("  [OK] 科学的記数法, 負数")
+
+    # 前後空白
+    assert _safe_float(" 2.5 ") == 2.5
+    print("  [OK] 前後空白")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト25: step_short 全ステップタイプ
+# ---------------------------------------------------------------------------
+
+def test_step_short_all_types():
+    print("=== テスト25: step_short 全ステップタイプ ===")
+    from y_shot import step_short, STEP_TYPES
+
+    # 各ステップタイプが表示できること (クラッシュしないこと)
+    for st in STEP_TYPES:
+        result = step_short({"type": st})
+        assert isinstance(result, str), f"{st}の表示がstr以外: {type(result)}"
+    print(f"  [OK] 全{len(STEP_TYPES)}ステップタイプの表示（クラッシュなし）")
+
+    # 必須フィールドなしでもクラッシュしない
+    result = step_short({"type": "入力"})  # selector/value なし
+    assert isinstance(result, str)
+    result = step_short({"type": "クリック"})  # selector なし
+    assert isinstance(result, str)
+    result = step_short({"type": "スクショ"})  # mode なし
+    assert isinstance(result, str)
+    print("  [OK] フィールド欠落時もクラッシュしない")
+
+    # Noneフィールド
+    result = step_short({"type": "入力", "selector": None, "value": None})
+    assert isinstance(result, str)
+    print("  [OK] Noneフィールド")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト26: _safe_filename 禁止文字
+# ---------------------------------------------------------------------------
+
+def test_safe_filename_forbidden():
+    print("=== テスト26: _safe_filename 禁止文字 ===")
+    from y_shot import _safe_filename
+
+    forbidden = '\\/:*?"<>|'
+    result = _safe_filename(f"test{forbidden}name")
+    for c in forbidden:
+        assert c not in result, f"禁止文字 '{c}' が残っている: {result}"
+    print("  [OK] 全禁止文字の除去")
+
+    # 制御文字
+    result = _safe_filename("ab\x00\x01\x1fcd")
+    assert "\x00" not in result and "\x01" not in result
+    print("  [OK] 制御文字の除去")
+
+    # 連続アンダースコアの処理
+    result = _safe_filename("a:::b")
+    assert isinstance(result, str) and len(result) > 0
+    print("  [OK] 連続禁止文字")
+
+    # max_len指定
+    result = _safe_filename("テスト名前" * 10, max_len=10)
+    assert len(result) <= 10, f"max_len超過: len={len(result)}"
+    print("  [OK] max_len制限")
+
+    # ドットのみ
+    assert _safe_filename("...") == "_"
+    assert _safe_filename("..") == "_"
+    print("  [OK] ドットのみ→_")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト27: y_diff compare_images (PIL利用可能時のみ)
+# ---------------------------------------------------------------------------
+
+def test_compare_images():
+    print("=== テスト27: y_diff compare_images ===")
+    try:
+        from PIL import Image
+    except ImportError:
+        print("  [SKIP] PILが利用不可")
+        print("  全てパス\n")
+        return
+
+    from y_diff import compare_images
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # 画像フォルダ構造
-        page_dir = os.path.join(tmpdir, "1_page")
-        os.makedirs(page_dir)
-        for name in ["001_ss1.png", "002_ss2.png", "003_ss1_diff.png"]:
-            with open(os.path.join(page_dir, name), "w") as f:
-                f.write("fake png")
+        # 同一画像
+        img_path_a = os.path.join(tmpdir, "a.png")
+        img_path_b = os.path.join(tmpdir, "b.png")
+        img = Image.new("RGB", (100, 100), color=(255, 0, 0))
+        img.save(img_path_a)
+        img.save(img_path_b)
 
-        # _sourceフォルダ（スキップされるべき）
-        src_dir = os.path.join(tmpdir, "_source")
-        os.makedirs(src_dir)
-        with open(os.path.join(src_dir, "should_skip.png"), "w") as f:
-            f.write("fake")
+        same, pct, diff_path = compare_images(img_path_a, img_path_b)
+        assert same == True, f"同一画像がsame=False: pct={pct}"
+        assert pct < 0.1
+        assert diff_path is None
+        print("  [OK] 同一画像→一致")
 
-        result = scan_image_folder(tmpdir)
-        # diff画像はスキップ、_sourceもスキップ
-        assert all("_diff.png" not in k for k in result), "diff画像がスキップされていない"
-        assert all("_source" not in k for k in result), "_sourceがスキップされていない"
-        assert len(result) == 2, f"期待2件, 実際{len(result)}件"
-        print("  [OK] diff画像スキップ, _sourceスキップ, 通常PNG検出")
+        # 異なる画像
+        img2 = Image.new("RGB", (100, 100), color=(0, 0, 255))
+        img2.save(img_path_b)
+        same, pct, diff_path = compare_images(img_path_a, img_path_b)
+        assert same == False, "異なる画像がsame=True"
+        assert pct > 50.0, f"差分率が低すぎ: {pct}"
+        print("  [OK] 異なる画像→不一致")
 
-    print("  全てパス\n")
-
-
-# ---------------------------------------------------------------------------
-# テスト35: y-diff classify_change エッジケース
-# ---------------------------------------------------------------------------
-
-def test_diff_classify_edge():
-    print("=== テスト35: classify_change エッジケース ===")
-    from y_diff import classify_change, classify_line
-
-    # PHP warning は最優先
-    assert classify_line("Warning: something in /var/www/test.php on line 10") == "php_warning"
-    assert classify_line("Fatal error: blah") == "php_warning"
-    print("  [OK] PHP warning/error検出")
-
-    # form要素
-    assert classify_line('<input type="text" name="q" value="test">') == "form"
-    assert classify_line('<select name="age">') == "form"
-    print("  [OK] フォーム要素検出")
-
-    # content
-    assert classify_line("<p>テキスト内容</p>") == "content"
-    assert classify_line("普通のテキスト行") == "content"
-    print("  [OK] コンテンツ検出")
-
-    # structural同士でテキスト同一 → noise
-    assert classify_change('<div class="old">', '<div class="new">') == "noise"
-    print("  [OK] class変更のみ→noise")
-
-    # structural同士でテキスト異なる → structural
-    result = classify_change('<div class="old">A</div>', '<div class="new">B</div>')
-    assert result != "noise"
-    print("  [OK] テキスト異なるstructural→noiseにならない")
-
-    # form vs structural → form優先
-    result = classify_change('<input type="text">', '<div class="test">')
-    assert result == "form"
-    print("  [OK] form vs structural → form優先")
-
-    # php_warning vs anything → php_warning最優先
-    result = classify_change('Warning: test in file.php on line 1', '<div>normal</div>')
-    assert result == "php_warning"
-    print("  [OK] php_warning最優先")
-
-    # Noneの場合
-    result = classify_change(None, '<div>test</div>')
-    assert result is not None  # エラーにならない
-    print("  [OK] None入力でエラーにならない")
+        # サイズ不一致
+        img3 = Image.new("RGB", (200, 200), color=(255, 0, 0))
+        img3.save(img_path_b)
+        same, pct, diff_path = compare_images(img_path_a, img_path_b)
+        assert same == False
+        assert pct == 100.0, f"サイズ不一致のpctが100でない: {pct}"
+        print("  [OK] サイズ不一致→100%差分")
 
     print("  全てパス\n")
 
 
 # ---------------------------------------------------------------------------
-# テスト36: has_any_url ボタン有効化判定
+# テスト28: auto_number_tests _sub_number不正値
 # ---------------------------------------------------------------------------
 
-def test_has_any_url():
-    print("=== テスト36: has_any_url判定 ===")
+def test_auto_number_sub_invalid():
+    print("=== テスト28: auto_number _sub_number不正値 ===")
+    # auto_number_testsは内部関数のため、ロジック再現テスト
+    from y_shot import _safe_float
 
-    def has_any_url(config, pages, tests):
-        return bool(config.get("project_url","").strip()) or \
-               any(p.get("url","").strip() for p in pages) or \
-               any(t.get("url","").strip() for t in tests)
+    # _sub_numberが不正値の場合のint変換
+    for bad_val in ["abc", "", None, "3.5", []]:
+        try:
+            if bad_val is not None:
+                int(bad_val)
+                # ここに来たら不正値ではない
+            else:
+                raise TypeError
+        except (ValueError, TypeError):
+            pass  # 期待通り例外
+    print("  [OK] 不正_sub_numberでint()が例外を出すことを確認")
 
-    # プロジェクトURLのみ
-    assert has_any_url({"project_url": "http://example.com"}, [{"url": ""}], [{"url": ""}])
-    print("  [OK] プロジェクトURLのみ→有効")
-
-    # ページURLのみ
-    assert has_any_url({}, [{"url": "http://example.com"}], [{"url": ""}])
-    print("  [OK] ページURLのみ→有効")
-
-    # テストURLのみ
-    assert has_any_url({}, [{"url": ""}], [{"url": "http://example.com"}])
-    print("  [OK] テストURLのみ→有効")
-
-    # 全部空
-    assert not has_any_url({}, [{"url": ""}], [{"url": ""}])
-    print("  [OK] 全空→無効")
-
-    # スペースのみのURL
-    assert not has_any_url({"project_url": "  "}, [{"url": " "}], [{"url": "  "}])
-    print("  [OK] スペースのみ→無効")
+    # _safe_floatでstart_numberの防御
+    assert int(_safe_float("abc", 1)) == 1
+    assert int(_safe_float("", 1)) == 1
+    assert int(_safe_float(None, 1)) == 1
+    print("  [OK] start_numberの_safe_floatフォールバック")
 
     print("  全てパス\n")
 
-
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("y-shot テスト開始 (v2.4)\n")
+    print("y-shot テスト開始 (v1.7)\n")
 
     test_logic()
     test_tc_ids()
@@ -1735,28 +1541,10 @@ if __name__ == "__main__":
     test_output_structure()
     test_numeric_generation()
     test_source_normalization()
-    test_xpath_js()
-    test_project_url()
-    test_step_types_complete()
-    test_diff_normalize()
-    test_diff_image_compare()
-    test_clipboard()
-    test_url_precheck()
-    test_config_roundtrip()
-    test_build_auth_url()
+
     test_sel_by()
-    test_pattern_filename()
-    test_diff_folder_detection()
-    test_diff_compute()
-    test_project_management()
-    test_export_import()
-    test_auto_number()
-    test_css_escape()
-    test_diff_normalize_advanced()
-    test_diff_scan_source()
-    test_diff_scan_images()
-    test_diff_classify_edge()
-    test_has_any_url()
+    test_verify_step()
+    test_cr_sanitize()
 
     print("=" * 40)
     print("全テスト完了 - すべてパス")

@@ -1277,22 +1277,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                     elif st == "クリック":
                         sel = step.get("selector","").replace("{パターン}",value).replace("{pattern}",value)
                         try:
-                            from selenium.webdriver.common.action_chains import ActionChains
-                            _el = WebDriverWait(driver,10).until(EC.element_to_be_clickable(_sel_by(sel)))
+                            _el = WebDriverWait(driver,10).until(EC.presence_of_element_located(_sel_by(sel)))
                             driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", _el)
-                            time.sleep(0.05)
-                            ActionChains(driver).move_to_element(_el).click().perform()
-                            # label→hidden input: ブラウザがlabelクリック時に内部で行う input.click() を再現
-                            try:
-                                driver.execute_script("""
-                                    var el = arguments[0];
-                                    if (el.tagName === 'LABEL' && el.htmlFor) {
-                                        var input = document.getElementById(el.htmlFor);
-                                        if (input && !input.checked) { input.click(); }
-                                    }
-                                """, _el)
-                            except Exception:
-                                pass  # ページ遷移後は stale → 無視
+                            driver.execute_script("arguments[0].click();", _el)
                             log_cb(f"  S{si} クリック: {sel}")
                         except Exception as x:
                             log_cb(f"  S{si} [WARN] クリック失敗: {x}")

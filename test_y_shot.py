@@ -1527,22 +1527,21 @@ def test_auto_number_sub_invalid():
 
 
 # ---------------------------------------------------------------------------
-# テスト29: Selenium ActionChains / element_to_be_clickable 利用可能確認
+# テスト29: Selenium API 利用可能確認 (クリック処理・ホバー処理の前提)
 # ---------------------------------------------------------------------------
 
-def test_selenium_actionchains():
-    print("=== テスト29: Selenium ActionChains 利用可能確認 ===")
+def test_selenium_api():
+    print("=== テスト29: Selenium API 利用可能確認 ===")
 
-    # ActionChains がインポート可能か
+    # クリック処理で使用: presence_of_element_located
+    from selenium.webdriver.support import expected_conditions as EC
+    assert hasattr(EC, 'presence_of_element_located')
+    print("  [OK] presence_of_element_located (クリック処理)")
+
+    # ホバー処理で使用: ActionChains
     from selenium.webdriver.common.action_chains import ActionChains
     assert ActionChains is not None
-    print("  [OK] ActionChains インポート")
-
-    # element_to_be_clickable が利用可能か
-    from selenium.webdriver.support import expected_conditions as EC
-    assert hasattr(EC, 'element_to_be_clickable')
-    assert hasattr(EC, 'presence_of_element_located')
-    print("  [OK] expected_conditions (element_to_be_clickable, presence_of_element_located)")
+    print("  [OK] ActionChains (ホバー処理)")
 
     # By がインポート可能か
     from selenium.webdriver.common.by import By
@@ -1550,7 +1549,7 @@ def test_selenium_actionchains():
     assert hasattr(By, 'XPATH')
     print("  [OK] By (CSS_SELECTOR, XPATH)")
 
-    # _sel_by がCSS/XPathを正しく判別するか (テスト15と重複だが、クリック処理の前提確認として)
+    # _sel_by がCSS/XPathを正しく判別するか
     from y_shot import _sel_by
     assert _sel_by("#btn")[0] == By.CSS_SELECTOR
     assert _sel_by("//div")[0] == By.XPATH

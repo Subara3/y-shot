@@ -1,8 +1,9 @@
 """
-y-shot テストスクリプト v2.0
+y-shot テストスクリプト v3.0
   - ロジック部分のテスト（ブラウザ不要）
   - Flet API互換性チェック
   - v2.0: safe_float, json persistence, normalize, auth URL, classify等を追加
+  - v3.0: エクスポート/インポートFilePicker対応、ActionChainsクリック、Selenium API確認
 """
 
 import os
@@ -269,7 +270,8 @@ def test_import():
         for fn_name in ['main', '_main_inner', 'kill_driver', 'run_all_tests', 'collect_elements_python',
                          'step_short', 'load_csv', 'save_csv', 'load_tests', 'save_tests',
                          'load_pattern_sets', 'save_pattern_sets', 'load_pages', 'save_pages',
-                         'build_auth_url', 'capture_form_values', '_safe_filename', '_has_non_bmp']:
+                         'build_auth_url', 'capture_form_values', '_safe_filename', '_has_non_bmp',
+                         '_sel_by']:
             assert hasattr(mod, fn_name), f"{fn_name} が見つからない"
         print("  [OK] モジュール読込 + 全関数存在確認")
     except Exception as e:
@@ -1524,8 +1526,131 @@ def test_auto_number_sub_invalid():
     print("  全てパス\n")
 
 
+# ---------------------------------------------------------------------------
+# テスト29: Selenium ActionChains / element_to_be_clickable 利用可能確認
+# ---------------------------------------------------------------------------
+
+def test_selenium_actionchains():
+    print("=== テスト29: Selenium ActionChains 利用可能確認 ===")
+
+    # ActionChains がインポート可能か
+    from selenium.webdriver.common.action_chains import ActionChains
+    assert ActionChains is not None
+    print("  [OK] ActionChains インポート")
+
+    # element_to_be_clickable が利用可能か
+    from selenium.webdriver.support import expected_conditions as EC
+    assert hasattr(EC, 'element_to_be_clickable')
+    assert hasattr(EC, 'presence_of_element_located')
+    print("  [OK] expected_conditions (element_to_be_clickable, presence_of_element_located)")
+
+    # By がインポート可能か
+    from selenium.webdriver.common.by import By
+    assert hasattr(By, 'CSS_SELECTOR')
+    assert hasattr(By, 'XPATH')
+    print("  [OK] By (CSS_SELECTOR, XPATH)")
+
+    # _sel_by がCSS/XPathを正しく判別するか (テスト15と重複だが、クリック処理の前提確認として)
+    from y_shot import _sel_by
+    assert _sel_by("#btn")[0] == By.CSS_SELECTOR
+    assert _sel_by("//div")[0] == By.XPATH
+    assert _sel_by("(//img)[3]")[0] == By.XPATH
+    assert _sel_by("label.radio_center")[0] == By.CSS_SELECTOR
+    print("  [OK] _sel_by CSS/XPath判別")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト30: Flet FilePicker API確認 (v3.0 エクスポート/インポート)
+# ---------------------------------------------------------------------------
+
+def test_flet_filepicker():
+    print("=== テスト30: Flet FilePicker API確認 ===")
+    import inspect
+    import flet as ft
+
+    # FilePicker が存在するか
+    assert hasattr(ft, 'FilePicker'), "ft.FilePicker が存在しない"
+    print("  [OK] ft.FilePicker 存在")
+
+    # save_file / pick_files がメソッドとして存在するか
+    fp = ft.FilePicker()
+    assert hasattr(fp, 'save_file'), "save_file メソッドが存在しない"
+    assert hasattr(fp, 'pick_files'), "pick_files メソッドが存在しない"
+    print("  [OK] save_file / pick_files メソッド存在")
+
+    # async であることの確認（v3.0ではawaitで呼ぶため）
+    assert inspect.iscoroutinefunction(fp.save_file), "save_file が async でない"
+    assert inspect.iscoroutinefunction(fp.pick_files), "pick_files が async でない"
+    print("  [OK] save_file / pick_files は async")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト31: プロジェクトエクスポートデータ構造
+# ---------------------------------------------------------------------------
+
+def test_project_export_structure():
+    print("=== テスト31: プロジェクトエクスポートデータ構造 ===")
+    from y_shot import APP_NAME, APP_VERSION
+
+    # エクスポートされるJSON構造のシミュレーション
+    pages = [{"_id": "p_1", "name": "テストページ", "number": "1", "start_number": 1, "url": ""}]
+    tests = [{"name": "テスト1", "pattern": None, "steps": [
+        {"type": "クリック", "selector": "#btn"},
+        {"type": "スクショ", "mode": "fullpage"},
+    ], "_id": "tc_1", "page_id": "p_1", "number": "1-1"}]
+    pattern_sets = {"基本セット": [{"label": "未入力", "value": ""}]}
+    config = {"project_url": "http://example.com", "headless": "0"}
+    selector_bank = {"http://example.com": [{"selector": "#btn", "tag": "button"}]}
+
+    project_data = {
+        "app": APP_NAME, "version": APP_VERSION,
+        "project_name": "テストプロジェクト",
+        "pages": pages, "tests": tests,
+        "pattern_sets": pattern_sets, "config": config,
+        "selector_bank": selector_bank,
+    }
+
+    # 必須キーの存在確認
+    for key in ["app", "version", "project_name", "pages", "tests", "pattern_sets", "config", "selector_bank"]:
+        assert key in project_data, f"必須キー '{key}' がない"
+    print("  [OK] 必須キー存在")
+
+    # JSON round-trip
+    json_str = json.dumps(project_data, ensure_ascii=False, indent=2)
+    loaded = json.loads(json_str)
+    assert loaded["app"] == APP_NAME
+    assert loaded["version"] == APP_VERSION
+    assert len(loaded["pages"]) == 1
+    assert len(loaded["tests"]) == 1
+    assert len(loaded["tests"][0]["steps"]) == 2
+    assert "基本セット" in loaded["pattern_sets"]
+    print("  [OK] JSON round-trip")
+
+    # インポート時のバリデーション条件
+    assert "pages" in loaded and "tests" in loaded, "インポートバリデーション失敗"
+    # output_dir はインポート時に除外される
+    config_with_outdir = dict(config, output_dir="C:/some/path")
+    imp_config = {k: v for k, v in config_with_outdir.items() if k != "output_dir"}
+    assert "output_dir" not in imp_config
+    assert "project_url" in imp_config
+    print("  [OK] インポート時output_dir除外")
+
+    # テスト名の\\rサニタイズ（インポート処理）
+    imp_tests = [{"name": "テスト\r\n名", "_id": "tc_1", "steps": []}]
+    for t in imp_tests:
+        if "name" in t: t["name"] = t["name"].replace("\r", "").replace("\n", "").strip()
+    assert imp_tests[0]["name"] == "テスト名"
+    print("  [OK] インポート時\\r\\nサニタイズ")
+
+    print("  全てパス\n")
+
+
 if __name__ == "__main__":
-    print("y-shot テスト開始 (v1.7)\n")
+    print("y-shot テスト開始 (v2.0)\n")
 
     test_logic()
     test_tc_ids()

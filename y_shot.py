@@ -1277,35 +1277,11 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                     elif st == "クリック":
                         sel = step.get("selector","").replace("{パターン}",value).replace("{pattern}",value)
                         try:
-                            try:
-                                _el = WebDriverWait(driver,10).until(EC.element_to_be_clickable(_sel_by(sel)))
-                            except Exception:
-                                # Fallback: hidden input や zero-size label 等
-                                _el = WebDriverWait(driver,3).until(EC.presence_of_element_located(_sel_by(sel)))
+                            from selenium.webdriver.common.action_chains import ActionChains
+                            _el = WebDriverWait(driver,10).until(EC.element_to_be_clickable(_sel_by(sel)))
                             driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", _el)
-                            # Selenium native click: label→radio紐づけ等のブラウザ標準動作を確実に発火
-                            # JS click fallback: overlay被り等でinterceptされる場合の保険
-                            try:
-                                _el.click()
-                            except Exception:
-                                driver.execute_script("arguments[0].click();", _el)
-                            # label→hidden input fallback: CSS カスタムラジオ/チェックボックス対策
-                            # label クリックで for 先の input が checked にならない場合、JS で強制チェック
-                            # クリックでページ遷移した場合は stale element になるので無視
-                            try:
-                                driver.execute_script("""
-                                    var el = arguments[0];
-                                    if (el.tagName === 'LABEL' && el.htmlFor) {
-                                        var input = document.getElementById(el.htmlFor);
-                                        if (input && (input.type === 'radio' || input.type === 'checkbox') && !input.checked) {
-                                            input.checked = true;
-                                            input.dispatchEvent(new Event('change', {bubbles: true}));
-                                            input.dispatchEvent(new Event('input', {bubbles: true}));
-                                        }
-                                    }
-                                """, _el)
-                            except Exception:
-                                pass  # ページ遷移後は stale → 無視
+                            time.sleep(0.05)
+                            ActionChains(driver).move_to_element(_el).click().perform()
                             log_cb(f"  S{si} クリック: {sel}")
                         except Exception as x:
                             log_cb(f"  S{si} [WARN] クリック失敗: {x}")

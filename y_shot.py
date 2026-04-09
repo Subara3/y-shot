@@ -1187,9 +1187,11 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                 pats = [{"label": "single", "value": ""}]
             tc_pid = tc.get("page_id")
             tc_outdir = None  # resolved lazily on first screenshot
-            log_cb(f"\n{'='*50}")
+            log_cb("")
+            log_cb(f"{'='*50}")
             log_cb(f"テストケース: {tc_number} {tc_name} ({len(pats)} パターン)")
             log_cb(f"{'='*50}")
+            log_cb("")
 
             for pi, pat in enumerate(pats, 1):
                 if stop_event and stop_event.is_set():
@@ -1279,7 +1281,10 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         try:
                             _el = WebDriverWait(driver,10).until(EC.presence_of_element_located(_sel_by(sel)))
                             driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", _el)
-                            driver.execute_script("arguments[0].click();", _el)
+                            try:
+                                _el.click()
+                            except Exception:
+                                driver.execute_script("arguments[0].click();", _el)
                             log_cb(f"  S{si} クリック: {sel}")
                         except Exception as x:
                             log_cb(f"  S{si} [WARN] クリック失敗: {x}")
@@ -2160,10 +2165,10 @@ def _main_inner(page: ft.Page):
         else: color = ft.Colors.GREY_700
         log_list.controls.append(ft.Text(f"[{ts}] {msg}", size=11, selectable=True, font_family="Consolas", color=color))
         if len(log_list.controls) > LOG_MAX_LINES: log_list.controls.pop(0)
-        try: log_list.update()
-        except Exception:
-            try: page.update()
-            except Exception: pass
+        try:
+            page.update()
+            time.sleep(0.02)  # UIスレッドへの反映を待つ
+        except Exception: pass
     def _log_error(context, exc):
         _flog.error(f"{context}: {exc}\n{traceback.format_exc()}")
         log(f"[ERROR] {context}: {exc}")

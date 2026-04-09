@@ -1648,6 +1648,278 @@ def test_project_export_structure():
     print("  全てパス\n")
 
 
+# ---------------------------------------------------------------------------
+# テスト32: 要素ブラウザ _el_idx_to_row キャッシュロジック
+# ---------------------------------------------------------------------------
+
+def test_el_idx_to_row_cache():
+    print("=== テスト32: 要素ブラウザ インデックスマッピング ===")
+
+    # filter_el_table のマッピング構築ロジックを再現
+    def build_idx_to_row(elements, show_hidden=False, query=""):
+        idx_to_row = {}
+        visible_count = 0
+        for i, el in enumerate(elements):
+            is_visible = el.get("visible", True)
+            if not is_visible and not show_hidden:
+                continue
+            if query:
+                searchable = " ".join([
+                    el.get("tag", ""), el.get("type", ""), el.get("id", ""),
+                    el.get("name", ""), el.get("hint", ""), el.get("selector", "")
+                ]).lower()
+                if query not in searchable:
+                    continue
+            idx_to_row[i] = visible_count
+            visible_count += 1
+        return idx_to_row
+
+    elements = [
+        {"tag": "input", "type": "text", "id": "name", "name": "name", "hint": "名前", "selector": "#name", "visible": True},
+        {"tag": "input", "type": "hidden", "id": "token", "name": "token", "hint": "", "selector": "#token", "visible": False},
+        {"tag": "button", "type": "submit", "id": "btn", "name": "", "hint": "送信", "selector": "#btn", "visible": True},
+        {"tag": "input", "type": "text", "id": "email", "name": "email", "hint": "メール", "selector": "#email", "visible": True},
+        {"tag": "div", "type": "", "id": "hidden-div", "name": "", "hint": "", "selector": "#hidden-div", "visible": False},
+    ]
+
+    # 全表示（hidden非表示）
+    m = build_idx_to_row(elements, show_hidden=False)
+    assert m == {0: 0, 2: 1, 3: 2}, f"visible only mapping: {m}"
+    assert 1 not in m  # hidden token
+    assert 4 not in m  # hidden div
+    print("  [OK] hidden非表示時のマッピング")
+
+    # hidden表示
+    m = build_idx_to_row(elements, show_hidden=True)
+    assert m == {0: 0, 1: 1, 2: 2, 3: 3, 4: 4}, f"show hidden mapping: {m}"
+    print("  [OK] hidden表示時のマッピング")
+
+    # 検索フィルタ
+    m = build_idx_to_row(elements, show_hidden=False, query="input")
+    assert m == {0: 0, 3: 1}, f"search 'input' mapping: {m}"
+    print("  [OK] 検索フィルタ時のマッピング")
+
+    m = build_idx_to_row(elements, show_hidden=False, query="送信")
+    assert m == {2: 0}, f"search '送信' mapping: {m}"
+    print("  [OK] 検索で1件のみ")
+
+    m = build_idx_to_row(elements, show_hidden=False, query="存在しないワード")
+    assert m == {}, f"search no match: {m}"
+    print("  [OK] 検索で0件")
+
+    # O(1) 参照
+    m = build_idx_to_row(elements, show_hidden=False)
+    assert m.get(0, -1) == 0
+    assert m.get(2, -1) == 1
+    assert m.get(1, -1) == -1  # hidden → not in map
+    assert m.get(99, -1) == -1  # out of range
+    print("  [OK] O(1)参照（存在/非存在）")
+
+    # 空リスト
+    m = build_idx_to_row([], show_hidden=False)
+    assert m == {}
+    print("  [OK] 空リスト")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト33: 要素ブラウザ _prev_el_row 選択追跡ロジック
+# ---------------------------------------------------------------------------
+
+def test_prev_el_row_tracking():
+    print("=== テスト33: 要素ブラウザ 選択行追跡 ===")
+
+    # on_el_click の選択解除/選択ロジックを再現
+    class MockRow:
+        def __init__(self, selected=False):
+            self.selected = selected
+
+    def sim_click(rows, prev_row, new_row):
+        """Simulate on_el_click selection logic. Returns new prev_row."""
+        if 0 <= prev_row < len(rows):
+            rows[prev_row].selected = False
+        if 0 <= new_row < len(rows):
+            rows[new_row].selected = True
+        return new_row
+
+    # 基本: 1つ目を選択
+    rows = [MockRow(), MockRow(), MockRow(), MockRow(), MockRow()]
+    prev = -1
+    prev = sim_click(rows, prev, 2)
+    assert rows[2].selected == True
+    assert prev == 2
+    assert all(not r.selected for i, r in enumerate(rows) if i != 2)
+    print("  [OK] 初回選択")
+
+    # 別の行を選択 → 旧行が解除される
+    prev = sim_click(rows, prev, 4)
+    assert rows[4].selected == True
+    assert rows[2].selected == False
+    assert prev == 4
+    print("  [OK] 別行選択で旧行解除")
+
+    # 同じ行を再選択
+    prev = sim_click(rows, prev, 4)
+    assert rows[4].selected == True
+    assert prev == 4
+    print("  [OK] 同行再選択")
+
+    # prev=-1 で旧行解除スキップ（テーブル再構築後）
+    prev = -1
+    rows = [MockRow(selected=True), MockRow(), MockRow()]  # 0番が選択状態（filter_el_tableで設定）
+    prev = sim_click(rows, prev, 1)
+    # prev=-1なので旧行(0)はFalseにならない → これが問題だった
+    # fix後: filter_el_tableで_prev_el_rowを正しくセットするので、prev=-1にはならない
+    # ここではprev=0（filter_el_table後の正しい値）をテスト
+    rows2 = [MockRow(selected=True), MockRow(), MockRow()]
+    prev2 = 0  # filter_el_table が設定する正しい _prev_el_row
+    prev2 = sim_click(rows2, prev2, 2)
+    assert rows2[0].selected == False  # 旧行解除
+    assert rows2[2].selected == True   # 新行選択
+    assert prev2 == 2
+    print("  [OK] テーブル再構築後の正しい prev_el_row")
+
+    # 範囲外の prev → 安全にスキップ
+    rows3 = [MockRow(), MockRow()]
+    prev3 = 99  # テーブルより大きい
+    prev3 = sim_click(rows3, prev3, 0)
+    assert rows3[0].selected == True
+    assert prev3 == 0
+    print("  [OK] 範囲外prevの安全処理")
+
+    # new_row=-1 (マッピングに存在しない) → 選択なし
+    rows4 = [MockRow(selected=True), MockRow()]
+    prev4 = 0
+    prev4 = sim_click(rows4, prev4, -1)
+    assert rows4[0].selected == False  # 旧行解除
+    assert prev4 == -1
+    print("  [OK] マッピング外要素の選択（選択なし）")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト34: クリック処理 Selenium→JSフォールバック構造確認
+# ---------------------------------------------------------------------------
+
+def test_click_handler_structure():
+    print("=== テスト34: クリック処理 フォールバック構造確認 ===")
+    import ast, inspect
+    from y_shot import run_all_tests
+
+    # run_all_tests のソースコードを解析
+    source = inspect.getsource(run_all_tests)
+
+    # presence_of_element_located が使われていること
+    assert "presence_of_element_located" in source, "クリック処理に presence_of_element_located がない"
+    print("  [OK] presence_of_element_located 使用")
+
+    # scrollIntoView が使われていること
+    assert "scrollIntoView" in source, "scrollIntoView がない"
+    print("  [OK] scrollIntoView 使用")
+
+    # _el.click() が使われていること（Selenium native）
+    assert "_el.click()" in source, "Selenium native click がない"
+    print("  [OK] Selenium native _el.click() 使用")
+
+    # JS element.click() フォールバックがあること
+    assert 'arguments[0].click()' in source, "JS element.click() フォールバックがない"
+    print("  [OK] JS element.click() フォールバック")
+
+    # checked = true が使われていないこと（DOM直接操作禁止）
+    assert "checked = true" not in source, "DOM直接操作 checked = true が残っている"
+    assert "checked=true" not in source, "DOM直接操作 checked=true が残っている"
+    print("  [OK] DOM直接操作 checked=true なし")
+
+    # dispatchEvent が クリック処理で使われていないこと（入力処理の clear は許容）
+    # クリック処理部分だけ抽出
+    click_section_start = source.find("elif st == \"クリック\"")
+    click_section_end = source.find("elif st == \"ホバー\"")
+    if click_section_start >= 0 and click_section_end > click_section_start:
+        click_code = source[click_section_start:click_section_end]
+        assert "dispatchEvent" not in click_code, "クリック処理にdispatchEventが含まれている"
+        print("  [OK] クリック処理に dispatchEvent なし")
+    else:
+        print("  [SKIP] クリック処理セクション特定不可")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト35: makedirs 空パスガード
+# ---------------------------------------------------------------------------
+
+def test_makedirs_empty_path():
+    print("=== テスト35: makedirs 空パスガード ===")
+
+    # os.path.dirname が空文字を返すケース
+    assert os.path.dirname("test.json") == "", "dirname of bare filename should be empty"
+    assert os.path.dirname("C:/foo/test.json") != "", "dirname of full path should not be empty"
+    print("  [OK] dirname 空文字ケース確認")
+
+    # 空パスで makedirs しない（エラーが出ないことを確認）
+    _dir = os.path.dirname("test.json")
+    if _dir:
+        os.makedirs(_dir, exist_ok=True)
+    # ここに到達すれば成功（空パスで makedirs を呼ばない）
+    print("  [OK] 空パスガード動作確認")
+
+    # フルパスでは makedirs が通ること
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fp = os.path.join(tmpdir, "sub", "test.json")
+        _dir2 = os.path.dirname(fp)
+        if _dir2:
+            os.makedirs(_dir2, exist_ok=True)
+        assert os.path.isdir(_dir2), f"ディレクトリが作られていない: {_dir2}"
+        print("  [OK] フルパスでの makedirs 正常動作")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト36: _sel_by 拡張テスト（クリック処理の前提）
+# ---------------------------------------------------------------------------
+
+def test_sel_by_extended():
+    print("=== テスト36: _sel_by 拡張テスト ===")
+    from selenium.webdriver.common.by import By
+    from y_shot import _sel_by
+
+    # 基本CSS
+    assert _sel_by("#id")[0] == By.CSS_SELECTOR
+    assert _sel_by(".class")[0] == By.CSS_SELECTOR
+    assert _sel_by("div.class#id")[0] == By.CSS_SELECTOR
+    assert _sel_by("input[type='text']")[0] == By.CSS_SELECTOR
+    assert _sel_by("[id=\"10\"]")[0] == By.CSS_SELECTOR
+    assert _sel_by("a[href*='#sales']")[0] == By.CSS_SELECTOR
+    assert _sel_by(".menu_1st a[href=\"./partner.html\"]")[0] == By.CSS_SELECTOR
+    assert _sel_by("map[name=\"sbmap1\"] area[href=\"partner.html\"]")[0] == By.CSS_SELECTOR
+    print("  [OK] CSS セレクタ各種")
+
+    # XPath
+    assert _sel_by("//div[@id='main']")[0] == By.XPATH
+    assert _sel_by("(//img)[2]")[0] == By.XPATH
+    assert _sel_by("//button[normalize-space()='送信']")[0] == By.XPATH
+    assert _sel_by("(//input[@type='radio'])[3]")[0] == By.XPATH
+    print("  [OK] XPath 各種")
+
+    # 値が正しく渡されること
+    assert _sel_by("#back span") == (By.CSS_SELECTOR, "#back span")
+    assert _sel_by("//div")[1] == "//div"
+    assert _sel_by("(//img)[1]")[1] == "(//img)[1]"
+    print("  [OK] セレクタ値の保持")
+
+    # 空セレクタ
+    result = _sel_by("")
+    assert result[0] == By.CSS_SELECTOR
+    assert result[1] == ""
+    print("  [OK] 空セレクタ")
+
+    print("  全てパス\n")
+
+
 if __name__ == "__main__":
     print("y-shot テスト開始 (v2.0)\n")
 

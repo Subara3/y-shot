@@ -2061,7 +2061,7 @@ def _main_inner(page: ft.Page):
         "selector_bank": _safe_load(load_selector_bank, {}, "selector_bank"),
         "pages": _safe_load(load_pages, [], "pages"),
         "browser_driver": None, "browser_elements": [],
-        "selected_test": -1, "selected_pat_set": None, "selected_el": -1,
+        "selected_test": -1, "selected_pat_set": None, "selected_el": -1, "_prev_el_row": -1,
         "selected_page": None,
         "collapsed": set(),
         "_copied_pat": None,
@@ -3083,8 +3083,11 @@ def _main_inner(page: ft.Page):
             filter_el_table()
         except Exception as x: _log_error("on_el_sort_change", x)
 
+    _el_idx_to_row = {}  # 要素index → 行index のマッピング（filter_el_tableで構築）
+
     def filter_el_table(update=True):
         """Filter and display elements based on search text, hidden visibility, and sort."""
+        _el_idx_to_row.clear()
         el_table.rows.clear()
         query = (el_search.value or "").strip().lower()
         show_hidden = el_show_hidden.value
@@ -3113,6 +3116,7 @@ def _main_inner(page: ft.Page):
                 ]).lower()
                 if query not in searchable:
                     continue
+            _el_idx_to_row[i] = visible_count
             visible_count += 1
             # Row color: dim for hidden elements
             row_color = ft.Colors.ORANGE_50 if not is_visible else None
@@ -3156,6 +3160,7 @@ def _main_inner(page: ft.Page):
             status_parts.append(f"(非表示: {hidden_count})")
         if query:
             status_parts.append(f"検索: \"{el_search.value}\"")
+        state["_prev_el_row"] = _el_idx_to_row.get(state["selected_el"], -1)
         el_status.value = " ".join(status_parts); el_status.color = ft.Colors.GREY_500
         if update:
             try: page.update()
@@ -3179,44 +3184,42 @@ def _main_inner(page: ft.Page):
             content=items,
             actions=[ft.TextButton("閉じる", on_click=lambda e: close_dlg(dlg))])
         open_dlg(dlg, modal=False)
-    def _el_visible_row_index(target_idx):
-        """Map a browser_elements index to the corresponding visible row index in el_table."""
-        query = (el_search.value or "").strip().lower()
-        show_hidden = el_show_hidden.value
-        row_idx = 0
-        for i, el_item in enumerate(state["browser_elements"]):
-            if not el_item.get("visible", True) and not show_hidden: continue
-            if query:
-                searchable = " ".join([el_item.get(k, "") for k in ("tag","type","id","name","hint","selector")]).lower()
-                if query not in searchable: continue
-            if i == target_idx: return row_idx
-            row_idx += 1
-        return -1
-
     def on_el_click(idx):
         state["selected_el"] = idx
         el = state["browser_elements"][idx] if idx < len(state["browser_elements"]) else None
-        for ri, row in enumerate(el_table.rows):
-            row.selected = False
-        vis_row = _el_visible_row_index(idx)
+        # 前回選択行の解除 + 新しい行の選択（2行だけ更新）
+        prev = state["_prev_el_row"]
+        if 0 <= prev < len(el_table.rows):
+            el_table.rows[prev].selected = False
+        vis_row = _el_idx_to_row.get(idx, -1)
         if 0 <= vis_row < len(el_table.rows):
             el_table.rows[vis_row].selected = True
+        state["_prev_el_row"] = vis_row
+        # テーブルのみ即時更新（page全体ではなく）
+        try: el_table.update()
+        except Exception: pass
+        # ハイライトはバックグラウンドで実行
         if el and state["browser_driver"]:
-            try:
-                result_json = state["browser_driver"].execute_script(HIGHLIGHT_JS, el["selector"])
-                if result_json:
-                    import json as _json
-                    info = _json.loads(result_json)
-                    found = info.get("found", 0)
-                    if found == 0:
-                        el_status.value = f"セレクタ不一致: {el['selector']}"
-                    elif found > 1:
-                        el_status.value = f"セレクタ {found}件一致（曖昧）: {el['selector']}"
-                    else:
-                        el_status.value = f"一致: {el['selector']} ({info.get('tag','')})"
-            except Exception:
-                pass
-        page.update()
+            drv = state["browser_driver"]
+            sel_str = el["selector"]
+            def _highlight_async():
+                try:
+                    result_json = drv.execute_script(HIGHLIGHT_JS, sel_str)
+                    if result_json:
+                        import json as _json
+                        info = _json.loads(result_json)
+                        found = info.get("found", 0)
+                        if found == 0:
+                            el_status.value = f"セレクタ不一致: {sel_str}"
+                        elif found > 1:
+                            el_status.value = f"セレクタ {found}件一致（曖昧）: {sel_str}"
+                        else:
+                            el_status.value = f"一致: {sel_str} ({info.get('tag','')})"
+                    try: el_status.update()
+                    except Exception: pass
+                except Exception:
+                    pass
+            threading.Thread(target=_highlight_async, daemon=True).start()
     def show_el_detail(e):
         """Show all attributes of the selected element in a dialog."""
         idx = state["selected_el"]

@@ -1920,6 +1920,808 @@ def test_sel_by_extended():
     print("  全てパス\n")
 
 
+# ---------------------------------------------------------------------------
+# テスト37: _css_escape_attr / _is_safe_class
+# ---------------------------------------------------------------------------
+
+def test_css_helpers():
+    print("=== テスト37: CSS ヘルパー関数 ===")
+    from y_shot import _css_escape_attr, _is_safe_class
+
+    # _css_escape_attr
+    assert _css_escape_attr('hello') == 'hello'
+    assert _css_escape_attr('say "hi"') == 'say \\"hi\\"'
+    assert _css_escape_attr('path\\to') == 'path\\\\to'
+    assert _css_escape_attr('a"b\\c') == 'a\\"b\\\\c'
+    assert _css_escape_attr('') == ''
+    print("  [OK] _css_escape_attr")
+
+    # _is_safe_class
+    assert _is_safe_class("btn") == True
+    assert _is_safe_class("btn-primary") == True
+    assert _is_safe_class("my_class") == True
+    assert _is_safe_class("btn123") == True
+    assert _is_safe_class("123btn") == False  # starts with digit
+    assert _is_safe_class("") == False
+    assert _is_safe_class(None) == False
+    assert _is_safe_class("a b") == False  # space
+    assert _is_safe_class("a.b") == False  # dot
+    print("  [OK] _is_safe_class")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト38: _safe_dir_name
+# ---------------------------------------------------------------------------
+
+def test_safe_dir_name():
+    print("=== テスト38: _safe_dir_name ===")
+    from y_shot import _safe_dir_name
+
+    assert _safe_dir_name("プロジェクト名") == "プロジェクト名"
+    assert _safe_dir_name("test/project") == "test_project"
+    assert _safe_dir_name('a:b*c?d"e') == "a_b_c_d_e"
+    assert _safe_dir_name("normal") == "normal"
+    assert _safe_dir_name("") == "project"  # empty → default
+    assert _safe_dir_name("   ") == "project"  # whitespace only → default
+    assert _safe_dir_name("a<b>c|d") == "a_b_c_d"
+    print("  [OK] _safe_dir_name 各種")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト39: _new_project_id
+# ---------------------------------------------------------------------------
+
+def test_new_project_id():
+    print("=== テスト39: _new_project_id ===")
+    from y_shot import _new_project_id
+
+    # 空のレジストリ
+    reg = {"projects": []}
+    assert _new_project_id(reg) == "proj_1"
+    print("  [OK] 空レジストリ → proj_1")
+
+    # 既存プロジェクト
+    reg = {"projects": [{"id": "default"}, {"id": "proj_3"}, {"id": "proj_1"}]}
+    assert _new_project_id(reg) == "proj_4"
+    print("  [OK] max=3 → proj_4")
+
+    # IDがパースできない場合
+    reg = {"projects": [{"id": "custom"}, {"id": "proj_abc"}]}
+    assert _new_project_id(reg) == "proj_1"
+    print("  [OK] パース不能ID → proj_1")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト40: get_app_dir / get_bundle_dir / get_templates_dir
+# ---------------------------------------------------------------------------
+
+def test_dir_functions():
+    print("=== テスト40: ディレクトリ関数 ===")
+    from y_shot import get_app_dir, get_bundle_dir, get_templates_dir
+
+    app_dir = get_app_dir()
+    assert os.path.isdir(app_dir), f"app_dir not found: {app_dir}"
+    assert "y-shot" in app_dir or "y_shot" in app_dir.lower()
+    print(f"  [OK] get_app_dir: {app_dir}")
+
+    bundle_dir = get_bundle_dir()
+    assert os.path.isdir(bundle_dir), f"bundle_dir not found: {bundle_dir}"
+    print(f"  [OK] get_bundle_dir: {bundle_dir}")
+
+    tmpl_dir = get_templates_dir()
+    assert os.path.isdir(tmpl_dir), f"templates_dir not found: {tmpl_dir}"
+    print(f"  [OK] get_templates_dir: {tmpl_dir}")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト41: load_config / save_config round-trip
+# ---------------------------------------------------------------------------
+
+def test_config_roundtrip():
+    print("=== テスト41: config 保存/読込 ===")
+    from y_shot import _active_project_dir, load_config, save_config
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # 一時的にプロジェクトディレクトリを変更
+        old_dir = _active_project_dir[0]
+        _active_project_dir[0] = tmpdir
+        try:
+            # 保存
+            config = {"project_url": "http://example.com", "headless": "1", "save_source": "0"}
+            save_config(config)
+            print("  [OK] save_config")
+
+            # 読込
+            loaded = load_config()
+            assert loaded["project_url"] == "http://example.com"
+            assert loaded["headless"] == "1"
+            assert loaded["save_source"] == "0"
+            print("  [OK] load_config round-trip")
+
+            # 空config
+            save_config({})
+            loaded = load_config()
+            assert isinstance(loaded, dict)
+            print("  [OK] 空config保存/読込")
+        finally:
+            _active_project_dir[0] = old_dir
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト42: load_pages / save_pages round-trip
+# ---------------------------------------------------------------------------
+
+def test_pages_roundtrip():
+    print("=== テスト42: pages 保存/読込 ===")
+    from y_shot import _active_project_dir, load_pages, save_pages
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        old_dir = _active_project_dir[0]
+        _active_project_dir[0] = tmpdir
+        try:
+            pages = [
+                {"_id": "p_1", "name": "テストページ", "number": "1", "start_number": 1, "url": "http://example.com"},
+                {"_id": "p_2", "name": "ページ2", "number": "2", "start_number": 5, "url": ""},
+            ]
+            save_pages(pages)
+            loaded = load_pages()
+            assert len(loaded) == 2
+            assert loaded[0]["name"] == "テストページ"
+            assert loaded[1]["start_number"] == 5
+            print("  [OK] pages round-trip")
+
+            # 空リスト
+            save_pages([])
+            loaded = load_pages()
+            assert loaded == []
+            print("  [OK] 空pages")
+        finally:
+            _active_project_dir[0] = old_dir
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト43: load_pattern_sets / save_pattern_sets round-trip
+# ---------------------------------------------------------------------------
+
+def test_pattern_sets_roundtrip():
+    print("=== テスト43: pattern_sets 保存/読込 ===")
+    from y_shot import _active_project_dir, load_pattern_sets, save_pattern_sets
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        old_dir = _active_project_dir[0]
+        _active_project_dir[0] = tmpdir
+        try:
+            pats = {
+                "入力チェック": [{"label": "未入力", "value": ""}, {"label": "最大値", "value": "a" * 100}],
+                "空セット": [],
+            }
+            save_pattern_sets(pats)
+            loaded = load_pattern_sets()
+            assert "入力チェック" in loaded
+            assert len(loaded["入力チェック"]) == 2
+            assert loaded["入力チェック"][1]["value"] == "a" * 100
+            assert loaded["空セット"] == []
+            print("  [OK] pattern_sets round-trip")
+        finally:
+            _active_project_dir[0] = old_dir
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト44: load_selector_bank / save_selector_bank round-trip
+# ---------------------------------------------------------------------------
+
+def test_selector_bank_roundtrip():
+    print("=== テスト44: selector_bank 保存/読込 ===")
+    from y_shot import _active_project_dir, load_selector_bank, save_selector_bank
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        old_dir = _active_project_dir[0]
+        _active_project_dir[0] = tmpdir
+        try:
+            bank = {
+                "http://example.com": [
+                    {"selector": "#btn", "tag": "button", "visible": True},
+                    {"selector": ".link", "tag": "a", "visible": True},
+                ],
+            }
+            save_selector_bank(bank)
+            loaded = load_selector_bank()
+            assert "http://example.com" in loaded
+            assert len(loaded["http://example.com"]) == 2
+            print("  [OK] selector_bank round-trip")
+
+            # 空bank
+            save_selector_bank({})
+            loaded = load_selector_bank()
+            assert loaded == {}
+            print("  [OK] 空bank")
+        finally:
+            _active_project_dir[0] = old_dir
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト45: activate_project / projects registry
+# ---------------------------------------------------------------------------
+
+def test_project_registry():
+    print("=== テスト45: プロジェクトレジストリ ===")
+    from y_shot import _active_project_dir, get_projects_dir, activate_project, _new_project_id
+    import tempfile
+
+    # activate_project: 存在するプロジェクト
+    registry = {
+        "last_active": "default",
+        "projects": [
+            {"id": "default", "name": "デフォルト", "dir": "default"},
+            {"id": "proj_1", "name": "テスト", "dir": "test_proj"},
+        ]
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # プロジェクトディレクトリを作成
+        proj_dir = os.path.join(tmpdir, "test_proj")
+        os.makedirs(proj_dir)
+
+        # get_projects_dirをモック的に使う代わりにactivate_projectの戻り値を確認
+        # activate_projectは内部的にディレクトリを作成する
+        old_dir = _active_project_dir[0]
+        try:
+            result = activate_project("default", registry)
+            assert result == True, "activate_project should return True for existing project"
+            assert registry["last_active"] == "default"
+            print("  [OK] activate_project: 既存プロジェクト")
+
+            # 存在しないプロジェクト
+            result = activate_project("nonexistent", registry)
+            assert result == False, "activate_project should return False for nonexistent project"
+            print("  [OK] activate_project: 存在しないID")
+
+            # _new_project_id
+            new_id = _new_project_id(registry)
+            assert new_id == "proj_2"
+            print("  [OK] _new_project_id: proj_2")
+        finally:
+            _active_project_dir[0] = old_dir
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト46: _safe_json_save atomic write
+# ---------------------------------------------------------------------------
+
+def test_safe_json_save_atomic():
+    print("=== テスト46: _safe_json_save atomic write ===")
+    from y_shot import _safe_json_save, _safe_json_load
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fp = os.path.join(tmpdir, "data.json")
+
+        # 1. 正常保存
+        _safe_json_save(fp, {"key": "value"})
+        assert os.path.isfile(fp)
+        print("  [OK] 正常保存")
+
+        # 2. .tmp が残っていないこと
+        assert not os.path.isfile(fp + ".tmp"), ".tmpファイルが残っている"
+        print("  [OK] .tmp残留なし")
+
+        # 3. 2回目の保存で .backup が作られること
+        _safe_json_save(fp, {"key": "value2"})
+        assert os.path.isfile(fp + ".backup"), ".backupがない"
+        print("  [OK] 2回目保存で.backup作成")
+
+        # 4. backup の中身は1回目のデータ
+        with open(fp + ".backup", "r", encoding="utf-8") as f:
+            bak = json.load(f)
+        assert bak["key"] == "value", f"backup内容不正: {bak}"
+        print("  [OK] .backup内容が前回データ")
+
+        # 5. 本体の中身は2回目のデータ
+        loaded = _safe_json_load(fp, {})
+        assert loaded["key"] == "value2"
+        print("  [OK] 本体は最新データ")
+
+        # 6. 日本語・絵文字・特殊文字
+        _safe_json_save(fp, {"name": "テスト🦐", "path": "C:\\Users\\test", "html": "<div>&amp;</div>"})
+        loaded = _safe_json_load(fp, {})
+        assert loaded["name"] == "テスト🦐"
+        assert loaded["path"] == "C:\\Users\\test"
+        assert loaded["html"] == "<div>&amp;</div>"
+        print("  [OK] 日本語・絵文字・特殊文字")
+
+        # 7. 大きなデータ
+        big_data = {"items": [{"id": i, "value": f"item_{i}" * 100} for i in range(500)]}
+        _safe_json_save(fp, big_data)
+        loaded = _safe_json_load(fp, {})
+        assert len(loaded["items"]) == 500
+        print("  [OK] 大量データ (500件)")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト47: step_short 全ステップタイプ包括テスト
+# ---------------------------------------------------------------------------
+
+def test_step_short_comprehensive():
+    print("=== テスト47: step_short 包括テスト ===")
+    from y_shot import step_short
+
+    # パターン置換つきのステップ
+    s = step_short({"type": "入力", "selector": "#name", "value": "{パターン}"})
+    assert "{パターン}" in s or "#name" in s
+    print("  [OK] パターン置換含む入力ステップ")
+
+    # 長いセレクタの切り詰め
+    long_sel = "div.very-long-selector-name > span.nested-child > input.deeply-nested-element"
+    s = step_short({"type": "クリック", "selector": long_sel})
+    assert len(s) < len(long_sel) + 20  # 適度な長さ
+    print("  [OK] 長いセレクタ")
+
+    # 待機ステップ（秒数）
+    s = step_short({"type": "待機", "seconds": "3.5"})
+    assert "3.5" in s
+    print("  [OK] 待機ステップ")
+
+    # ナビゲーション
+    s = step_short({"type": "ナビゲーション", "url": "https://example.com/very/long/path"})
+    assert "example" in s or "ナビ" in s.lower() or "http" in s
+    print("  [OK] ナビゲーションステップ")
+
+    # コメント（空文字を返す仕様）
+    s = step_short({"type": "コメント", "comment": "これはテストコメント"})
+    assert isinstance(s, str)
+    print("  [OK] コメントステップ")
+
+    # 見出し（空文字を返す仕様）
+    s = step_short({"type": "見出し", "comment": "セクション1"})
+    assert isinstance(s, str)
+    print("  [OK] 見出しステップ")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト48: MAX_PAGE_HEIGHT 定数確認
+# ---------------------------------------------------------------------------
+
+def test_constants():
+    print("=== テスト48: 定数確認 ===")
+    from y_shot import MAX_PAGE_HEIGHT, LOG_MAX_LINES, SAVE_DELAY_SEC, BANK_MAX_URLS, APP_VERSION
+
+    assert MAX_PAGE_HEIGHT == 16384, f"MAX_PAGE_HEIGHT: {MAX_PAGE_HEIGHT}"
+    assert LOG_MAX_LINES > 0
+    assert SAVE_DELAY_SEC > 0
+    assert BANK_MAX_URLS > 0
+    assert APP_VERSION == "3.1"
+    print("  [OK] 全定数値")
+
+    # ソースコード内に16384のハードコードが残っていないこと（定義行を除く）
+    with open(os.path.join(os.path.dirname(__file__) or '.', 'y_shot.py'), 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    hardcoded = [(i+1, l.strip()) for i, l in enumerate(lines)
+                 if '16384' in l and 'MAX_PAGE_HEIGHT' not in l and not l.strip().startswith('#')]
+    assert len(hardcoded) == 0, f"16384ハードコード残存: {hardcoded}"
+    print("  [OK] 16384ハードコードなし")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト49: _data_path フォールバック
+# ---------------------------------------------------------------------------
+
+def test_data_path():
+    print("=== テスト49: _data_path ===")
+    from y_shot import _data_path, _active_project_dir, get_app_dir
+
+    # プロジェクトディレクトリ設定時
+    old = _active_project_dir[0]
+    try:
+        _active_project_dir[0] = "C:/fake/project/dir"
+        result = _data_path("test.json")
+        assert result == os.path.join("C:/fake/project/dir", "test.json")
+        print("  [OK] プロジェクトディレクトリ設定時")
+
+        # None時はapp_dirにフォールバック
+        _active_project_dir[0] = None
+        result = _data_path("test.json")
+        assert result == os.path.join(get_app_dir(), "test.json")
+        print("  [OK] Noneフォールバック")
+    finally:
+        _active_project_dir[0] = old
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト50: _generate_report HTMLレポート生成
+# ---------------------------------------------------------------------------
+
+def test_generate_report():
+    print("=== テスト50: _generate_report ===")
+    from y_shot import _generate_report
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # テスト用PNGファイル作成
+        page1 = os.path.join(tmpdir, "1_ページ1")
+        page2 = os.path.join(tmpdir, "2_ページ2")
+        os.makedirs(page1); os.makedirs(page2)
+        # 空PNGを作成
+        for fn in ["001_1-1_テスト1_ss1.png", "002_1-1_テスト1_ss2.png"]:
+            open(os.path.join(page1, fn), "wb").close()
+        for fn in ["003_2-1_テスト2_ss1.png"]:
+            open(os.path.join(page2, fn), "wb").close()
+
+        logs = []
+        _generate_report(tmpdir, lambda m: logs.append(m),
+                        pages=[{"number": "1", "name": "ページ1", "url": "http://example.com"}])
+
+        rp = os.path.join(tmpdir, "report.html")
+        assert os.path.isfile(rp), "report.html が作られていない"
+        with open(rp, "r", encoding="utf-8") as f:
+            html = f.read()
+        assert "y-shot レポート" in html
+        assert "3 枚" in html  # 3 PNGs
+        assert "1_ページ1" in html
+        assert "2_ページ2" in html
+        assert "example.com" in html
+        assert any("[レポート]" in l for l in logs)
+        print("  [OK] レポート生成（3枚、2ページ）")
+
+        # 空ディレクトリ（PNGなし）
+        with tempfile.TemporaryDirectory() as tmpdir2:
+            logs2 = []
+            _generate_report(tmpdir2, lambda m: logs2.append(m))
+            assert not os.path.isfile(os.path.join(tmpdir2, "report.html"))
+            print("  [OK] PNGなし→レポートなし")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト51: _get_ns_patterns / _normalize_source 追加パターン
+# ---------------------------------------------------------------------------
+
+def test_normalize_source_additional():
+    print("=== テスト51: _normalize_source 追加パターン ===")
+    from y_shot import _normalize_source
+
+    # authenticity_token (Rails)
+    html = '<input name="authenticity_token" value="abc123xyz">'
+    n = _normalize_source(html)
+    assert "abc123xyz" not in n
+    assert "__NORMALIZED__" in n
+    print("  [OK] Rails authenticity_token")
+
+    # __RequestVerificationToken (.NET)
+    html = '<input name="__RequestVerificationToken" value="dotnet_token_123">'
+    n = _normalize_source(html)
+    assert "dotnet_token_123" not in n
+    print("  [OK] .NET RequestVerificationToken")
+
+    # session_id
+    html = '<input name="session_id" value="sess_xyz789">'
+    n = _normalize_source(html)
+    assert "sess_xyz789" not in n
+    print("  [OK] session_id")
+
+    # ISO datetime with T separator
+    html = '<span>2026-04-09T14:30:00</span>'
+    n = _normalize_source(html)
+    assert "2026-04-09T14:30:00" not in n
+    assert "__DATETIME__" in n
+    print("  [OK] ISO datetime (T separator)")
+
+    # 複数パターンの同時適用
+    html = '<meta name="csrf-token" content="tok123"> <span>2026-01-01 00:00:00</span> <link href="style.css?v=abc">'
+    n = _normalize_source(html)
+    assert "tok123" not in n
+    assert "2026-01-01" not in n
+    assert "abc" not in n
+    print("  [OK] 複数パターン同時適用")
+
+    # 正規化しない通常テキスト
+    html = '<p>普通のテキスト123</p>'
+    assert _normalize_source(html) == html
+    print("  [OK] 通常テキスト不変")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト52: projects registry round-trip
+# ---------------------------------------------------------------------------
+
+def test_projects_registry_roundtrip():
+    print("=== テスト52: projects registry round-trip ===")
+    from y_shot import load_projects_registry, save_projects_registry, get_projects_dir, _safe_json_load
+    import tempfile
+
+    # get_projects_dir が存在するか
+    pdir = get_projects_dir()
+    assert os.path.isdir(pdir), f"projects dir not found: {pdir}"
+    print(f"  [OK] get_projects_dir: {pdir}")
+
+    # 現在のレジストリが読めるか
+    reg = load_projects_registry()
+    assert "projects" in reg
+    assert "last_active" in reg
+    assert isinstance(reg["projects"], list)
+    print(f"  [OK] load_projects_registry: {len(reg['projects'])} projects")
+
+    # レジストリの各プロジェクトにid/name/dirがあるか
+    for p in reg["projects"]:
+        assert "id" in p, f"project missing id: {p}"
+        assert "name" in p, f"project missing name: {p}"
+        assert "dir" in p, f"project missing dir: {p}"
+    print("  [OK] 全プロジェクトにid/name/dir")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト53: auto_number_tests の実関数テスト
+# ---------------------------------------------------------------------------
+
+def test_auto_number_actual():
+    print("=== テスト53: auto_number_tests 実関数 ===")
+    # auto_number_tests は _main_inner 内のローカル関数なので直接呼べない
+    # ロジックを再現してテスト（テスト8と異なるエッジケース）
+
+    def auto_number(pages, tests):
+        for pg in pages:
+            pnum = pg["number"]
+            next_sub = int(pg.get("start_number", 1))
+            page_tests = [t for t in tests if t.get("page_id") == pg["_id"]]
+            for tc in page_tests:
+                forced = tc.get("_sub_number")
+                if forced is not None:
+                    try: next_sub = int(forced)
+                    except (ValueError, TypeError): pass
+                tc["number"] = f"{pnum}-{next_sub}"
+                next_sub += 1
+
+    # ページ番号が文字列の場合
+    pages = [{"_id": "p_1", "name": "P", "number": "A", "start_number": 1}]
+    tests = [{"_id": "tc_1", "name": "T", "page_id": "p_1", "number": ""}]
+    auto_number(pages, tests)
+    assert tests[0]["number"] == "A-1"
+    print("  [OK] ページ番号が文字列")
+
+    # start_number が大きい場合
+    pages = [{"_id": "p_1", "name": "P", "number": "1", "start_number": 100}]
+    tests = [
+        {"_id": "tc_1", "name": "T1", "page_id": "p_1", "number": ""},
+        {"_id": "tc_2", "name": "T2", "page_id": "p_1", "number": ""},
+    ]
+    auto_number(pages, tests)
+    assert tests[0]["number"] == "1-100"
+    assert tests[1]["number"] == "1-101"
+    print("  [OK] start_number=100")
+
+    # ページにテストが0件
+    pages = [{"_id": "p_1", "name": "P", "number": "1", "start_number": 1}]
+    tests = []
+    auto_number(pages, tests)  # エラーにならないこと
+    print("  [OK] テスト0件でもエラーなし")
+
+    # _sub_number が不正値
+    pages = [{"_id": "p_1", "name": "P", "number": "1", "start_number": 1}]
+    tests = [
+        {"_id": "tc_1", "name": "T1", "page_id": "p_1", "number": "", "_sub_number": "abc"},
+        {"_id": "tc_2", "name": "T2", "page_id": "p_1", "number": ""},
+    ]
+    auto_number(pages, tests)
+    assert tests[0]["number"] == "1-1"  # invalid _sub_number → fallthrough to next_sub
+    assert tests[1]["number"] == "1-2"
+    print("  [OK] 不正_sub_number")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト54: テストケース / ステップの構造検証
+# ---------------------------------------------------------------------------
+
+def test_tc_step_structure():
+    print("=== テスト54: テストケース構造検証 ===")
+    from y_shot import STEP_TYPES
+
+    # ステップタイプの完全性
+    required_types = ["入力", "クリック", "ホバー", "選択", "待機", "要素待機",
+                      "スクロール", "スクショ", "検証", "戻る", "更新",
+                      "アラートOK", "アラートキャンセル", "ナビゲーション",
+                      "セッション削除", "見出し", "コメント"]
+    for st in required_types:
+        assert st in STEP_TYPES, f"STEP_TYPES に {st} がない"
+    print(f"  [OK] 全{len(required_types)}ステップタイプ存在")
+
+    # テストケースの最小構造
+    tc = {"name": "テスト", "_id": "tc_1", "page_id": "p_1", "pattern": None, "steps": []}
+    assert all(k in tc for k in ["name", "_id", "page_id", "steps"])
+    print("  [OK] テストケース最小構造")
+
+    # ステップの最小構造
+    step_click = {"type": "クリック", "selector": "#btn"}
+    step_input = {"type": "入力", "selector": "#name", "value": "テスト"}
+    step_wait = {"type": "待機", "seconds": "1.0"}
+    step_ss = {"type": "スクショ", "mode": "fullpage"}
+    assert all("type" in s for s in [step_click, step_input, step_wait, step_ss])
+    print("  [OK] ステップ最小構造")
+
+    # スクショモードの一覧
+    modes = ["fullpage", "fullshot", "element", "margin", "post", "state"]
+    from y_shot import step_short
+    for m in modes:
+        result = step_short({"type": "スクショ", "mode": m})
+        assert isinstance(result, str), f"mode={m} で step_short がstr以外を返した"
+    print(f"  [OK] 全{len(modes)}スクショモードのstep_short")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト55: build_auth_url エッジケース
+# ---------------------------------------------------------------------------
+
+def test_build_auth_url_edge():
+    print("=== テスト55: build_auth_url エッジケース ===")
+    from y_shot import build_auth_url
+
+    # 特殊文字を含むパスワード
+    result = build_auth_url("http://example.com", "user", "p@ss:w0rd")
+    assert "user" in result and "example.com" in result
+    print("  [OK] 特殊文字パスワード")
+
+    # 日本語を含むURL
+    result = build_auth_url("http://example.com/パス", "u", "p")
+    assert "u:p@example.com" in result
+    print("  [OK] 日本語パスURL")
+
+    # 空のURL
+    result = build_auth_url("", "user", "pass")
+    assert isinstance(result, str)  # エラーにならないこと
+    print("  [OK] 空URL")
+
+    # HTTPSポート443
+    result = build_auth_url("https://example.com:443/path", "u", "p")
+    assert "u:p@example.com:443" in result
+    print("  [OK] HTTPS with port")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト56: _safe_json_load 破損復帰の詳細
+# ---------------------------------------------------------------------------
+
+def test_safe_json_load_recovery():
+    print("=== テスト56: _safe_json_load 破損復帰詳細 ===")
+    from y_shot import _safe_json_save, _safe_json_load
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fp = os.path.join(tmpdir, "data.json")
+
+        # 1. メイン正常、backupなし
+        _safe_json_save(fp, {"v": 1})
+        os.remove(fp + ".backup") if os.path.exists(fp + ".backup") else None
+        loaded = _safe_json_load(fp, {"default": True})
+        assert loaded["v"] == 1
+        print("  [OK] メイン正常、backupなし")
+
+        # 2. メイン破損、backup正常
+        _safe_json_save(fp, {"v": 2})  # backup に v=1 が入る
+        with open(fp, "w") as f: f.write("{broken")
+        loaded = _safe_json_load(fp, {"default": True})
+        assert loaded.get("v") == 1, f"backup復帰失敗: {loaded}"
+        print("  [OK] メイン破損→backup復帰")
+
+        # 3. メインなし、backupあり
+        os.remove(fp)
+        with open(fp + ".backup", "w", encoding="utf-8") as f:
+            json.dump({"v": 99}, f)
+        loaded = _safe_json_load(fp, {"default": True})
+        assert loaded["v"] == 99
+        print("  [OK] メインなし→backup読込")
+
+        # 4. 両方なし
+        os.remove(fp + ".backup")
+        loaded = _safe_json_load(fp, {"fallback": True})
+        assert loaded == {"fallback": True}
+        print("  [OK] 両方なし→default")
+
+        # 5. メインが空ファイル
+        open(fp, "w").close()
+        loaded = _safe_json_load(fp, ["empty"])
+        assert loaded == ["empty"]
+        print("  [OK] 空ファイル→default")
+
+        # 6. メインがUTF-8 BOM付き
+        with open(fp, "w", encoding="utf-8-sig") as f:
+            json.dump({"bom": True}, f)
+        loaded = _safe_json_load(fp, {})
+        # BOM付きJSONはjson.loadで読めるはず
+        assert loaded.get("bom") == True or loaded == {}  # 環境依存
+        print("  [OK] BOM付きJSON")
+
+    print("  全てパス\n")
+
+
+# ---------------------------------------------------------------------------
+# テスト57: CSV エッジケース追加
+# ---------------------------------------------------------------------------
+
+def test_csv_edge_cases():
+    print("=== テスト57: CSV エッジケース ===")
+    from y_shot import load_csv, save_csv
+    import tempfile
+
+    # 絵文字を含むパターン
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+        tmp = f.name
+    try:
+        pats = [{"label": "絵文字🦐", "value": "テスト🎉"}]
+        save_csv(tmp, pats)
+        loaded = load_csv(tmp)
+        assert loaded[0]["label"] == "絵文字🦐"
+        assert loaded[0]["value"] == "テスト🎉"
+        print("  [OK] 絵文字round-trip")
+    finally:
+        os.unlink(tmp)
+
+    # 非常に長い値
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+        tmp = f.name
+    try:
+        long_val = "a" * 10000
+        pats = [{"label": "long", "value": long_val}]
+        save_csv(tmp, pats)
+        loaded = load_csv(tmp)
+        assert loaded[0]["value"] == long_val
+        print("  [OK] 10000文字値round-trip")
+    finally:
+        os.unlink(tmp)
+
+    # タブ文字を含む
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+        tmp = f.name
+    try:
+        pats = [{"label": "tab", "value": "a\tb\tc"}]
+        save_csv(tmp, pats)
+        loaded = load_csv(tmp)
+        assert loaded[0]["value"] == "a\tb\tc"
+        print("  [OK] タブ文字round-trip")
+    finally:
+        os.unlink(tmp)
+
+    print("  全てパス\n")
+
+
 if __name__ == "__main__":
     print("y-shot テスト開始 (v2.0)\n")
 

@@ -1038,8 +1038,8 @@ def _generate_excel_report(outdir, log_cb, pages=None, test_cases=None, run_labe
                 cell = ws.cell(row=current_row, column=1, value=display)
                 cell.font = cell.font.copy(bold=True, size=11)
                 ws.row_dimensions[current_row].height = 20; current_row += 1
-                pil_img = PILImage.open(fp)
-                orig_w, orig_h = pil_img.size
+                with PILImage.open(fp) as pil_img:
+                    orig_w, orig_h = pil_img.size
                 scale = min(1.0, MAX_IMG_WIDTH / orig_w) if orig_w > 0 else 1.0
                 xl_img = XlImage(fp)
                 xl_img.width = int(orig_w * scale); xl_img.height = int(orig_h * scale)
@@ -1068,6 +1068,9 @@ def _generate_excel_report(outdir, log_cb, pages=None, test_cases=None, run_labe
         wb.save(xp); log_cb(f"[Excel] {xp}")
     except Exception as x:
         log_cb(f"[WARN] Excel生成失敗: {x}")
+    finally:
+        try: wb.close()
+        except Exception: pass
 
 def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=None, progress_cb=None, driver_ref=None, pages=None, run_label="", project_name=""):
     try:
@@ -1159,8 +1162,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                 if os.path.isdir(planned):
                     for old_f in os.listdir(planned):
                         old_fp = os.path.join(planned, old_f)
-                        if os.path.isfile(old_fp):
-                            os.remove(old_fp)
+                        try:
+                            if os.path.isfile(old_fp): os.remove(old_fp)
+                        except OSError as _re: _flog.warning(f"cleanup remove failed: {old_fp}: {_re}")
                 os.makedirs(planned, exist_ok=True)
                 page_dirs[pid] = planned
                 if save_source:
@@ -1170,8 +1174,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                     if os.path.isdir(src_dir):
                         for old_f in os.listdir(src_dir):
                             old_fp = os.path.join(src_dir, old_f)
-                            if os.path.isfile(old_fp):
-                                os.remove(old_fp)
+                            try:
+                                if os.path.isfile(old_fp): os.remove(old_fp)
+                            except OSError as _re: _flog.warning(f"cleanup remove failed: {old_fp}: {_re}")
                     os.makedirs(src_dir, exist_ok=True)
                     source_dirs[pid] = src_dir
                 return planned
@@ -1438,14 +1443,15 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                     time.sleep(0.3)
                                     r = driver.execute_script("var r=arguments[0].getBoundingClientRect();return{x:r.x,y:r.y,w:r.width,h:r.height};",tgt)
                                     driver.save_screenshot(fp)
-                                    img = _PILImage.open(fp)
                                     d = driver.execute_script("return window.devicePixelRatio||1;")
-                                    x1,y1 = max(0,int(r["x"]*d)-mg), max(0,int(r["y"]*d)-mg)
-                                    x2,y2 = min(img.width,int((r["x"]+r["w"])*d)+mg), min(img.height,int((r["y"]+r["h"])*d)+mg)
-                                    if x2>x1 and y2>y1:
-                                        img.crop((x1,y1,x2,y2)).save(fp)
-                                    else:
-                                        log_cb(f"  S{si} [WARN] マージンcrop無効 (rect={x1},{y1},{x2},{y2}) — 元画像を使用")
+                                    d = max(0.5, min(4.0, d))  # 異常値ガード
+                                    with _PILImage.open(fp) as img:
+                                        x1,y1 = max(0,int(r["x"]*d)-mg), max(0,int(r["y"]*d)-mg)
+                                        x2,y2 = min(img.width,int((r["x"]+r["w"])*d)+mg), min(img.height,int((r["y"]+r["h"])*d)+mg)
+                                        if x2>x1 and y2>y1:
+                                            img.crop((x1,y1,x2,y2)).save(fp)
+                                        else:
+                                            log_cb(f"  S{si} [WARN] マージンcrop無効 (rect={x1},{y1},{x2},{y2}) — 元画像を使用")
                             elif mode == "fullshot":
                                 # Preload lazy images: force-load + scroll to trigger loaders
                                 try:
@@ -1854,6 +1860,7 @@ _active_project_dir = [None]  # activate_project() でセット
 def _data_path(filename):
     if _active_project_dir[0]:
         return os.path.join(_active_project_dir[0], filename)
+    _flog.warning(f"_data_path: no active project dir, falling back to app dir for {filename}")
     return os.path.join(get_app_dir(), filename)
 
 # ===================================================================
@@ -3071,7 +3078,8 @@ def _main_inner(page: ft.Page):
         if url:
             bank = state["selector_bank"]
             bank[url.split("?")[0]] = [el for el in elems if el.get("visible", True)]
-            # A4: LRU limit — keep only newest 50 URLs
+            # A4: LRU limit — keep only newest BANK_MAX_URLS URLs
+            # NOTE: LRU削除はテスト参照を考慮しない（将来改善候補）
             if len(bank) > BANK_MAX_URLS:
                 keys = list(bank.keys())
                 for old_key in keys[:len(keys) - BANK_MAX_URLS]:
@@ -3230,8 +3238,8 @@ def _main_inner(page: ft.Page):
                             el_status.value = f"一致: {sel_str} ({info.get('tag','')})"
                     try: el_status.update()
                     except Exception: pass
-                except Exception:
-                    pass
+                except Exception as _hl_err:
+                    _flog.warning(f"highlight failed: {_hl_err}")
             threading.Thread(target=_highlight_async, daemon=True).start()
     def show_el_detail(e):
         """Show all attributes of the selected element in a dialog."""
@@ -3403,7 +3411,8 @@ def _main_inner(page: ft.Page):
             import subprocess
             p = subprocess.Popen(['clip'], stdin=subprocess.PIPE)
             p.communicate(text.encode('utf-16-le'))
-        except Exception:
+        except Exception as _clip_err:
+            _flog.warning(f"clipboard clip failed: {_clip_err}")
             try: page.set_clipboard(text)
             except Exception: pass
 
@@ -3896,8 +3905,7 @@ def _main_inner(page: ft.Page):
     async def import_project(e):
         """Import a .yshot.json project file via OS file picker + confirmation dialog."""
         initial_dir = state["config"].get("output_dir", os.path.join(get_app_dir(), "screenshots"))
-        _import_picker = ft.FilePicker()
-        picked = await _import_picker.pick_files(
+        picked = await _export_file_picker.pick_files(
             dialog_title="インポートするプロジェクトファイルを選択",
             initial_directory=initial_dir,
             allowed_extensions=["json"],
@@ -3958,7 +3966,7 @@ def _main_inner(page: ft.Page):
                     new_id = _new_project_id(_projects_registry)
                     dir_name = _safe_dir_name(proj_name)
                     base_dir = dir_name; counter = 1
-                    while os.path.isdir(os.path.join(get_projects_dir(), dir_name)):
+                    while os.path.isdir(os.path.join(get_projects_dir(), dir_name)) and counter < 10000:
                         counter += 1; dir_name = f"{base_dir}_{counter}"
                     _projects_registry["projects"].append({
                         "id": new_id, "name": proj_name, "dir": dir_name,
@@ -4257,7 +4265,7 @@ def _main_inner(page: ft.Page):
             # Ensure unique directory name
             base_dir = dir_name
             counter = 1
-            while os.path.isdir(os.path.join(get_projects_dir(), dir_name)):
+            while os.path.isdir(os.path.join(get_projects_dir(), dir_name)) and counter < 10000:
                 counter += 1; dir_name = f"{base_dir}_{counter}"
             _projects_registry["projects"].append({
                 "id": new_id, "name": name, "dir": dir_name,
@@ -4320,8 +4328,11 @@ def _main_inner(page: ft.Page):
             activate_project("default", _projects_registry)
             save_projects_registry(_projects_registry)
             # Remove project directory
-            try: shutil.rmtree(proj_dir)
-            except Exception: pass
+            try:
+                shutil.rmtree(proj_dir)
+                _flog.info(f"Project directory deleted: {proj_dir}")
+            except Exception as _rme:
+                _flog.error(f"Project directory deletion failed: {proj_dir}: {_rme}")
             _reload_project_data()
             project_dd.options = _project_dd_options()
             project_dd.value = "default"
@@ -4612,7 +4623,8 @@ def _main_inner(page: ft.Page):
             except Exception:
                 pass
         # Normal exit → PyInstaller atexit cleanup runs → _MEI folder deleted
-        _deadline = threading.Timer(1.0, lambda: os._exit(0))
+        # Deadline timer: os._exit(0) bypasses atexit, but prevents deadlock on hung Selenium threads
+        _deadline = threading.Timer(1.5, lambda: os._exit(0))
         _deadline.daemon = True; _deadline.start()
         sys.exit(0)
 

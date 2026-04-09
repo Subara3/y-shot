@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>y-shot Integration Test Fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #f5f5f5; }
+  h1 { font-size: 18px; }
+  .section { background: #fff; border: 1px solid #ccc; border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+  .section h2 { font-size: 14px; margin: 0 0 8px; color: #333; }
+
+  /* Hidden radio pattern (enquete site style) */
+  .custom-radio input[type="radio"] { display: none; }
+  .custom-radio label {
+    position: relative; padding-left: 28px; cursor: pointer;
+    display: inline-block; margin-right: 16px;
+    line-height: 0; overflow: visible;
+  }
+  .custom-radio label::before {
+    content: ''; position: absolute; left: 0; top: -8px;
+    width: 16px; height: 16px; border: 2px solid #666; border-radius: 50%; background: #fff;
+  }
+  .custom-radio label::after {
+    content: ''; position: absolute; left: 4px; top: -4px;
+    width: 8px; height: 8px; border-radius: 50%; background: transparent;
+  }
+  .custom-radio input[type="radio"]:checked + label::after { background: #4040c0; }
+  .custom-radio label span.label-text { white-space: nowrap; position: relative; top: -4px; }
+
+  /* Hidden checkbox */
+  #hidden-checkbox { display: none; }
+  #hidden-checkbox-label { cursor: pointer; padding: 6px 12px; background: #ffe0e0; border-radius: 4px; }
+
+  /* Zero-size element */
+  .zero-size-btn { width: 0; height: 0; overflow: hidden; border: none; padding: 0; }
+
+  /* Div button */
+  .div-button { display: inline-block; padding: 8px 20px; background: #40a040; color: #fff; border-radius: 4px; cursor: pointer; }
+
+  /* Nested li>span pattern */
+  #nav-list { list-style: none; padding: 0; margin: 0; }
+  #nav-list li { cursor: pointer; background: #e0e0ff; padding: 10px; border-radius: 4px; display: inline-block; margin-right: 8px; }
+  #nav-list li .button { background: #4040c0; color: #fff; padding: 6px 16px; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>y-shot Integration Test Fixture</h1>
+
+<!-- Result display area -->
+<div id="result">初期状態</div>
+
+<!-- Section 1: Text inputs -->
+<div class="section">
+  <h2>Text Inputs</h2>
+  <input type="text" id="text-input" placeholder="テキスト入力">
+  <input type="password" id="password-input" placeholder="パスワード">
+  <input type="email" id="email-input" placeholder="メールアドレス">
+  <textarea id="textarea-input" placeholder="テキストエリア"></textarea>
+</div>
+
+<!-- Section 2: Regular checkboxes -->
+<div class="section">
+  <h2>Checkboxes</h2>
+  <label><input type="checkbox" id="checkbox-1" name="check" value="A" onchange="updateResult('checkbox-1: ' + this.checked)"> チェックA</label>
+  <label><input type="checkbox" id="checkbox-2" name="check" value="B"> チェックB</label>
+</div>
+
+<!-- Section 3: Regular radio buttons -->
+<div class="section">
+  <h2>Radio Buttons</h2>
+  <label><input type="radio" id="radio-1" name="radio-group" value="X" onchange="updateResult('radio: X')"> 選択X</label>
+  <label><input type="radio" id="radio-2" name="radio-group" value="Y" onchange="updateResult('radio: Y')"> 選択Y</label>
+  <label><input type="radio" id="radio-3" name="radio-group" value="Z" onchange="updateResult('radio: Z')"> 選択Z</label>
+</div>
+
+<!-- Section 4: Hidden radio (enquete pattern) -->
+<div class="section">
+  <h2>Hidden Radio (display:none input + label)</h2>
+  <div class="custom-radio">
+    <input type="radio" name="hidden-radio" id="hidden-radio-a" value="A">
+    <label for="hidden-radio-a"><span class="label-text">オプションA</span></label>
+    <input type="radio" name="hidden-radio" id="hidden-radio-b" value="B">
+    <label for="hidden-radio-b"><span class="label-text">オプションB</span></label>
+  </div>
+</div>
+
+<!-- Section 5: Hidden checkbox -->
+<div class="section">
+  <h2>Hidden Checkbox (display:none + label)</h2>
+  <input type="checkbox" id="hidden-checkbox">
+  <label for="hidden-checkbox" id="hidden-checkbox-label">通知を有効にする</label>
+</div>
+
+<!-- Section 6: Select dropdown -->
+<div class="section">
+  <h2>Select Dropdown</h2>
+  <select id="select-input" name="select-test" onchange="updateResult('select: ' + this.value)">
+    <option value="">選択してください</option>
+    <option value="opt1">オプション1</option>
+    <option value="opt2">オプション2</option>
+    <option value="opt3">オプション3</option>
+  </select>
+</div>
+
+<!-- Section 7: Buttons -->
+<div class="section">
+  <h2>Buttons</h2>
+  <button type="button" id="normal-button" onclick="updateResult('button clicked')">通常ボタン</button>
+  <button type="submit" id="submit-button" onclick="updateResult('submit clicked'); return false;">送信ボタン</button>
+  <div id="div-button" class="div-button" onclick="updateResult('div-button clicked')">Divボタン</div>
+</div>
+
+<!-- Section 8: Links -->
+<div class="section">
+  <h2>Links</h2>
+  <a href="javascript:void(0);" id="link-1" onclick="updateResult('link-1 clicked')">リンク1</a>
+  <a href="#" id="link-2" onclick="updateResult('link-2 clicked'); return false;">リンク2</a>
+</div>
+
+<!-- Section 9: Nested elements (li > span) -->
+<div class="section">
+  <h2>Nested Elements</h2>
+  <ul id="nav-list">
+    <li id="nav-item-1" onclick="updateResult('nav-1 clicked')"><span class="button">ナビ1</span></li>
+    <li id="nav-item-2" onclick="updateResult('nav-2 clicked')"><span class="button" id="nav-span-2">ナビ2</span></li>
+  </ul>
+</div>
+
+<!-- Section 10: Elements with various attributes for selector testing -->
+<div class="section">
+  <h2>Selector Test Elements</h2>
+  <input type="text" id="attr-test" data-testid="my-input" name="attr-name" placeholder="属性テスト">
+  <div class="nested-parent">
+    <div class="nested-child">
+      <span id="deep-nested">深いネスト要素</span>
+    </div>
+  </div>
+  <button type="button" class="btn-primary action-btn" id="multi-class-btn">複数クラスボタン</button>
+</div>
+
+<!-- Section 11: Form -->
+<div class="section">
+  <h2>Form</h2>
+  <form id="test-form" onsubmit="updateResult('form submitted'); return false;">
+    <input type="text" id="form-name" name="name" placeholder="名前">
+    <input type="text" id="form-email-field" name="email" placeholder="メール">
+    <button type="submit" id="form-submit">送信</button>
+  </form>
+</div>
+
+<script>
+  function updateResult(msg) {
+    document.getElementById('result').textContent = msg;
+  }
+
+  // Change event listeners for hidden radio/checkbox
+  document.querySelectorAll('input[name="hidden-radio"]').forEach(function(el) {
+    el.addEventListener('change', function() {
+      updateResult('hidden-radio: ' + this.value);
+    });
+  });
+  document.getElementById('hidden-checkbox').addEventListener('change', function() {
+    updateResult('hidden-checkbox: ' + this.checked);
+  });
+</script>
+</body>
+</html>

@@ -2722,6 +2722,288 @@ def test_csv_edge_cases():
     print("  全てパス\n")
 
 
+# ---------------------------------------------------------------------------
+# Selenium Integration Tests (require Chrome + chromedriver)
+# ---------------------------------------------------------------------------
+
+def _integration_fixture_path():
+    return os.path.abspath(os.path.join(os.path.dirname(__file__) or '.', 'test_integration_fixture.html'))
+
+def _make_headless_driver():
+    from selenium import webdriver
+    opts = webdriver.ChromeOptions()
+    opts.add_argument('--headless=new')
+    opts.add_argument('--disable-search-engine-choice-screen')
+    opts.add_argument('--no-sandbox')
+    return webdriver.Chrome(options=opts)
+
+
+def test_integration_collect_elements():
+    """collect_elements_js on local HTML fixture — verify element count, fields, uniqueness."""
+    print("=== Integration テスト1: collect_elements_js ===")
+    from y_shot import collect_elements_js
+    driver = _make_headless_driver()
+    try:
+        html_path = _integration_fixture_path()
+        driver.get(f'file:///{html_path}')
+
+        elements = collect_elements_js(driver, include_hidden=True)
+        assert isinstance(elements, list), "結果がlistでない"
+        assert len(elements) >= 15, f"要素数が少なすぎる: {len(elements)}"
+        print(f"  [OK] 要素数: {len(elements)}")
+
+        # Every element must have required fields
+        required_fields = {"tag", "selector", "visible", "hint"}
+        for el in elements:
+            missing = required_fields - set(el.keys())
+            assert not missing, f"フィールド不足: {missing} in {el.get('selector','?')}"
+        print("  [OK] 全要素に必須フィールドあり")
+
+        # Selectors should be unique among elements that have non-generic selectors
+        selectors = [el["selector"] for el in elements]
+        specific_selectors = [s for s in selectors if s not in ("input", "label", "a", "button", "select", "textarea", "span", "div", "li")]
+        dupes = [s for s in specific_selectors if specific_selectors.count(s) > 1]
+        assert len(dupes) == 0, f"セレクタ重複: {set(dupes)}"
+        print("  [OK] 固有セレクタに重複なし")
+
+        # Check that specific IDs are captured
+        ids_found = {el["id"] for el in elements if el.get("id")}
+        expected_ids = {"text-input", "checkbox-1", "radio-1", "normal-button", "select-input"}
+        for eid in expected_ids:
+            assert eid in ids_found, f"ID '{eid}' が見つからない"
+        print("  [OK] 主要IDを正しく取得")
+
+        # Hidden radio should appear (include_hidden=True)
+        hidden_radios = [el for el in elements if el.get("id", "").startswith("hidden-radio-")]
+        assert len(hidden_radios) >= 2, f"hidden radio が見つからない: {len(hidden_radios)}"
+        for hr in hidden_radios:
+            assert hr["visible"] is False, f"hidden radio が visible=True: {hr['id']}"
+        print("  [OK] hidden radio を include_hidden=True で取得")
+
+    finally:
+        driver.quit()
+    print("  全てパス\n")
+
+
+def test_integration_click_selenium_fallback():
+    """Click handler: normal click, JS fallback for hidden labels, checkbox/radio toggle."""
+    print("=== Integration テスト2: クリック処理 ===")
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from y_shot import _sel_by
+    driver = _make_headless_driver()
+    try:
+        html_path = _integration_fixture_path()
+        driver.get(f'file:///{html_path}')
+
+        # 1) Normal visible button — Selenium .click() should work
+        btn = driver.find_element(By.ID, "normal-button")
+        btn.click()
+        result_text = driver.find_element(By.ID, "result").text
+        assert result_text == "button clicked", f"ボタンクリック失敗: {result_text}"
+        print("  [OK] 通常ボタン Selenium .click()")
+
+        # 2) Hidden label for radio (zero-height label) — JS fallback
+        label_sel = "label[for='hidden-radio-b']"
+        _el = WebDriverWait(driver, 5).until(EC.presence_of_element_located(_sel_by(label_sel)))
+        driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", _el)
+        try:
+            _el.click()
+        except Exception:
+            driver.execute_script("arguments[0].click();", _el)
+        radio_b = driver.find_element(By.ID, "hidden-radio-b")
+        assert radio_b.is_selected(), "hidden-radio-b が選択されていない"
+        print("  [OK] hidden label クリック → radio選択")
+
+        # 3) Checkbox toggle via click
+        cb = driver.find_element(By.ID, "checkbox-1")
+        assert not cb.is_selected(), "checkbox-1 が初期状態で選択済"
+        cb.click()
+        assert cb.is_selected(), "checkbox-1 がクリック後に未選択"
+        cb.click()
+        assert not cb.is_selected(), "checkbox-1 が2回クリック後に選択済"
+        print("  [OK] チェックボックスのトグル")
+
+        # 4) Radio button selection via click
+        r2 = driver.find_element(By.ID, "radio-2")
+        r2.click()
+        assert r2.is_selected(), "radio-2 が選択されない"
+        r3 = driver.find_element(By.ID, "radio-3")
+        r3.click()
+        assert r3.is_selected(), "radio-3 が選択されない"
+        assert not r2.is_selected(), "radio-2 が選択解除されない"
+        print("  [OK] ラジオボタンの排他選択")
+
+        # 5) Div-based button click
+        div_btn = driver.find_element(By.ID, "div-button")
+        div_btn.click()
+        result_text = driver.find_element(By.ID, "result").text
+        assert result_text == "div-button clicked", f"div-button クリック失敗: {result_text}"
+        print("  [OK] div ボタン クリック")
+
+    finally:
+        driver.quit()
+    print("  全てパス\n")
+
+
+def test_integration_input_and_clear():
+    """Input handling: send_keys, clear, value verification."""
+    print("=== Integration テスト3: 入力とクリア ===")
+    from selenium.webdriver.common.by import By
+    driver = _make_headless_driver()
+    try:
+        html_path = _integration_fixture_path()
+        driver.get(f'file:///{html_path}')
+
+        # Text input
+        text_in = driver.find_element(By.ID, "text-input")
+        text_in.send_keys("テスト文字列ABC")
+        assert text_in.get_attribute("value") == "テスト文字列ABC", "テキスト入力値が不一致"
+        print("  [OK] テキスト入力 send_keys")
+
+        # Clear
+        text_in.clear()
+        assert text_in.get_attribute("value") == "", "クリア後に値が残っている"
+        print("  [OK] テキスト入力 clear")
+
+        # Password input
+        pw_in = driver.find_element(By.ID, "password-input")
+        pw_in.send_keys("secret123")
+        assert pw_in.get_attribute("value") == "secret123", "パスワード入力値が不一致"
+        print("  [OK] パスワード入力")
+
+        # Textarea
+        ta = driver.find_element(By.ID, "textarea-input")
+        ta.send_keys("複数行\nテキスト")
+        assert "複数行" in ta.get_attribute("value"), "テキストエリア入力失敗"
+        print("  [OK] テキストエリア入力")
+
+        # Email input
+        em = driver.find_element(By.ID, "email-input")
+        em.send_keys("test@example.com")
+        assert em.get_attribute("value") == "test@example.com", "メール入力値が不一致"
+        print("  [OK] メール入力")
+
+    finally:
+        driver.quit()
+    print("  全てパス\n")
+
+
+def test_integration_screenshot_modes():
+    """Screenshot capture: fullpage (save_screenshot) and fullshot (CDP)."""
+    print("=== Integration テスト4: スクリーンショット ===")
+    import base64
+    driver = _make_headless_driver()
+    try:
+        html_path = _integration_fixture_path()
+        driver.get(f'file:///{html_path}')
+
+        # fullpage mode — driver.save_screenshot
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fp = os.path.join(tmpdir, "fullpage.png")
+            driver.save_screenshot(fp)
+            assert os.path.isfile(fp), "fullpage PNG が作成されない"
+            assert os.path.getsize(fp) > 100, "fullpage PNG が小さすぎる"
+            print(f"  [OK] fullpage スクリーンショット ({os.path.getsize(fp)} bytes)")
+
+        # fullshot mode — CDP Page.captureScreenshot
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fp2 = os.path.join(tmpdir, "fullshot.png")
+            metrics = driver.execute_cdp_cmd("Page.getLayoutMetrics", {})
+            content_size = metrics.get("contentSize", metrics.get("cssContentSize", {}))
+            width = content_size.get("width", 1280)
+            height = content_size.get("height", 900)
+            driver.execute_cdp_cmd("Emulation.setDeviceMetricsOverride", {
+                "width": int(width), "height": int(height),
+                "deviceScaleFactor": 1, "mobile": False
+            })
+            result = driver.execute_cdp_cmd("Page.captureScreenshot", {
+                "format": "png", "captureBeyondViewport": True
+            })
+            import base64 as b64
+            with open(fp2, "wb") as f:
+                f.write(b64.b64decode(result["data"]))
+            driver.execute_cdp_cmd("Emulation.clearDeviceMetricsOverride", {})
+            assert os.path.isfile(fp2), "fullshot PNG が作成されない"
+            assert os.path.getsize(fp2) > 100, "fullshot PNG が小さすぎる"
+            print(f"  [OK] fullshot CDP スクリーンショット ({os.path.getsize(fp2)} bytes)")
+
+    finally:
+        driver.quit()
+    print("  全てパス\n")
+
+
+def test_integration_sel_by_on_real_dom():
+    """_sel_by selectors work on real DOM: CSS, XPath, attribute selectors."""
+    print("=== Integration テスト5: _sel_by リアルDOM検証 ===")
+    from selenium.webdriver.common.by import By
+    from y_shot import _sel_by
+    driver = _make_headless_driver()
+    try:
+        html_path = _integration_fixture_path()
+        driver.get(f'file:///{html_path}')
+
+        # CSS ID selector
+        by, sel = _sel_by("#text-input")
+        assert by == By.CSS_SELECTOR
+        el = driver.find_element(by, sel)
+        assert el.get_attribute("id") == "text-input"
+        print("  [OK] CSS ID セレクタ (#text-input)")
+
+        # CSS class selector
+        by, sel = _sel_by(".div-button")
+        assert by == By.CSS_SELECTOR
+        el = driver.find_element(by, sel)
+        assert el.text == "Divボタン"
+        print("  [OK] CSS クラスセレクタ (.div-button)")
+
+        # CSS attribute selector
+        by, sel = _sel_by("[data-testid='my-input']")
+        assert by == By.CSS_SELECTOR
+        el = driver.find_element(by, sel)
+        assert el.get_attribute("name") == "attr-name"
+        print("  [OK] CSS 属性セレクタ ([data-testid])")
+
+        # XPath selector
+        by, sel = _sel_by("//button[@id='normal-button']")
+        assert by == By.XPATH
+        el = driver.find_element(by, sel)
+        assert el.text == "通常ボタン"
+        print("  [OK] XPath セレクタ (//button[@id])")
+
+        # XPath with parentheses
+        by, sel = _sel_by("(//input[@type='radio'])[2]")
+        assert by == By.XPATH
+        el = driver.find_element(by, sel)
+        assert el.get_attribute("id") == "radio-2"
+        print("  [OK] XPath 括弧セレクタ ((//input)[N])")
+
+        # CSS compound selector
+        by, sel = _sel_by("input[type='email']#email-input")
+        assert by == By.CSS_SELECTOR
+        el = driver.find_element(by, sel)
+        assert el.get_attribute("placeholder") == "メールアドレス"
+        print("  [OK] CSS 複合セレクタ")
+
+        # Verify _sel_by results can locate elements via find_element
+        test_sels = [
+            "#select-input",
+            "#textarea-input",
+            "//label[@for='hidden-radio-a']",
+            "#nav-item-1",
+        ]
+        for s in test_sels:
+            by, val = _sel_by(s)
+            el = driver.find_element(by, val)
+            assert el is not None, f"セレクタ '{s}' で要素が見つからない"
+        print(f"  [OK] 追加セレクタ {len(test_sels)}件 全て検出")
+
+    finally:
+        driver.quit()
+    print("  全てパス\n")
+
+
 if __name__ == "__main__":
     print("y-shot テスト開始 (v2.0)\n")
 

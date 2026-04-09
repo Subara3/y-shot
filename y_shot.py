@@ -34,6 +34,7 @@ APP_AUTHOR = "Yuri Norimatsu"
 LOG_MAX_LINES = 400
 SAVE_DELAY_SEC = 2.0
 BANK_MAX_URLS = 50
+MAX_PAGE_HEIGHT = 16384  # Chrome screenshots max height (px)
 WIN_CREATE_NO_WINDOW = 0x08000000  # subprocess: hide console window on Windows
 
 # ── File logger (log/YYYYMMDD.log, append) ──
@@ -1076,6 +1077,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         from selenium.webdriver.support import expected_conditions as EC
         from selenium.webdriver.support.ui import Select as SeleniumSelect
         from selenium.webdriver.common.keys import Keys
+        from selenium.common.exceptions import StaleElementReferenceException as _StaleRef
     except ImportError:
         log_cb("[ERROR] selenium が見つかりません。"); done_cb(); return
     import base64 as _b64
@@ -1101,7 +1103,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
         driver = webdriver.Chrome(options=opts); driver.set_window_size(1280, 900)
         # Stealth: remove navigator.webdriver flag
         try: driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": "Object.defineProperty(navigator,'webdriver',{get:()=>false});"})
-        except Exception: pass
+        except Exception as _cdp_err: _flog.warning(f"CDP stealth setup failed: {_cdp_err}")
         if driver_ref is not None: driver_ref.append(driver)
         ba = config.get("basic_auth_user","").strip()
         if ba:
@@ -1183,6 +1185,8 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
             steps = tc.get("steps", [])
             pat_name = tc.get("pattern")
             pats = pattern_sets.get(pat_name, []) if pat_name else []
+            if pat_name and not pats:
+                log_cb(f"[WARN] パターンセット「{pat_name}」が見つかりません → single実行")
             if not pats:
                 pats = [{"label": "single", "value": ""}]
             tc_pid = tc.get("page_id")
@@ -1238,7 +1242,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                         # Return to default content if previous step was in iframe
                         # (skip for alert steps — switch_to.default_content() auto-dismisses confirm dialogs)
                         try: driver.switch_to.default_content()
-                        except Exception: pass
+                        except Exception as _dce: _flog.warning(f"default_content switch failed: {_dce}")
                     # 空セレクタの事前チェック（セレクタ必須のステップ）
                     _needs_sel = st in ("入力", "クリック", "ホバー", "選択", "要素待機")
                     if _needs_sel and not step.get("selector", "").strip():
@@ -1282,6 +1286,10 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                             _el = WebDriverWait(driver,10).until(EC.presence_of_element_located(_sel_by(sel)))
                             driver.execute_script("arguments[0].scrollIntoView({block:'center',behavior:'instant'});", _el)
                             try:
+                                _el.click()
+                            except _StaleRef:
+                                # stale element: 要素を再取得して再試行（1回のみ）
+                                _el = driver.find_element(*_sel_by(sel))
                                 _el.click()
                             except Exception:
                                 driver.execute_script("arguments[0].click();", _el)
@@ -1448,7 +1456,7 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                     if total_h and view_h:
                                         for pos in range(0, int(total_h), max(int(view_h * 0.8), 100)):
                                             driver.execute_script(f"window.scrollTo(0,{pos});")
-                                            time.sleep(0.1)
+                                            time.sleep(0.05)
                                     if n_loaded:
                                         log_cb(f"  S{si} 遅延画像 {n_loaded}件 先読み")
                                 except Exception:
@@ -1460,9 +1468,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                     cs = metrics.get('cssContentSize') or metrics.get('contentSize', {})
                                     cw = cs.get('width', 1280)
                                     ch = cs.get('height', 900)
-                                    if ch > 16384:
-                                        log_cb(f"  S{si} [WARN] ページ高さ{ch}px > 上限16384px。画像が切れます")
-                                        ch = 16384
+                                    if ch > MAX_PAGE_HEIGHT:
+                                        log_cb(f"  S{si} [WARN] ページ高さ{ch}px > 上限{MAX_PAGE_HEIGHT:,}px。画像が切れます")
+                                        ch = MAX_PAGE_HEIGHT
                                     _flog.debug(f"fullshot: {cw}x{ch} (keys={list(metrics.keys())})")
                                     result = driver.execute_cdp_cmd('Page.captureScreenshot', {
                                         'format': 'png',
@@ -1477,9 +1485,9 @@ def run_all_tests(config, test_cases, pattern_sets, log_cb, done_cb, stop_event=
                                     try:
                                         total_h = driver.execute_script("return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);")
                                         total_w = driver.execute_script("return Math.max(document.body.scrollWidth, document.documentElement.scrollWidth);")
-                                        actual_h = min(total_h, 16384)
-                                        if total_h > 16384:
-                                            log_cb(f"  S{si} [WARN] ページ高さ{total_h}px > 上限16384px。画像が切れます")
+                                        actual_h = min(total_h, MAX_PAGE_HEIGHT)
+                                        if total_h > MAX_PAGE_HEIGHT:
+                                            log_cb(f"  S{si} [WARN] ページ高さ{total_h}px > 上限{MAX_PAGE_HEIGHT:,}px。画像が切れます")
                                         driver.set_window_size(max(total_w, 1280), actual_h)
                                         time.sleep(0.5)
                                         driver.save_screenshot(fp)
@@ -1573,7 +1581,7 @@ return result;
                                     metrics = driver.execute_cdp_cmd('Page.getLayoutMetrics', {})
                                     cs = metrics.get('cssContentSize') or metrics.get('contentSize', {})
                                     cw, ch = cs.get('width', 1280), cs.get('height', 900)
-                                    if ch > 16384: ch = 16384
+                                    if ch > MAX_PAGE_HEIGHT: ch = MAX_PAGE_HEIGHT
                                     result = driver.execute_cdp_cmd('Page.captureScreenshot', {
                                         'format': 'png', 'captureBeyondViewport': True,
                                         'clip': {'x': 0, 'y': 0, 'width': cw, 'height': ch, 'scale': 1}
@@ -1662,7 +1670,7 @@ return result;
                                     metrics = driver.execute_cdp_cmd('Page.getLayoutMetrics', {})
                                     cs = metrics.get('cssContentSize') or metrics.get('contentSize', {})
                                     cw, ch = cs.get('width', 1280), cs.get('height', 900)
-                                    if ch > 16384: ch = 16384
+                                    if ch > MAX_PAGE_HEIGHT: ch = MAX_PAGE_HEIGHT
                                     result = driver.execute_cdp_cmd('Page.captureScreenshot', {
                                         'format': 'png', 'captureBeyondViewport': True,
                                         'clip': {'x': 0, 'y': 0, 'width': cw, 'height': ch, 'scale': 1}
@@ -1795,7 +1803,7 @@ return r;""", tgt_el, vtype == "state")
                                         metrics = driver.execute_cdp_cmd('Page.getLayoutMetrics', {})
                                         cs_m = metrics.get('cssContentSize') or metrics.get('contentSize', {})
                                         cw, ch = cs_m.get('width', 1280), cs_m.get('height', 900)
-                                        if ch > 16384: ch = 16384
+                                        if ch > MAX_PAGE_HEIGHT: ch = MAX_PAGE_HEIGHT
                                         result = driver.execute_cdp_cmd('Page.captureScreenshot', {'format':'png','captureBeyondViewport':True,'clip':{'x':0,'y':0,'width':cw,'height':ch,'scale':1}})
                                         with open(fp, 'wb') as _f: _f.write(_b64.b64decode(result['data']))
                                     except Exception: driver.save_screenshot(fp)
@@ -2149,13 +2157,15 @@ def _main_inner(page: ft.Page):
     _save_lock = threading.Lock()
     def schedule_save():
         if not _init_done[0]: return
-        if _save_timer[0]: _save_timer[0].cancel()
-        def do_save():
-            with _save_lock:
-                try: save_all()
-                except Exception as x: _flog.error(f"auto-save failed: {x}")
-        _save_timer[0] = threading.Timer(SAVE_DELAY_SEC, do_save)
-        _save_timer[0].daemon = True; _save_timer[0].start()
+        with _save_lock:
+            if _save_timer[0]: _save_timer[0].cancel()
+            def do_save():
+                with _save_lock:
+                    if not _init_done[0]: return
+                    try: save_all()
+                    except Exception as x: _flog.error(f"auto-save failed: {x}")
+            _save_timer[0] = threading.Timer(SAVE_DELAY_SEC, do_save)
+            _save_timer[0].daemon = True; _save_timer[0].start()
 
     def log(msg):
         _flog.info(msg)
@@ -2167,13 +2177,16 @@ def _main_inner(page: ft.Page):
         if len(log_list.controls) > LOG_MAX_LINES: log_list.controls.pop(0)
         try:
             page.update()
-            time.sleep(0.02)  # UIスレッドへの反映を待つ
+            time.sleep(0.01)  # UIスレッドへの反映を待つ
         except Exception: pass
     def _log_error(context, exc):
         _flog.error(f"{context}: {exc}\n{traceback.format_exc()}")
         log(f"[ERROR] {context}: {exc}")
     def _guard_running():
-        """Return True and show snack if tests are running (blocks editing)."""
+        """Return True and show snack if tests are running (blocks editing).
+        Note: state["running"] is set in run_thread (worker) and read here (UI thread).
+        Flet event handlers run on the UI thread, so this check is effectively single-threaded.
+        The flag is set before run_thread starts and cleared in done_cb (also UI thread)."""
         if state["running"]:
             snack("テスト実行中は編集できません", ft.Colors.ORANGE_700)
             return True
@@ -2541,8 +2554,8 @@ def _main_inner(page: ft.Page):
                 row = ctrl.content  # Row
                 name_txt = row.controls[2].controls[0]  # [0]=DragHandle, [1]=Text(num), [2]=Column > [0]=Text(name)
                 name_txt.color = ft.Colors.BLUE_800 if is_sel else ft.Colors.BLACK
-            except (AttributeError, IndexError):
-                pass
+            except (AttributeError, IndexError) as _hle:
+                _flog.warning(f"_update_test_highlight: control structure mismatch: {_hle}")
 
     def select_test(idx):
         if idx < 0 or idx >= len(state["tests"]): return
@@ -3819,6 +3832,8 @@ def _main_inner(page: ft.Page):
         open_dlg(dlg)
 
     # ── Settings / Info / Run ──
+    # NOTE: Basic認証情報は y_shot_config.ini に平文保存される。
+    # 暗号化は将来課題。config.iniへのアクセス制御で対処すること。
     def show_settings(e):
         c = state["config"]
         auf = ft.TextField(label="Basic認証ID", value=c.get("basic_auth_user",""), width=210)
@@ -3890,6 +3905,8 @@ def _main_inner(page: ft.Page):
         )
         if not picked: return
         fp = picked[0].path
+        if not fp.lower().endswith((".json", ".yshot.json")):
+            snack("JSONファイルを選択してください", ft.Colors.RED_700); return
 
         # Read and validate
         try:
